@@ -1,0 +1,78 @@
+# Release workflow
+#
+# Triggered by pushing a version tag: git tag v0.2.0 && git push --tags
+#
+# Steps:
+#   1. Build the Tauri app for Windows (x86-64)
+#   2. Create a draft GitHub Release with the MSI and NSIS installers attached
+#
+# Secrets required: none (uses the automatic GITHUB_TOKEN)
+# Optional:  TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#   → set these repo secrets to enable update-signature files in the release
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  release-windows:
+    name: Build & release (Windows x64)
+    runs-on: windows-latest
+    permissions:
+      contents: write   # needed to create the GitHub Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Node.js ──────────────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      # ── Rust ─────────────────────────────────────────────────────────────
+      - name: Setup Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      # ── Dependencies ─────────────────────────────────────────────────────
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # ── Build + Release ───────────────────────────────────────────────────
+      # tauri-action runs `beforeBuildCommand` (npm run build) automatically,
+      # then `cargo tauri build`, then uploads artifacts to a GitHub Release.
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Remove the lines below if you don't want update signatures:
+          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'wmux ${{ github.ref_name }}'
+          releaseBody: |
+            ## wmux ${{ github.ref_name }}
+
+            Windows terminal multiplexer — GPU-accelerated, Tauri v2 + ConPTY.
+
+            ### Installing
+            Download and run the `.msi` installer below.
+
+            > **Requirements:** Windows 10 1809+ (WebView2 is pre-installed on
+            > Windows 11; the installer will prompt to install it on older systems).
+          releaseDraft: true      # publish as draft so you can review before going live
+          prerelease: ${{ contains(github.ref_name, '-') }}  # e.g. v1.0.0-beta.1
+          includeUpdaterJson: false

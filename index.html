@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>wmux</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Left sidebar: vertical tab bar -->
+      <aside id="sidebar">
+        <!-- Workspace switcher -->
+        <div id="workspace-bar">
+          <button id="btn-prev-ws" title="Previous workspace (Ctrl+Alt+[)" disabled>&#x2039;</button>
+          <span id="ws-name-label" title="Double-click to rename workspace">Workspace 1</span>
+          <button id="btn-pin-ws" title="Pin workspace">&#9734;</button>
+          <button id="btn-next-ws" title="Next workspace (Ctrl+Alt+])" disabled>&#x203a;</button>
+          <button id="btn-new-ws" title="New workspace (Ctrl+Alt+N)">&#xff0b;</button>
+        </div>
+        <div id="tab-list"></div>
+        <div id="new-tab-row">
+          <button id="btn-new-tab" title="New local terminal (Ctrl+Shift+T)">＋</button>
+          <button id="btn-new-tab-more" title="SSH / WSL terminal">▾</button>
+        </div>
+        <div id="sidebar-footer">
+          <button id="btn-settings" title="Settings (Ctrl+,)">&#x2699;</button>
+        </div>
+      </aside>
+
+      <!-- Right content: terminal pane -->
+      <main id="content">
+        <div id="terminal-container"></div>
+        <div id="empty-state">
+          <p>Press <kbd>Ctrl+Shift+T</kbd> or click <strong>＋</strong> to open a terminal.</p>
+          <p class="empty-hint">Splits: <kbd>Ctrl+Shift+\</kbd>&nbsp;right &nbsp;·&nbsp; <kbd>Ctrl+Shift+−</kbd>&nbsp;down</p>
+          <p class="empty-hint">Double-click a tab name to rename it</p>
+        </div>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

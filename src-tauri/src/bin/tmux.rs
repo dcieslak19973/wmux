@@ -1026,9 +1026,9 @@ fn send_ipc(cmd_json: &str) -> Result<String, Box<dyn std::error::Error>> {
 mod tests {
     use super::{collect_source_commands, parse_capture_pane, parse_display_message, parse_kill_pane, parse_kill_session, parse_list_panes, parse_list_windows, parse_new_session, parse_new_window, parse_select_pane, parse_send_keys, parse_set_option, parse_split_window, parse_switch_session, parse_wait_for, render_tmux_format, split_source_commands, strip_inline_comment, tokenize_tmux_line, ParsedCommand, ResponseMode, ListKind, translate_keys};
 
-    const CLAUDE_BOOTSTRAP: &str = include_str!("fixtures/claude-code-bootstrap.tmux");
-    const CODEX_BOOTSTRAP: &str = include_str!("fixtures/codex-bootstrap.tmux");
-    const MIXED_AGENT_BOOTSTRAP: &str = include_str!("fixtures/mixed-agent-bootstrap.tmux");
+    const CLAUDE_BOOTSTRAP: &str = include_str!("../../tests/fixtures/claude-code-bootstrap.tmux");
+    const CODEX_BOOTSTRAP: &str = include_str!("../../tests/fixtures/codex-bootstrap.tmux");
+    const MIXED_AGENT_BOOTSTRAP: &str = include_str!("../../tests/fixtures/mixed-agent-bootstrap.tmux");
 
     fn parse_fixture_command(tokens: &[String]) -> Option<serde_json::Value> {
         let sub = tokens.first()?.as_str();

@@ -84,13 +84,13 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
-          $portableDir = "src-tauri/target/release/portable"
-          $zipPath = "src-tauri/target/release/bundle/portable/wmux_${version}_x64_portable.zip"
+          $portableDir = "target/release/portable"
+          $zipPath = "target/release/bundle/portable/wmux_${version}_x64_portable.zip"
 
           New-Item -ItemType Directory -Force $portableDir | Out-Null
           New-Item -ItemType Directory -Force (Split-Path $zipPath) | Out-Null
 
-          Copy-Item "src-tauri/target/release/wmux.exe" "$portableDir/wmux.exe" -Force
+          Copy-Item "target/release/wmux.exe" "$portableDir/wmux.exe" -Force
           Copy-Item "README.md" "$portableDir/README.md" -Force
           if (Test-Path "LICENSE") {
             Copy-Item "LICENSE" "$portableDir/LICENSE" -Force
@@ -108,6 +108,6 @@ jobs:
           name: wmux-${{ github.ref_name }}-windows
           if-no-files-found: error
           path: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/portable/*.zip
-            src-tauri/target/release/wmux.exe
+            target/release/bundle/msi/*.msi
+            target/release/bundle/portable/*.zip
+            target/release/wmux.exe

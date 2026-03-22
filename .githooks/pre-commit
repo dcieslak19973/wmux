@@ -1,0 +1,26 @@
+#!/bin/sh
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+if [ "$branch" = "HEAD" ] || [ -z "$branch" ]; then
+  exit 0
+fi
+
+allow_main_commit=$(git config --bool --get wmux.allowMainCommit 2>/dev/null)
+
+if [ "$ALLOW_MAIN_COMMIT" = "1" ] || [ "$allow_main_commit" = "true" ]; then
+  exit 0
+fi
+
+case "$branch" in
+  main|master)
+    echo ""
+    echo "Blocked: direct commits to '$branch' are disabled in this repo."
+    echo "Create a feature branch first, for example: git switch -c my-change"
+    echo "If you truly need to bypass this guard, rerun with ALLOW_MAIN_COMMIT=1."
+    echo ""
+    exit 1
+    ;;
+esac
+
+exit 0

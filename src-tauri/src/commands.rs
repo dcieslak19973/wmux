@@ -24,6 +24,22 @@ pub struct CreateSessionResult {
     pub label: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BrowserGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CreateBrowserWindowRequest {
+    pub window_label: String,
+    pub label: String,
+    pub url: String,
+    pub geometry: BrowserGeometry,
+}
+
 /// Create a new terminal session for the given `target`.
 /// Returns the session ID and a human-readable tab label.
 #[tauri::command]
@@ -304,29 +320,20 @@ fn uuid_short() -> String {
 
 /// Create a borderless browser WebviewWindow positioned at the given screen coords.
 #[tauri::command]
-pub async fn create_browser_window(
-    app: AppHandle,
-    window_label: String,
-    label: String,
-    url: String,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-) -> Result<(), String> {
+pub async fn create_browser_window(app: AppHandle, request: CreateBrowserWindowRequest) -> Result<(), String> {
     let window = app
-        .get_window(&window_label)
-        .ok_or_else(|| format!("window '{window_label}' not found"))?;
-    let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
+        .get_window(&request.window_label)
+        .ok_or_else(|| format!("window '{}' not found", request.window_label))?;
+    let parsed = url::Url::parse(&request.url).map_err(|e| e.to_string())?;
     let builder = tauri::webview::WebviewBuilder::new(
-        &label,
+        &request.label,
         tauri::WebviewUrl::External(parsed),
     );
     window
         .add_child(
             builder,
-            tauri::LogicalPosition::new(x as f64, y as f64),
-            tauri::LogicalSize::new(width as f64, height as f64),
+            tauri::LogicalPosition::new(request.geometry.x as f64, request.geometry.y as f64),
+            tauri::LogicalSize::new(request.geometry.width as f64, request.geometry.height as f64),
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -386,7 +393,7 @@ pub async fn close_browser_window(app: AppHandle, label: String) -> Result<(), S
 /// Minimal base64 encoder (avoids pulling in a full crate).
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
         let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };

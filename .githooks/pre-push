@@ -1,0 +1,39 @@
+#!/bin/sh
+
+current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+if [ "$current_branch" = "HEAD" ] || [ -z "$current_branch" ]; then
+  exit 0
+fi
+
+allow_main_commit=$(git config --bool --get wmux.allowMainCommit 2>/dev/null)
+
+if [ "$ALLOW_MAIN_COMMIT" = "1" ] || [ "$allow_main_commit" = "true" ]; then
+  exit 0
+fi
+
+blocked_ref=""
+
+while read local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master)
+      blocked_ref="$remote_ref"
+      break
+      ;;
+  esac
+done
+
+case "$current_branch" in
+  main|master)
+    if [ -n "$blocked_ref" ]; then
+      echo ""
+      echo "Blocked: direct pushes from '$current_branch' to '${blocked_ref#refs/heads/}' are disabled in this repo."
+      echo "Create a feature branch first, for example: git switch -c my-change"
+      echo "If you truly need to bypass this guard, rerun with ALLOW_MAIN_COMMIT=1."
+      echo ""
+      exit 1
+    fi
+    ;;
+esac
+
+exit 0

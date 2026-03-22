@@ -20,7 +20,6 @@
 ///   {"ok":true, "output":"..."}
 ///   {"ok":true, "sessions":["main","other"]}
 ///   {"ok":false, "error":"session not found"}
-
 use crate::SessionManager;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

@@ -1926,13 +1926,17 @@ async function createBrowserLeaf(tabId, mountEl, initialState = {}) {
         const rect = browserEl.getBoundingClientRect();
         const barH = 36;
         await invoke('create_browser_window', {
-          windowLabel: getCurrentWindow().label,
-          label,
-          url: full,
-          x: Math.round(rect.left),
-          y: Math.round(rect.top + barH),
-          width: Math.max(1, Math.round(rect.width)),
-          height: Math.max(1, Math.round(rect.height - barH)),
+          request: {
+            windowLabel: getCurrentWindow().label,
+            label,
+            url: full,
+            geometry: {
+              x: Math.round(rect.left),
+              y: Math.round(rect.top + barH),
+              width: Math.max(1, Math.round(rect.width)),
+              height: Math.max(1, Math.round(rect.height - barH)),
+            },
+          },
         });
         browserState.created = true;
         placeholderEl?.remove();

@@ -5,7 +5,6 @@
 ///   OSC 9   ; <message>         BEL/ST  — ConEmu / cmux-style bell notification
 ///   OSC 99  ; <title> ; <body>  BEL/ST  — Windows NotificationCenter style
 ///   OSC 777 ; notify ; <title> ; <body>  BEL/ST  — libnotify / iTerm2 style
-
 use serde::Serialize;
 
 /// All events that can be parsed from OSC terminal sequences.

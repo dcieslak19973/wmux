@@ -263,7 +263,7 @@ unsafe fn create_pipe() -> Result<(OwnedHandle, OwnedHandle)> {
 ///
 /// Format: `KEY=VALUE\0 KEY=VALUE\0 \0` (double-null terminated), UTF-16LE.
 fn build_env_block(overrides: &[(&str, &str)]) -> Vec<u16> {
-    use std::collections::HashMap;
+    use std::collections::{hash_map::Entry, HashMap};
 
     // Collect current environment into an ordered map (case-insensitive keys
     // on Windows — we preserve the original casing of the first occurrence).
@@ -272,19 +272,24 @@ fn build_env_block(overrides: &[(&str, &str)]) -> Vec<u16> {
 
     for (key, val) in std::env::vars() {
         let upper = key.to_uppercase();
-        if !env.contains_key(&upper) {
-            order.push(upper.clone());
-            env.insert(upper, (key, val));
+        match env.entry(upper.clone()) {
+            Entry::Vacant(entry) => {
+                order.push(upper);
+                entry.insert((key, val));
+            }
+            Entry::Occupied(_) => {}
         }
     }
 
     // Apply overrides (add or replace)
     for &(k, v) in overrides {
         let upper = k.to_uppercase();
-        if !env.contains_key(&upper) {
-            order.push(upper.clone());
+        if let Entry::Vacant(entry) = env.entry(upper.clone()) {
+            order.push(upper);
+            entry.insert((k.to_string(), v.to_string()));
+        } else {
+            env.insert(upper, (k.to_string(), v.to_string()));
         }
-        env.insert(upper, (k.to_string(), v.to_string()));
     }
 
     // Encode as block of null-terminated UTF-16 strings, double-null at end

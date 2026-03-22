@@ -259,6 +259,12 @@ impl SessionManager {
     }
 }
 
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── WSL distro enumeration ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -342,7 +348,7 @@ fn decode_utf16le(raw: &[u8]) -> String {
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .collect();
 
-    String::from_utf16_lossy(&units).into()
+    String::from_utf16_lossy(&units)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

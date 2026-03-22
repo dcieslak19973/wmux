@@ -5,7 +5,6 @@
 ///
 /// This mirrors VS Code's "local port forwarding" / "OAuth redirect" detection
 /// but runs entirely locally — no SSH tunnel needed since wmux is native.
-
 /// Strip ANSI/VT escape sequences from a byte slice.
 /// Handles CSI (`ESC [`), OSC (`ESC ]`), and 2-char sequences.
 /// Made `pub` so other modules (e.g. session_manager) can use it for capture-pane.

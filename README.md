@@ -51,6 +51,35 @@ cargo tauri dev
 
 > On first run Cargo downloads ~200 crates — subsequent builds are incremental.
 
+## Git hooks
+
+This repo ships `pre-commit` and `pre-push` hooks that block direct commits and pushes to `main` and `master`.
+
+To enable the checked-in hooks for this clone:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+The guard is local to your clone, so if you want server-side enforcement too, enable GitHub branch protection on `main`.
+
+For a true one-off bypass, prefer a per-command Git config flag:
+
+```powershell
+git -c wmux.allowMainCommit=true commit -m "..."
+git -c wmux.allowMainCommit=true push origin HEAD
+```
+
+The `ALLOW_MAIN_COMMIT=1` environment-variable bypass is still accepted by the hooks if you prefer it.
+
+For example:
+
+```powershell
+$env:ALLOW_MAIN_COMMIT = "1"
+git commit -m "..."
+Remove-Item Env:ALLOW_MAIN_COMMIT
+```
+
 ## Release build
 
 ```powershell

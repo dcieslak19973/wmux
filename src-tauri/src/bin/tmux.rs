@@ -1,18 +1,18 @@
-/// wmux `tmux` shim — a drop-in `tmux.exe` replacement that routes commands
-/// to the running wmux process via the named pipe `\\.\pipe\wmux-ipc`.
-///
-/// Place this binary in a directory that appears on PATH *before* any real
-/// `tmux` installation.  Clients such as Claude Code that detect `tmux` and
-/// use it to manage terminal sessions will transparently drive wmux panes.
-///
-/// Supported tmux commands:
-///   new-session   [-d] [-s name] [-x cols] [-y rows]
-///   send-keys     -t name [keys...] [Enter|Space|Escape|Tab|BSpace|C-c|C-d|C-z]
-///   capture-pane  [-p] -t name
-///   list-sessions
-///   kill-session  -t name
-///   has-session   -t name        (exit 0 = exists, exit 1 = not found)
-///   new-window    -t name        (treated as new-session with same name)
+//! wmux `tmux` shim — a drop-in `tmux.exe` replacement that routes commands
+//! to the running wmux process via the named pipe `\\.\pipe\wmux-ipc`.
+//!
+//! Place this binary in a directory that appears on PATH *before* any real
+//! `tmux` installation.  Clients such as Claude Code that detect `tmux` and
+//! use it to manage terminal sessions will transparently drive wmux panes.
+//!
+//! Supported tmux commands:
+//!   new-session   [-d] [-s name] [-x cols] [-y rows]
+//!   send-keys     -t name [keys...] [Enter|Space|Escape|Tab|BSpace|C-c|C-d|C-z]
+//!   capture-pane  [-p] -t name
+//!   list-sessions
+//!   kill-session  -t name
+//!   has-session   -t name        (exit 0 = exists, exit 1 = not found)
+//!   new-window    -t name        (treated as new-session with same name)
 
 use std::io::{BufRead, BufReader, Write};
 

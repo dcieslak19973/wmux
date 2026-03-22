@@ -139,6 +139,7 @@ wmux/
 ## Current features
 
 - Local PowerShell or cmd tabs, WSL tabs, and SSH tabs from the same launcher.
+- Remote tmux tabs that SSH to a host and, from the same SSH connection form, optionally attach to or create a named tmux session.
 - Multiple named workspaces with pinning, rename, move-tab-between-workspaces, and per-workspace active tab restore.
 - Split-pane layouts with terminal, browser, and markdown surfaces in the same tab.
 - Browser panes backed by separate WebView2 windows, including restored URL history and back/forward state.
@@ -155,10 +156,13 @@ wmux/
 
 - **ConPTY session lifecycle**: `create_session` → spawns shell via `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` → background thread reads output pipe → broadcasts via `tokio::broadcast` → Tauri emits `terminal-output-{id}` events to WebView.
 - **Workspace model**: The frontend keeps workspace, tab, pane, browser, and markdown state in memory and serializes that graph to JSON with debounced save-on-change plus visibility/close fallback for restore on the next launch.
+- **Remote tmux model**: The new-connection popover uses one SSH form with optional tmux fields (`Use tmux`, `Session mode`, `Session name`). A remote tmux tab stores SSH destination plus tmux session intent and reconnects to that session on restore; wmux does not mirror remote tmux pane topology into native wmux terminal splits yet.
 - **Notifications**: OSC 9, 99, and 777 payloads are parsed into per-tab notifications, unread counts, and sidebar ring state.
 - **Embedded browser surfaces**: Browser panes are coordinated through Tauri commands that create and position sibling WebView2 windows so they behave like split panes inside the main layout.
 - **Resize**: A `ResizeObserver` on each terminal pane calls `fitAddon.fit()` then `resize_session` Tauri command → `ResizePseudoConsole`.
 - **Automation surface**: The frontend exposes a `window.wmux` control API, the backend bridges those requests over a named pipe at `\\.\pipe\wmux-ipc`, and the `tmux.exe` shim maps a practical agent-oriented tmux subset onto that API.
+
+For remote tmux specifically, the current contract is one wmux terminal tab equals one remote tmux session. Use tmux itself for remote terminal splits/windows inside that session; wmux browser and markdown splits can still sit alongside the remote terminal surface.
 
 ## Roadmap
 

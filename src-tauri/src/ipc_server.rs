@@ -844,6 +844,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_tab_with_remote_tmux_target() {
+        let cmd = serde_json::from_str::<IpcCmd>(
+            r#"{"cmd":"create-tab","workspace_id":"ws-1","target":{"type":"remote_tmux","host":"example.com","user":"dan","port":22,"session_name":"build"}}"#,
+        )
+        .expect("create-tab remote_tmux command should parse");
+
+        match cmd {
+            IpcCmd::CreateTab {
+                workspace_id,
+                target: Some(crate::ShellTarget::RemoteTmux { host, user, port, identity_file, session_name, .. }),
+            } => {
+                assert_eq!(workspace_id.as_deref(), Some("ws-1"));
+                assert_eq!(host, "example.com");
+                assert_eq!(user.as_deref(), Some("dan"));
+                assert_eq!(port, Some(22));
+                assert_eq!(identity_file, None);
+                assert_eq!(session_name, "build");
+            }
+            _ => panic!("expected create-tab remote_tmux command"),
+        }
+    }
+
+    #[test]
     fn parses_list_tabs_without_workspace() {
         let cmd = serde_json::from_str::<IpcCmd>(r#"{"cmd":"list-tabs"}"#)
             .expect("list-tabs command should parse");

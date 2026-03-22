@@ -22,7 +22,7 @@ export function createPaneAuxRuntime({
   loadSettings,
   saveSettings,
 }) {
-  async function updateTabCwd(tabId, cwd) {
+  async function updateTabCwd(tabId, cwd, options = {}) {
     const tab = tabs.get(tabId);
     if (!tab) return;
     tab.cwd = cwd;
@@ -30,14 +30,17 @@ export function createPaneAuxRuntime({
     const short = parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : (parts.join('/') || cwd);
     const el = tab.tabEl.querySelector('.tab-cwd');
     if (el) el.textContent = short;
-    let gitContext = null;
-    try {
-      gitContext = await invoke('get_git_context', { cwd });
-      const branch = gitContext?.branch ?? '';
-      tab.gitBranch = branch;
-      const bEl = tab.tabEl.querySelector('.tab-branch');
-      if (bEl) bEl.textContent = branch ? `⎋ ${branch}` : '';
-    } catch {}
+    let gitContext = options.gitContext ?? null;
+    let branch = options.gitBranch ?? '';
+    if (!options.skipLocalGit) {
+      try {
+        gitContext = await invoke('get_git_context', { cwd });
+        branch = gitContext?.branch ?? '';
+      } catch {}
+    }
+    tab.gitBranch = branch;
+    const bEl = tab.tabEl.querySelector('.tab-branch');
+    if (bEl) bEl.textContent = branch ? `⎋ ${branch}` : '';
     return { shortCwd: short, gitContext };
   }
 

@@ -23,6 +23,9 @@ pub fn run() {
         .manage(control_bridge)
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
+            commands::probe_remote_tmux_metadata,
+            commands::inspect_remote_tmux_state,
+            commands::manage_remote_tmux,
             commands::close_session,
             commands::write_to_session,
             commands::list_sessions,
@@ -32,6 +35,9 @@ pub fn run() {
             commands::start_session_stream,
             commands::save_layout,
             commands::load_layout,
+            commands::save_session_vault_entry,
+            commands::list_session_vault_entries,
+            commands::read_session_vault_entry,
             commands::capture_session_output,
             commands::capture_session_output_by_id,
             commands::get_git_branch,

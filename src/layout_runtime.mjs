@@ -1,5 +1,32 @@
 import { buildSerializedLayout } from './layout_state.mjs';
 
+export function buildTerminalPaneSnapshot(pane) {
+  if (!pane) return null;
+  return {
+    kind: 'terminal',
+    target: pane.target,
+    cwd: pane.cwd ?? '',
+    previousCwd: pane.previousCwd ?? '',
+    history: Array.isArray(pane.history) ? [...pane.history] : [],
+    screenSnapshot: pane.screenSnapshot ?? '',
+    outputSnapshot: pane.outputSnapshot ?? '',
+    labelOverride: pane.labelOverride ?? null,
+    vaultEntryId: pane.lastSessionVaultEntryId ?? null,
+  };
+}
+
+export function buildRestoredTerminalState(node) {
+  return {
+    cwd: typeof node?.cwd === 'string' ? node.cwd : '',
+    previousCwd: typeof node?.previousCwd === 'string' ? node.previousCwd : '',
+    history: Array.isArray(node?.history) ? [...node.history] : [],
+    screenSnapshot: typeof node?.screenSnapshot === 'string' ? node.screenSnapshot : '',
+    outputSnapshot: typeof node?.outputSnapshot === 'string' ? node.outputSnapshot : '',
+    labelOverride: node?.labelOverride ?? null,
+    vaultEntryId: typeof node?.vaultEntryId === 'string' ? node.vaultEntryId : null,
+  };
+}
+
 export function createLayoutPersistence({
   browserPanes,
   markdownPanes,
@@ -46,11 +73,7 @@ export function createLayoutPersistence({
     }
     if (el.classList.contains('pane-leaf')) {
       const pane = panes.get(el.dataset.sessionId);
-      return pane ? {
-        kind: 'terminal',
-        target: pane.target,
-        labelOverride: pane.labelOverride ?? null,
-      } : null;
+      return buildTerminalPaneSnapshot(pane);
     }
     if (el.classList.contains('pane-split')) {
       const dir = el.classList.contains('pane-split-h') ? 'h' : 'v';
@@ -82,9 +105,7 @@ export function createLayoutPersistence({
   async function restorePaneTree(tabId, node, mountEl) {
     if (!node) return;
     if (node.kind === 'leaf' || node.kind === 'terminal') {
-      await createLeafPane(tabId, node.target, mountEl, {
-        labelOverride: node.labelOverride ?? null,
-      });
+      await createLeafPane(tabId, node.target, mountEl, buildRestoredTerminalState(node));
       return;
     }
     if (node.kind === 'browser') {

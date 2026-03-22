@@ -76,7 +76,7 @@ jobs:
 
             > **Requirements:** Windows 10 1809+ (WebView2 is pre-installed on
             > Windows 11; the installer will prompt to install it on older systems).
-          releaseDraft: true      # publish as draft so you can review before going live
+          releaseDraft: false     # publish automatically when the tag workflow succeeds
           prerelease: ${{ contains(github.ref_name, '-') }}  # e.g. v1.0.0-beta.1
           includeUpdaterJson: false
 

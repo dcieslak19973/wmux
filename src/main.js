@@ -19,6 +19,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { ImageAddon } from '@xterm/addon-image';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js';
 import { marked } from 'marked';
@@ -37,6 +38,24 @@ import {
   DEFAULT_WORKSPACE_THEME_ID,
   WORKSPACE_THEMES,
 } from './workspace_state.mjs';
+import {
+  buildConnectionTargetFromFields,
+  defaultTargetLabel,
+  getTargetKind,
+  normalizeSshTarget,
+  REMOTE_TMUX_SESSION_MODES,
+  sshTargetDetailLabel,
+  sshTargetDisplayName,
+  sshTargetsEqual,
+} from './connection_targets.mjs';
+import {
+  inferCwdFromTerminalTranscript,
+  inferRecentCwdsFromTerminalTranscript,
+  normalizeHistoryEntry,
+  normalizeTerminalTranscript,
+  sanitizeCwdForTarget,
+  stripTerminalStartupResetSequences,
+} from './terminal_restore.mjs';
 import 'highlight.js/styles/github-dark.css';
 import '@xterm/xterm/css/xterm.css';
 
@@ -51,6 +70,8 @@ let activeBrowserLabel = null;
 let activeMarkdownLabel = null;
 let zoomedSurfaceEl = null;
 let contextMenuCleanup = null;
+let remoteTmuxInspectorCleanup = null;
+let remoteTmuxInspectorState = null;
 
 const notifications = new Map();
 let notifPanelTabId = null;
@@ -147,46 +168,20 @@ function setDefaultTarget(target) {
   updateNewTabTooltip();
 }
 
-function normalizeSshTarget(target) {
-  if (!target || target.type !== 'ssh') return null;
-  const host = String(target.host ?? '').trim();
-  if (!host) return null;
-  const user = String(target.user ?? '').trim() || null;
-  const name = String(target.name ?? '').trim() || null;
-  const identityFile = String(target.identity_file ?? '').trim() || null;
-  const parsedPort = Number(target.port);
-  const port = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : null;
-  return {
-    type: 'ssh',
-    name,
-    host,
-    user,
-    port,
-    identity_file: identityFile,
-  };
+function isRemoteTmuxTarget(target) {
+  return normalizeSshTarget(target)?.type === 'remote_tmux';
 }
 
-function sshTargetsEqual(left, right) {
-  const a = normalizeSshTarget(left);
-  const b = normalizeSshTarget(right);
-  if (!a || !b) return false;
-  return a.host === b.host
-    && a.user === b.user
-    && a.port === b.port
-    && a.identity_file === b.identity_file;
+function tabHasRemoteTmux(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab) return false;
+  return [...tab.paneIds].some((paneId) => isRemoteTmuxTarget(panes.get(paneId)?.target));
 }
 
-function sshTargetConnectionLabel(target) {
-  const normalized = normalizeSshTarget(target);
-  if (!normalized) return 'SSH';
-  const hostPart = normalized.user ? `${normalized.user}@${normalized.host}` : normalized.host;
-  return normalized.port ? `${hostPart}:${normalized.port}` : hostPart;
-}
-
-function sshTargetDisplayName(target) {
-  const normalized = normalizeSshTarget(target);
-  if (!normalized) return 'SSH';
-  return normalized.name ?? sshTargetConnectionLabel(normalized);
+function workspaceRemoteTmuxTabIds(workspaceId = activeWorkspaceId) {
+  return [...tabs.values()]
+    .filter((tab) => tab.workspaceId === workspaceId && tabHasRemoteTmux(tab.tabId))
+    .map((tab) => tab.tabId);
 }
 
 function loadSavedSshTargets() {
@@ -212,15 +207,67 @@ function saveSavedSshTargets(entries) {
   localStorage.setItem(SAVED_SSH_TARGETS_KEY, JSON.stringify(entries));
 }
 
-function defaultTargetLabel(target) {
-  if (!target || target.type === 'local') return 'Local';
-  if (target.type === 'wsl') return target.distro ?? 'WSL';
-  if (target.type === 'ssh') return sshTargetDisplayName(target);
-  return 'Local';
-}
-
 function basenameFromAnyPath(path) {
   return String(path ?? '').split(/[\\/]/).filter(Boolean).pop() ?? '';
+}
+
+function backfillPaneCwdFromTranscript(pane) {
+  if (!pane) return '';
+  const [currentCwd = '', previousCwd = ''] = inferRecentCwdsFromTerminalTranscript(pane.outputSnapshot)
+    .map((value) => sanitizeCwdForTarget(pane.target, value));
+  const inferredCwd = currentCwd || sanitizeCwdForTarget(pane.target, inferCwdFromTerminalTranscript(pane.outputSnapshot));
+  if (!inferredCwd) return '';
+  if (previousCwd && previousCwd !== inferredCwd) pane.previousCwd = previousCwd;
+  pane.cwd = inferredCwd;
+  const tab = tabs.get(pane.tabId);
+  if (tab && (tab.paneIds.size === 1 || tab.lastActiveSurfaceEl === pane.domEl || activePaneId === pane.sessionId)) {
+    tab.cwd = inferredCwd;
+  }
+  return inferredCwd;
+}
+
+function trimTrailingPromptFromSerializedSnapshot(snapshot) {
+  const value = String(snapshot ?? '');
+  if (!value) return '';
+  const lines = value.split(/\r?\n/);
+  let index = lines.length - 1;
+  while (index >= 0 && !lines[index].trim()) index -= 1;
+  if (index < 0) return '';
+  const lastLine = lines[index];
+  if (/^(?:\([^)]*\)\s*)?[\w.@-]+@[\w.-]+:(?:~|\/[^#$%\r\n]*)\s*[#$%]\s*$/.test(lastLine)
+    || /^PS\s+[A-Za-z]:\\.*>\s*$/i.test(lastLine)
+    || /^[A-Za-z]:\\.*>\s*$/i.test(lastLine)) {
+    lines.splice(index, 1);
+    return lines.join('\n').replace(/[\r\n]+$/g, '');
+  }
+  return value;
+}
+
+function captureVisibleTerminalScreen(terminal, serializeAddon) {
+  const buffer = terminal?.buffer?.active;
+  const rows = Number(terminal?.rows) || 0;
+  if (!buffer || rows <= 0 || !serializeAddon?.serialize) return '';
+
+  const viewportStart = Number.isInteger(buffer.viewportY) ? buffer.viewportY : Math.max(0, buffer.baseY);
+  const viewportEnd = Math.min(buffer.length - 1, viewportStart + rows - 1);
+  if (viewportEnd < viewportStart) return '';
+
+  const serialized = serializeAddon.serialize({
+    range: { start: viewportStart, end: viewportEnd },
+    excludeAltBuffer: true,
+    excludeModes: true,
+  });
+  return trimTrailingPromptFromSerializedSnapshot(serialized);
+}
+
+function writeTerminalSnapshot(term, snapshot, { serialized = false } = {}) {
+  if (serialized) {
+    if (snapshot) term.write(String(snapshot));
+    return;
+  }
+  const normalized = normalizeTerminalTranscript(snapshot);
+  if (!normalized) return;
+  term.write(normalized.replace(/\n/g, '\r\n'));
 }
 
 function relativePathWithin(root, fullPath) {
@@ -336,6 +383,12 @@ function unreadNotificationCount(tabId) {
 function closeContextMenu() {
   contextMenuCleanup?.();
   contextMenuCleanup = null;
+}
+
+function closeRemoteTmuxInspector() {
+  remoteTmuxInspectorCleanup?.();
+  remoteTmuxInspectorCleanup = null;
+  remoteTmuxInspectorState = null;
 }
 
 function showContextMenu(items, x, y) {
@@ -466,6 +519,9 @@ function serializeTabState(tab) {
       gitBranch: tab.gitBranch,
       ports: [...tab.ports],
       targetLabel: tab.targetLabel,
+      targetKind: tab.targetKind,
+      remoteTmuxSessionName: tab.remoteTmuxSessionName,
+      remoteTmuxWindowName: tab.remoteTmuxWindowName,
     },
     notifications: currentNotifications,
     ui: {
@@ -615,6 +671,15 @@ async function createTab(target = { type: 'local' }, restoreData = null) {
   });
   tabEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    const reconnectItems = tabHasRemoteTmux(tabId)
+      ? [
+          { label: 'Browse remote tmux', action: () => openRemoteTmuxInspector(tabId) },
+          { label: 'Refresh remote tmux state', action: () => openRemoteTmuxInspector(tabId, { forceRefresh: true }) },
+          { type: 'separator' },
+          { label: 'Reconnect remote tmux tab', action: () => reconnectRemoteTmuxTab(tabId) },
+          { type: 'separator' },
+        ]
+      : [];
     const workspaceActions = orderedWorkspaceEntries()
       .filter(ws => ws.id !== wsId)
       .map(ws => ({
@@ -623,6 +688,7 @@ async function createTab(target = { type: 'local' }, restoreData = null) {
       }));
     showContextMenu([
       { label: 'Rename tab', action: () => startTabRename(tabId, tabEl.querySelector('.tab-title')) },
+      ...reconnectItems,
       { label: 'Open browser split', action: () => openBrowserSplitForTab(tabId) },
       { label: 'Open markdown split', action: () => openMarkdownSplitForTab(tabId) },
       { type: 'separator' },
@@ -642,6 +708,12 @@ async function createTab(target = { type: 'local' }, restoreData = null) {
   });
   tabEl.querySelector('.tab-close').addEventListener('click', () => closeTab(tabId));
   tabEl.querySelector('.tab-title').addEventListener('dblclick', (e) => startTabRename(tabId, e.target));
+  tabEl.querySelector('.tab-target').addEventListener('click', (event) => {
+    if (!tabHasRemoteTmux(tabId)) return;
+    event.stopPropagation();
+    activateTab(tabId);
+    void openRemoteTmuxInspector(tabId);
+  });
 
   const tabState = {
     tabId,
@@ -656,6 +728,12 @@ async function createTab(target = { type: 'local' }, restoreData = null) {
     gitBranch: restoreData?.meta?.gitBranch ?? '',
     ports: new Set(restoreData?.meta?.ports ?? []),
     targetLabel: restoreData?.meta?.targetLabel ?? defaultTargetLabel(target),
+    targetKind: restoreData?.meta?.targetKind ?? getTargetKind(target),
+    remoteTmuxSessionName: restoreData?.meta?.remoteTmuxSessionName ?? (target?.type === 'remote_tmux' ? target.session_name : ''),
+    remoteTmuxWindowName: restoreData?.meta?.remoteTmuxWindowName ?? '',
+    connectionStatus: restoreData?.meta?.targetKind === 'remote_tmux' || target?.type === 'remote_tmux' ? 'connecting' : 'connected',
+    remoteProbeError: '',
+    lastRemoteProbeAt: 0,
     browserLabels: new Set(),
     markdownLabels: new Set(),
     lastActiveSurfaceEl: null,
@@ -740,10 +818,33 @@ async function openBrowserSplitForTab(tabId, url = '') {
 async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   const DEFAULT_COLS = 120;
   const DEFAULT_ROWS = 30;
+  const MAX_TRANSCRIPT_CHARS = 100_000;
+  const restoredCwd = sanitizeCwdForTarget(target, initialState?.cwd);
+  const restoredPreviousCwd = sanitizeCwdForTarget(target, initialState?.previousCwd);
+  const history = Array.isArray(initialState?.history)
+    ? initialState.history.map((entry) => normalizeHistoryEntry(entry)).filter(Boolean).slice(-500)
+    : [];
+  const screenSnapshot = typeof initialState?.screenSnapshot === 'string'
+    ? String(initialState.screenSnapshot)
+    : '';
+  let outputSnapshot = typeof initialState?.outputSnapshot === 'string'
+    ? normalizeTerminalTranscript(initialState.outputSnapshot)
+    : '';
+
+  const trimTranscript = (value) => value.length > MAX_TRANSCRIPT_CHARS
+    ? value.slice(value.length - MAX_TRANSCRIPT_CHARS)
+    : value;
+  outputSnapshot = trimTranscript(outputSnapshot);
 
   let result;
   try {
-    result = await invoke('create_session', { cols: DEFAULT_COLS, rows: DEFAULT_ROWS, target });
+    result = await invoke('create_session', {
+      cols: DEFAULT_COLS,
+      rows: DEFAULT_ROWS,
+      target,
+      cwd: restoredCwd || null,
+      previousCwd: restoredPreviousCwd || null,
+    });
   } catch (err) {
     showError(`Could not start terminal: ${err}`);
     return null;
@@ -760,8 +861,12 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     fontFamily: _s.fontFamily,
     fontSize: _s.fontSize,
     lineHeight: _s.lineHeight,
+    fontWeight: '400',
+    fontWeightBold: '500',
     cursorBlink: _s.cursorBlink,
     cursorStyle: _s.cursorStyle,
+    drawBoldTextInBrightColors: false,
+    minimumContrastRatio: 1,
     allowProposedApi: true,
     scrollback: _s.scrollback,
   });
@@ -776,15 +881,25 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     showPlaceholder: true,
   });
   const searchAddon = new SearchAddon();
+  const serializeAddon = new SerializeAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(imageAddon);
   term.loadAddon(searchAddon);
+  term.loadAddon(serializeAddon);
   term.loadAddon(new WebLinksAddon());
 
   const leafEl = document.createElement('div');
   leafEl.className = 'pane-leaf';
   leafEl.dataset.sessionId = sessionId;
   mountEl.appendChild(leafEl);
+
+  const terminalHostEl = document.createElement('div');
+  terminalHostEl.className = 'pane-terminal-host';
+  leafEl.appendChild(terminalHostEl);
+
+  const footerEl = document.createElement('div');
+  footerEl.className = 'pane-footer';
+  leafEl.appendChild(footerEl);
 
   const contextBadgeEl = document.createElement('button');
   contextBadgeEl.type = 'button';
@@ -798,21 +913,64 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     event.stopPropagation();
     startPaneContextRename(sessionId);
   });
-  leafEl.appendChild(contextBadgeEl);
+  footerEl.appendChild(contextBadgeEl);
 
   // Per-pane command input buffer and history for Ctrl+Alt+H picker.
-  const history = [];
   let cmdLineBuf = '';
+  let escapeSequenceState = 0;
 
-  term.open(leafEl);
+  term.open(terminalHostEl);
+
+  const pendingRestoreSnapshot = screenSnapshot || outputSnapshot;
+  const restoreSnapshotIsSerialized = !!screenSnapshot;
+  const restoreReplaySanitizeUntil = pendingRestoreSnapshot ? Date.now() + 2200 : 0;
+  const restoreReplayDeadline = pendingRestoreSnapshot ? Date.now() + 3200 : 0;
+  let restoreReplayTimer = null;
+  let restoreReplayApplied = false;
+
+  const scheduleRestoreReplay = (delay = 180) => {
+    if (!pendingRestoreSnapshot || restoreReplayApplied) return;
+    if (restoreReplayTimer) clearTimeout(restoreReplayTimer);
+    restoreReplayTimer = setTimeout(() => {
+      restoreReplayTimer = null;
+      if (restoreReplayApplied || !panes.has(sessionId)) return;
+      restoreReplayApplied = true;
+      term.reset();
+      writeTerminalSnapshot(term, pendingRestoreSnapshot, { serialized: restoreSnapshotIsSerialized });
+    }, delay);
+  };
+
+  const transcriptDecoder = new TextDecoder();
+  const appendTranscriptChunk = (chunk) => {
+    if (!chunk) return;
+    outputSnapshot = trimTranscript(outputSnapshot + normalizeTerminalTranscript(chunk));
+    const pane = panes.get(sessionId);
+    if (pane) pane.outputSnapshot = outputSnapshot;
+  };
 
   term.onData(async (data) => {
     try { await invoke('write_to_session', { id: sessionId, data }); }
     catch (err) { console.warn('write_to_session error:', err); }
     // Track commands typed for history picker.
     for (const ch of data) {
+      if (escapeSequenceState === 1) {
+        if (ch === '[' || ch === 'O' || ch === ']') {
+          escapeSequenceState = 2;
+        } else {
+          escapeSequenceState = 0;
+        }
+        continue;
+      }
+      if (escapeSequenceState === 2) {
+        if ((ch >= '@' && ch <= '~') || ch === '\x07') escapeSequenceState = 0;
+        continue;
+      }
+      if (ch === '\x1b') {
+        escapeSequenceState = 1;
+        continue;
+      }
       if (ch === '\r' || ch === '\n') {
-        const cmd = cmdLineBuf.trim();
+        const cmd = normalizeHistoryEntry(cmdLineBuf);
         if (cmd && (history.length === 0 || history[history.length - 1] !== cmd)) {
           history.push(cmd);
           if (history.length > 500) history.shift();
@@ -830,7 +988,16 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
   const unlisten = await listen(`terminal-output-${sessionId}`, (event) => {
     const bytes = base64Decode(event.payload);
-    term.write(bytes);
+    const decoded = transcriptDecoder.decode(bytes, { stream: true });
+    if (restoreReplaySanitizeUntil > Date.now()) {
+      term.write(stripTerminalStartupResetSequences(decoded));
+    } else {
+      term.write(bytes);
+    }
+    appendTranscriptChunk(decoded);
+    if (!restoreReplayApplied && pendingRestoreSnapshot && Date.now() <= restoreReplayDeadline) {
+      scheduleRestoreReplay(260);
+    }
     if (sessionId !== activePaneId) {
       const tab = tabs.get(tabId);
       if (tab) setTabRing(tab, true);
@@ -860,10 +1027,32 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     }
   });
 
-  const unlistenAll = () => { unlisten(); unlistenUrl(); unlistenNotify(); unlistenCwd(); };
+  const unlistenExit = await listen(`terminal-exit-${sessionId}`, () => {
+    const pane = panes.get(sessionId);
+    const tab = tabs.get(tabId);
+    if (!pane || !tab || !isRemoteTmuxTarget(pane.target)) return;
+    tab.connectionStatus = 'disconnected';
+    tab.remoteProbeError = 'Remote tmux session disconnected.';
+    tab.lastRemoteProbeAt = Date.now();
+    updateTabMeta(tabId);
+  });
+
+  const unlistenAll = () => {
+    if (restoreReplayTimer) {
+      clearTimeout(restoreReplayTimer);
+      restoreReplayTimer = null;
+    }
+    appendTranscriptChunk(transcriptDecoder.decode());
+    unlisten();
+    unlistenUrl();
+    unlistenNotify();
+    unlistenCwd();
+    unlistenExit();
+  };
 
   try { await invoke('start_session_stream', { id: sessionId }); }
   catch (err) { console.warn('start_session_stream error:', err); }
+  if (pendingRestoreSnapshot) scheduleRestoreReplay(520);
 
   term.onTitleChange((title) => {
     const tab = tabs.get(tabId);
@@ -900,6 +1089,17 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   leafEl.appendChild(toolbarEl);
 
+  if (isRemoteTmuxTarget(target)) {
+    leafEl.classList.add('pane-remote-tmux');
+    for (const selector of ['[data-action="split-h"]', '[data-action="split-v"]']) {
+      const btn = toolbarEl.querySelector(selector);
+      if (btn) {
+        btn.disabled = true;
+        btn.title = 'Remote tmux tabs keep one terminal session per tab. Use tmux splits inside the remote session.';
+      }
+    }
+  }
+
   const paneState = {
     sessionId,
     tabId,
@@ -912,11 +1112,17 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     resizeObserver: ro,
     hasRing: false,
     history,
-    cwd: '',
+    cwd: restoredCwd,
+    previousCwd: restoredPreviousCwd,
+    screenSnapshot,
+    outputSnapshot,
     gitContext: null,
     labelOverride: initialState?.labelOverride ?? null,
+    lastSessionVaultEntryId: typeof initialState?.vaultEntryId === 'string' ? initialState.vaultEntryId : null,
+    lastSessionVaultSignature: null,
     contextBadgeEl,
     imageAddon,
+    serializeAddon,
   };
   panes.set(sessionId, paneState);
   renderPaneContextBadge(sessionId);
@@ -933,6 +1139,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   updateTabMeta(tabId);
   markLayoutDirty();
 
+  if (isRemoteTmuxTarget(target)) {
+    void probeRemoteTmuxMetadata(tabId, sessionId, target);
+  }
+
   return sessionId;
 }
 
@@ -941,6 +1151,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 async function splitPane(paneId, dir) {
   const pane = panes.get(paneId);
   if (!pane) return;
+  if (isRemoteTmuxTarget(pane.target)) {
+    showError('Remote tmux tabs keep one terminal session per tab. Use tmux splits inside the remote session; wmux browser and markdown splits still work here.');
+    return;
+  }
   const tabState = tabs.get(pane.tabId);
   if (!tabState) return;
 
@@ -1090,6 +1304,7 @@ function activateTab(tabId) {
       }
     }
     syncBrowserVisibility();
+    void refreshRemoteTmuxTabHealth(tabId);
   });
 }
 
@@ -1135,6 +1350,7 @@ async function closePane(paneId) {
     return;
   }
 
+  await saveSessionVaultEntryForPane(paneId, { reason: 'pane-close' });
   await _destroyPane(paneId);
   collapsePaneBranch(pane.domEl);
 
@@ -1155,6 +1371,7 @@ async function closePane(paneId) {
 async function closeTab(tabId, skipWorkspaceCheck = false) {
   const tab = tabs.get(tabId);
   if (!tab) return;
+  if (remoteTmuxInspectorState?.tabId === tabId) closeRemoteTmuxInspector();
   const workspace = workspaces.get(tab.workspaceId);
 
   for (const browserEl of [...tab.contentEl.querySelectorAll('.browser-pane-leaf')]) {
@@ -1168,6 +1385,7 @@ async function closeTab(tabId, skipWorkspaceCheck = false) {
   }
 
   for (const paneId of [...tab.paneIds]) {
+    await saveSessionVaultEntryForPane(paneId, { reason: 'tab-close' });
     await _destroyPane(paneId);
   }
 
@@ -1197,6 +1415,558 @@ async function closeTab(tabId, skipWorkspaceCheck = false) {
   updateTabNumbers();
   syncBrowserVisibility();
   markLayoutDirty();
+}
+
+async function probeRemoteTmuxMetadata(tabId, sessionId, target) {
+  const normalized = normalizeSshTarget(target);
+  if (!normalized || normalized.type !== 'remote_tmux') return;
+  const tab = tabs.get(tabId);
+  if (tab) {
+    tab.connectionStatus = 'connecting';
+    tab.remoteProbeError = '';
+    updateTabMeta(tabId);
+  }
+  try {
+    const metadata = await invoke('probe_remote_tmux_metadata', { target: normalized });
+    const pane = panes.get(sessionId);
+    const tab = tabs.get(tabId);
+    if (!pane || !tab || !isRemoteTmuxTarget(pane.target) || !sshTargetsEqual(pane.target, normalized)) {
+      return;
+    }
+
+    if (pane.target.session_mode === REMOTE_TMUX_SESSION_MODES.CREATE) {
+      pane.target = {
+        ...pane.target,
+        session_mode: REMOTE_TMUX_SESSION_MODES.ATTACH,
+      };
+      tab.targetLabel = defaultTargetLabel(pane.target);
+    }
+
+    tab.remoteTmuxSessionName = metadata.session_name ?? normalized.session_name;
+    tab.remoteTmuxWindowName = metadata.window_name ?? '';
+    tab.connectionStatus = 'connected';
+    tab.remoteProbeError = '';
+    tab.lastRemoteProbeAt = Date.now();
+
+    if (metadata.cwd) {
+      pane.cwd = metadata.cwd;
+      const gitContext = metadata.repo_name ? {
+        repo_root: metadata.repo_root || metadata.cwd,
+        repo_name: metadata.repo_name,
+        branch: metadata.git_branch || null,
+        worktree_name: metadata.worktree_name || null,
+        is_worktree: !!metadata.is_worktree,
+      } : null;
+      const cwdMeta = await updateTabCwd(tabId, metadata.cwd, {
+        skipLocalGit: true,
+        gitBranch: metadata.git_branch || '',
+        gitContext,
+      });
+      pane.gitContext = cwdMeta?.gitContext ?? gitContext;
+      renderPaneContextBadge(sessionId);
+    }
+
+    if (!tab.userRenamed && metadata.window_name) {
+      tab.title = `${tab.remoteTmuxSessionName}:${metadata.window_name}`;
+      const titleEl = tab.tabEl.querySelector('.tab-title');
+      if (titleEl) titleEl.textContent = tab.title;
+    }
+
+    updateTabMeta(tabId);
+    markLayoutDirty();
+    if (remoteTmuxInspectorState?.tabId === tabId) renderRemoteTmuxInspector();
+  } catch (err) {
+    const tab = tabs.get(tabId);
+    if (tab) {
+      tab.connectionStatus = 'disconnected';
+      tab.remoteProbeError = String(err);
+      tab.lastRemoteProbeAt = Date.now();
+      updateTabMeta(tabId);
+    }
+    if (remoteTmuxInspectorState?.tabId === tabId) renderRemoteTmuxInspector();
+    console.warn('probe_remote_tmux_metadata error:', err);
+  }
+}
+
+function getRemoteTmuxPaneForTab(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab) return null;
+  return [...tab.paneIds]
+    .map((paneId) => panes.get(paneId))
+    .find((pane) => isRemoteTmuxTarget(pane?.target)) ?? null;
+}
+
+function quotePosixShellArg(value) {
+  return `'${String(value ?? '').replace(/'/g, `'"'"'`)}'`;
+}
+
+function remoteTmuxEndpointLabel(target) {
+  const normalized = normalizeSshTarget(target);
+  if (!normalized) return 'remote tmux';
+  const host = normalized.user ? `${normalized.user}@${normalized.host}` : normalized.host;
+  return normalized.port ? `${host}:${normalized.port}` : host;
+}
+
+async function sendRemoteTmuxCommand(tabId, command, { nextSessionName = null } = {}) {
+  const pane = getRemoteTmuxPaneForTab(tabId);
+  const tab = tabs.get(tabId);
+  if (!pane || !tab) return false;
+
+  await invoke('write_to_session', { id: pane.sessionId, data: `${command}\r` });
+
+  if (nextSessionName && isRemoteTmuxTarget(pane.target)) {
+    pane.target = {
+      ...pane.target,
+      session_name: nextSessionName,
+      session_mode: REMOTE_TMUX_SESSION_MODES.ATTACH,
+    };
+    tab.remoteTmuxSessionName = nextSessionName;
+    tab.targetLabel = defaultTargetLabel(pane.target);
+    tab.connectionStatus = 'connecting';
+    updateTabMeta(tabId);
+  }
+
+  await new Promise((resolve) => window.setTimeout(resolve, 180));
+  await probeRemoteTmuxMetadata(tabId, pane.sessionId, pane.target);
+  if (remoteTmuxInspectorState?.tabId === tabId) {
+    await refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
+  }
+  return true;
+}
+
+async function manageRemoteTmux(tabId, scope, action, { tmuxTarget = null, name = null } = {}) {
+  const pane = getRemoteTmuxPaneForTab(tabId);
+  const target = normalizeSshTarget(pane?.target);
+  if (!pane || !target || target.type !== 'remote_tmux') return null;
+
+  const result = await invoke('manage_remote_tmux', {
+    target,
+    scope,
+    action,
+    tmuxTarget,
+    name,
+  });
+
+  if (remoteTmuxInspectorState?.tabId === tabId) {
+    await refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
+  }
+  return result;
+}
+
+function promptRemoteTmuxName(message, defaultValue = '') {
+  const value = window.prompt(message, defaultValue);
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+async function createRemoteTmuxSession(tabId) {
+  const state = remoteTmuxInspectorState;
+  const sessionName = promptRemoteTmuxName('New remote tmux session name', state?.selectedSessionName ? `${state.selectedSessionName}-2` : 'team-shell');
+  if (!sessionName) return false;
+  await manageRemoteTmux(tabId, 'session', 'create', { name: sessionName });
+  await switchRemoteTmuxSession(tabId, sessionName);
+  return true;
+}
+
+async function renameRemoteTmuxSession(tabId, sessionName) {
+  const nextName = promptRemoteTmuxName(`Rename remote tmux session ${sessionName}`, sessionName);
+  if (!nextName || nextName === sessionName) return false;
+  await manageRemoteTmux(tabId, 'session', 'rename', { tmuxTarget: sessionName, name: nextName });
+  const pane = getRemoteTmuxPaneForTab(tabId);
+  const tab = tabs.get(tabId);
+  if (pane && tab && isRemoteTmuxTarget(pane.target) && tab.remoteTmuxSessionName === sessionName) {
+    pane.target = { ...pane.target, session_name: nextName };
+    tab.remoteTmuxSessionName = nextName;
+    tab.targetLabel = defaultTargetLabel(pane.target);
+  }
+  await refreshRemoteTmuxTabHealth(tabId, { force: true });
+  await refreshRemoteTmuxInspector({ force: true, preserveSelection: false });
+  return true;
+}
+
+async function killRemoteTmuxSession(tabId, sessionName, isCurrent) {
+  const confirmed = window.confirm(`Kill remote tmux session ${sessionName}?${isCurrent ? ' This is the current session for this wmux tab.' : ''}`);
+  if (!confirmed) return false;
+  await manageRemoteTmux(tabId, 'session', 'kill', { tmuxTarget: sessionName });
+  if (isCurrent) {
+    await refreshRemoteTmuxTabHealth(tabId, { force: true });
+  }
+  await refreshRemoteTmuxInspector({ force: true, preserveSelection: false });
+  return true;
+}
+
+async function createRemoteTmuxWindow(tabId, sessionName) {
+  const windowName = promptRemoteTmuxName(`New window name for session ${sessionName}`, 'editor');
+  if (!windowName) return false;
+  const result = await manageRemoteTmux(tabId, 'window', 'create', { tmuxTarget: sessionName, name: windowName });
+  if (result?.resolved_target) {
+    await switchRemoteTmuxWindow(tabId, result.resolved_target);
+  }
+  return true;
+}
+
+async function renameRemoteTmuxWindow(tabId, windowId, windowName) {
+  const nextName = promptRemoteTmuxName(`Rename remote tmux window ${windowName || windowId}`, windowName || 'window');
+  if (!nextName || nextName === windowName) return false;
+  await manageRemoteTmux(tabId, 'window', 'rename', { tmuxTarget: windowId, name: nextName });
+  await refreshRemoteTmuxTabHealth(tabId, { force: true });
+  await refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
+  return true;
+}
+
+async function killRemoteTmuxWindow(tabId, windowId, windowName, isCurrent) {
+  const confirmed = window.confirm(`Kill remote tmux window ${windowName || windowId}?${isCurrent ? ' This is the current window for this wmux tab.' : ''}`);
+  if (!confirmed) return false;
+  await manageRemoteTmux(tabId, 'window', 'kill', { tmuxTarget: windowId });
+  await refreshRemoteTmuxTabHealth(tabId, { force: true });
+  await refreshRemoteTmuxInspector({ force: true, preserveSelection: false });
+  return true;
+}
+
+async function switchRemoteTmuxSession(tabId, sessionName) {
+  return sendRemoteTmuxCommand(
+    tabId,
+    `tmux switch-client -t ${quotePosixShellArg(sessionName)}`,
+    { nextSessionName: sessionName },
+  );
+}
+
+async function switchRemoteTmuxWindow(tabId, windowId) {
+  return sendRemoteTmuxCommand(tabId, `tmux select-window -t ${quotePosixShellArg(windowId)}`);
+}
+
+async function switchRemoteTmuxPane(tabId, paneId) {
+  return sendRemoteTmuxCommand(tabId, `tmux select-pane -t ${quotePosixShellArg(paneId)}`);
+}
+
+function renderRemoteTmuxInspector() {
+  const panel = document.getElementById('remote-tmux-inspector');
+  const state = remoteTmuxInspectorState;
+  if (!panel || !state) return;
+
+  const body = panel.querySelector('.rti-body');
+  const titleEl = panel.querySelector('.rti-title');
+  const subtitleEl = panel.querySelector('.rti-subtitle');
+  const refreshBtn = panel.querySelector('[data-action="refresh"]');
+  const closeBtn = panel.querySelector('[data-action="close"]');
+
+  const tab = tabs.get(state.tabId);
+  const remotePane = getRemoteTmuxPaneForTab(state.tabId);
+  titleEl.textContent = tab ? `Remote tmux - ${tab.title}` : 'Remote tmux';
+  subtitleEl.textContent = remotePane ? remoteTmuxEndpointLabel(remotePane.target) : 'Remote tmux tab not available';
+
+  refreshBtn.onclick = () => { void refreshRemoteTmuxInspector({ force: true, preserveSelection: true }); };
+  closeBtn.onclick = () => closeRemoteTmuxInspector();
+
+  if (!tab || !remotePane) {
+    body.innerHTML = '<div class="rti-empty">This remote tmux tab is no longer available.</div>';
+    return;
+  }
+
+  if (state.loading) {
+    body.innerHTML = '<div class="rti-loading">Loading remote tmux sessions, windows, and panes...</div>';
+    return;
+  }
+
+  if (state.error) {
+    body.innerHTML = `
+      <div class="rti-error">${escHtml(state.error)}</div>
+      <button class="rti-inline-action" data-action="retry">Retry</button>
+    `;
+    body.querySelector('[data-action="retry"]')?.addEventListener('click', () => {
+      void refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
+    });
+    return;
+  }
+
+  const data = state.data;
+  if (!data?.sessions?.length) {
+    body.innerHTML = '<div class="rti-empty">No remote tmux sessions were found.</div>';
+    return;
+  }
+
+  const selectedSession = data.sessions.find((session) => session.session_name === state.selectedSessionName)
+    ?? data.sessions.find((session) => session.session_name === data.current_session_name)
+    ?? data.sessions[0];
+  state.selectedSessionName = selectedSession?.session_name ?? '';
+
+  const selectedWindow = selectedSession?.windows.find((windowState) => windowState.window_id === state.selectedWindowId)
+    ?? selectedSession?.windows.find((windowState) => windowState.window_id === data.current_window_id)
+    ?? selectedSession?.windows[0]
+    ?? null;
+  state.selectedWindowId = selectedWindow?.window_id ?? '';
+
+  body.innerHTML = `
+    <div class="rti-grid">
+      <section class="rti-column">
+        <div class="rti-column-head">
+          <div class="rti-column-title">Sessions</div>
+          <button class="rti-mini-action" data-action="new-session">New</button>
+        </div>
+        <div class="rti-list rti-sessions"></div>
+      </section>
+      <section class="rti-column">
+        <div class="rti-column-head">
+          <div class="rti-column-title">Windows</div>
+          <button class="rti-mini-action" data-action="new-window" ${selectedSession ? '' : 'disabled'}>New</button>
+        </div>
+        <div class="rti-list rti-windows"></div>
+      </section>
+      <section class="rti-column">
+        <div class="rti-column-title">Panes</div>
+        <div class="rti-list rti-panes"></div>
+      </section>
+    </div>
+  `;
+
+  const sessionsEl = body.querySelector('.rti-sessions');
+  const windowsEl = body.querySelector('.rti-windows');
+  const panesEl = body.querySelector('.rti-panes');
+
+  for (const session of data.sessions) {
+    const row = document.createElement('div');
+    row.className = `rti-row${session.session_name === state.selectedSessionName ? ' is-selected' : ''}${session.is_current ? ' is-current' : ''}`;
+    row.innerHTML = `
+      <button class="rti-main" data-session-name="${escHtml(session.session_name)}">
+        <span class="rti-primary">${escHtml(session.session_name)}</span>
+        <span class="rti-secondary">${session.window_count} windows · ${session.attached_clients} clients</span>
+      </button>
+      <button class="rti-action" data-switch-session="${escHtml(session.session_name)}" ${session.is_current ? 'disabled' : ''}>Switch</button>
+      <button class="rti-action" data-rename-session="${escHtml(session.session_name)}">Rename</button>
+      <button class="rti-action danger" data-kill-session="${escHtml(session.session_name)}">Kill</button>
+    `;
+    sessionsEl.appendChild(row);
+  }
+
+  if (!selectedSession?.windows?.length) {
+    windowsEl.innerHTML = '<div class="rti-empty">No windows in this session.</div>';
+  } else {
+    for (const windowState of selectedSession.windows) {
+      const row = document.createElement('div');
+      row.className = `rti-row${windowState.window_id === state.selectedWindowId ? ' is-selected' : ''}${windowState.window_id === data.current_window_id ? ' is-current' : ''}`;
+      row.innerHTML = `
+        <button class="rti-main" data-window-id="${escHtml(windowState.window_id)}">
+          <span class="rti-primary">${escHtml(`${windowState.window_index}: ${windowState.window_name || 'window'}`)}</span>
+          <span class="rti-secondary">${windowState.panes.length} panes · ${escHtml(windowState.window_id)}</span>
+        </button>
+        <button class="rti-action" data-switch-window="${escHtml(windowState.window_id)}" ${windowState.window_id === data.current_window_id ? 'disabled' : ''}>Switch</button>
+        <button class="rti-action" data-rename-window="${escHtml(windowState.window_id)}">Rename</button>
+        <button class="rti-action danger" data-kill-window="${escHtml(windowState.window_id)}">Kill</button>
+      `;
+      windowsEl.appendChild(row);
+    }
+  }
+
+  if (!selectedWindow?.panes?.length) {
+    panesEl.innerHTML = '<div class="rti-empty">No panes in this window.</div>';
+  } else {
+    for (const paneState of selectedWindow.panes) {
+      const row = document.createElement('div');
+      row.className = `rti-row${paneState.pane_id === data.current_pane_id ? ' is-current' : ''}`;
+      row.innerHTML = `
+        <div class="rti-main rti-pane-main">
+          <span class="rti-primary">${escHtml(`${paneState.pane_index}: ${paneState.current_command || paneState.title || paneState.pane_id}`)}</span>
+          <span class="rti-secondary">${escHtml([
+            paneState.cwd || paneState.title || paneState.pane_id,
+            paneState.command_age ? `age ${paneState.command_age}` : '',
+            paneState.was_last_active ? 'last-active' : '',
+          ].filter(Boolean).join(' · '))}</span>
+        </div>
+        <button class="rti-action" data-switch-pane="${escHtml(paneState.pane_id)}" ${paneState.pane_id === data.current_pane_id ? 'disabled' : ''}>Select</button>
+      `;
+      panesEl.appendChild(row);
+    }
+  }
+
+  sessionsEl.querySelectorAll('[data-session-name]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.selectedSessionName = btn.dataset.sessionName ?? '';
+      state.selectedWindowId = '';
+      renderRemoteTmuxInspector();
+    });
+  });
+  sessionsEl.querySelectorAll('[data-switch-session]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      void switchRemoteTmuxSession(state.tabId, btn.dataset.switchSession ?? '');
+    });
+  });
+  sessionsEl.querySelectorAll('[data-rename-session]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      void renameRemoteTmuxSession(state.tabId, btn.dataset.renameSession ?? '');
+    });
+  });
+  sessionsEl.querySelectorAll('[data-kill-session]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const sessionName = btn.dataset.killSession ?? '';
+      void killRemoteTmuxSession(state.tabId, sessionName, sessionName === data.current_session_name);
+    });
+  });
+  windowsEl.querySelectorAll('[data-window-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.selectedWindowId = btn.dataset.windowId ?? '';
+      renderRemoteTmuxInspector();
+    });
+  });
+  windowsEl.querySelectorAll('[data-switch-window]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      void switchRemoteTmuxWindow(state.tabId, btn.dataset.switchWindow ?? '');
+    });
+  });
+  windowsEl.querySelectorAll('[data-rename-window]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const windowId = btn.dataset.renameWindow ?? '';
+      const windowState = selectedSession?.windows.find((candidate) => candidate.window_id === windowId);
+      void renameRemoteTmuxWindow(state.tabId, windowId, windowState?.window_name ?? '');
+    });
+  });
+  windowsEl.querySelectorAll('[data-kill-window]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const windowId = btn.dataset.killWindow ?? '';
+      const windowState = selectedSession?.windows.find((candidate) => candidate.window_id === windowId);
+      void killRemoteTmuxWindow(state.tabId, windowId, windowState?.window_name ?? '', windowId === data.current_window_id);
+    });
+  });
+  panesEl.querySelectorAll('[data-switch-pane]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      void switchRemoteTmuxPane(state.tabId, btn.dataset.switchPane ?? '');
+    });
+  });
+  body.querySelector('[data-action="new-session"]')?.addEventListener('click', () => {
+    void createRemoteTmuxSession(state.tabId);
+  });
+  body.querySelector('[data-action="new-window"]')?.addEventListener('click', () => {
+    if (selectedSession?.session_name) {
+      void createRemoteTmuxWindow(state.tabId, selectedSession.session_name);
+    }
+  });
+}
+
+async function refreshRemoteTmuxInspector({ force = false, preserveSelection = false } = {}) {
+  const state = remoteTmuxInspectorState;
+  if (!state) return;
+  const pane = getRemoteTmuxPaneForTab(state.tabId);
+  const target = normalizeSshTarget(pane?.target);
+  if (!pane || !target || target.type !== 'remote_tmux') {
+    state.error = 'Remote tmux pane is not available.';
+    state.data = null;
+    state.loading = false;
+    renderRemoteTmuxInspector();
+    return;
+  }
+
+  if (!force && state.loading) return;
+
+  const previousSessionName = preserveSelection ? state.selectedSessionName : '';
+  const previousWindowId = preserveSelection ? state.selectedWindowId : '';
+  state.loading = true;
+  state.error = '';
+  renderRemoteTmuxInspector();
+
+  try {
+    state.data = await invoke('inspect_remote_tmux_state', { target });
+    state.selectedSessionName = previousSessionName || state.data.current_session_name || state.data.sessions[0]?.session_name || '';
+    const currentSession = state.data.sessions.find((session) => session.session_name === state.selectedSessionName);
+    state.selectedWindowId = previousWindowId || state.data.current_window_id || currentSession?.windows[0]?.window_id || '';
+  } catch (err) {
+    state.data = null;
+    state.error = String(err);
+  } finally {
+    state.loading = false;
+    renderRemoteTmuxInspector();
+  }
+}
+
+async function openRemoteTmuxInspector(tabId, { forceRefresh = false } = {}) {
+  if (!tabHasRemoteTmux(tabId)) return;
+  const previousState = remoteTmuxInspectorState;
+  closeRemoteTmuxInspector();
+
+  const panel = document.createElement('div');
+  panel.id = 'remote-tmux-inspector';
+  panel.className = 'remote-tmux-inspector';
+  panel.innerHTML = `
+    <div class="rti-header">
+      <div>
+        <div class="rti-title">Remote tmux</div>
+        <div class="rti-subtitle"></div>
+      </div>
+      <div class="rti-header-actions">
+        <button class="rti-header-btn" data-action="refresh">Refresh</button>
+        <button class="rti-header-btn" data-action="close">Close</button>
+      </div>
+    </div>
+    <div class="rti-body"></div>
+  `;
+  document.body.appendChild(panel);
+
+  const onEscape = (event) => {
+    if (event.key === 'Escape') closeRemoteTmuxInspector();
+  };
+  remoteTmuxInspectorCleanup = () => {
+    panel.remove();
+    document.removeEventListener('keydown', onEscape);
+  };
+  document.addEventListener('keydown', onEscape);
+
+  remoteTmuxInspectorState = {
+    tabId,
+    loading: false,
+    error: '',
+    data: null,
+    selectedSessionName: previousState?.tabId === tabId ? previousState.selectedSessionName : '',
+    selectedWindowId: previousState?.tabId === tabId ? previousState.selectedWindowId : '',
+  };
+  renderRemoteTmuxInspector();
+  await refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
+}
+
+async function refreshRemoteTmuxTabHealth(tabId, { force = false } = {}) {
+  const tab = tabs.get(tabId);
+  if (!tab || tab.targetKind !== 'remote_tmux') return;
+  if (!force && tab.connectionStatus === 'connecting') return;
+  if (!force && tab.lastRemoteProbeAt && Date.now() - tab.lastRemoteProbeAt < 30_000) return;
+  const remotePane = getRemoteTmuxPaneForTab(tabId);
+  if (!remotePane) return;
+  await probeRemoteTmuxMetadata(tabId, remotePane.sessionId, remotePane.target);
+}
+
+async function reconnectRemoteTmuxTab(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab || !tabHasRemoteTmux(tabId)) return false;
+  if (tab.workspaceId !== activeWorkspaceId) switchWorkspace(tab.workspaceId);
+  const remotePane = getRemoteTmuxPaneForTab(tabId);
+  if (!remotePane) return false;
+
+  const restoreData = serializeTabState(tab);
+  const reopenTarget = remotePane.target;
+  const showNotifPanel = notifPanelTabId === tabId;
+
+  await closeTab(tabId);
+  const newTabId = await createTab(reopenTarget, restoreData);
+  if (showNotifPanel) {
+    notifPanelTabId = newTabId;
+    renderNotifPanel(newTabId);
+  }
+  return true;
+}
+
+async function reconnectRemoteTmuxWorkspace(workspaceId = activeWorkspaceId) {
+  if (workspaceId !== activeWorkspaceId) switchWorkspace(workspaceId);
+  const tabIds = workspaceRemoteTmuxTabIds(workspaceId);
+  for (const tabId of tabIds) {
+    await reconnectRemoteTmuxTab(tabId);
+  }
+}
+
+async function openRemoteTmuxWorkspaceFromProfile(target) {
+  const normalized = normalizeSshTarget(target);
+  if (!normalized || normalized.type !== 'remote_tmux') return null;
+  const workspaceName = normalized.name || `tmux ${normalized.session_name}`;
+  const workspaceId = _createWorkspaceMeta(workspaceName);
+  renderWorkspaceBar();
+  switchWorkspace(workspaceId);
+  return createTab(normalized);
 }
 
 async function _destroyPane(paneId) {
@@ -1425,6 +2195,86 @@ function showSettingsPanel() {
   return panelsRuntime?.showSettingsPanel();
 }
 
+function toggleSessionVaultPanel(force) {
+  return panelsRuntime?.toggleSessionVaultPanel(force);
+}
+
+function buildSessionVaultTranscriptHtml(entry) {
+  const title = entry.pane_title || entry.tab_title || 'Terminal transcript';
+  const metaBits = [
+    new Date(entry.saved_at).toLocaleString(),
+    entry.workspace_name,
+    entry.tab_title,
+    entry.target_label,
+    entry.cwd,
+    entry.pane_detail,
+    entry.reason,
+  ].filter(Boolean);
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escHtml(title)}</title><style>html,body{margin:0;padding:0;background:#0f1115;color:#e4e4e7;font-family:'Cascadia Code','Fira Code','Consolas',monospace}body{padding:24px}header{margin-bottom:18px}h1{margin:0 0 8px;font-size:18px;font-family:system-ui,-apple-system,sans-serif}p{margin:0;color:#a1a1aa;font-size:12px;font-family:system-ui,-apple-system,sans-serif}pre{margin:0;padding:16px;border-radius:12px;background:#151821;border:1px solid rgba(255,255,255,0.08);white-space:pre-wrap;word-break:break-word;line-height:1.45;font-size:12px}</style></head><body><header><h1>${escHtml(title)}</h1><p>${escHtml(metaBits.join(' · '))}</p></header><pre>${escHtml(entry.transcript ?? '')}</pre></body></html>`;
+}
+
+async function openSessionVaultEntryInBrowser(entryId) {
+  const entry = await invoke('read_session_vault_entry', { id: entryId });
+  const previewUrl = await invoke('save_artifact_preview', { html: buildSessionVaultTranscriptHtml(entry) });
+  if (!activeTabId) await createTab(getDefaultTarget());
+  if (activeTabId) await openBrowserSplitForTab(activeTabId, previewUrl);
+}
+
+async function saveSessionVaultEntryForPane(paneId = activePaneId, { force = false, reason = 'manual' } = {}) {
+  const pane = panes.get(paneId);
+  if (!pane) {
+    if (force) showError('No active terminal pane to archive');
+    return null;
+  }
+
+  backfillPaneCwdFromTranscript(pane);
+
+  const tab = tabs.get(pane.tabId);
+  const workspace = tab ? workspaces.get(tab.workspaceId) : null;
+  let transcript = '';
+  try {
+    transcript = await invoke('capture_session_output_by_id', { id: paneId }) ?? '';
+  } catch (err) {
+    console.warn(`Could not capture transcript for pane ${paneId}:`, err);
+  }
+  transcript = String(transcript || pane.outputSnapshot || '').replace(/\0/g, '').trimEnd();
+  if (!transcript.trim()) return null;
+
+  const signature = `${transcript.length}:${transcript.slice(-512)}`;
+  if (!force && pane.lastSessionVaultSignature === signature) {
+    return pane.lastSessionVaultEntryId ? { id: pane.lastSessionVaultEntryId } : null;
+  }
+
+  const paneLabel = getPaneAutoLabel(pane);
+  try {
+    const saved = await invoke('save_session_vault_entry', {
+      request: {
+        paneId,
+        workspaceName: workspace?.name ?? '',
+        tabTitle: tab?.title ?? 'Terminal',
+        paneTitle: pane.labelOverride?.trim() || paneLabel.primary || 'Terminal',
+        paneDetail: paneLabel.secondary || null,
+        targetKind: getTargetKind(pane.target),
+        targetLabel: defaultTargetLabel(pane.target),
+        cwd: pane.cwd || null,
+        transcript,
+        reason,
+      },
+    });
+    pane.lastSessionVaultSignature = signature;
+    pane.lastSessionVaultEntryId = saved.id;
+    return saved;
+  } catch (err) {
+    console.warn(`Could not persist transcript for pane ${paneId}:`, err);
+    return null;
+  }
+}
+
+async function flushSessionVaultEntries({ force = false, reason = 'shutdown', paneIds = null } = {}) {
+  const ids = Array.isArray(paneIds) ? paneIds : [...panes.keys()];
+  await Promise.allSettled(ids.map((paneId) => saveSessionVaultEntryForPane(paneId, { force, reason })));
+}
+
 // ── Browser pane (embedded child webview alongside a terminal) ─────────────────
 
 async function createMarkdownLeaf(tabId, mountEl, initialState = {}) {
@@ -1456,7 +2306,7 @@ async function showNewTabPopover() {
     if (t.type !== defaultTarget.type) return false;
     if (t.type === 'local') return true;
     if (t.type === 'wsl')   return t.distro === defaultTarget.distro;
-    if (t.type === 'ssh')   return sshTargetsEqual(t, defaultTarget);
+    if (t.type === 'ssh' || t.type === 'remote_tmux') return sshTargetsEqual(t, defaultTarget);
     return false;
   };
 
@@ -1498,7 +2348,7 @@ async function showNewTabPopover() {
     <div class="nt-section-label">Window</div>
     <div id="nt-window-row"></div>
 
-    <div class="nt-section-label">Saved SSH</div>
+    <div class="nt-section-label">Saved connections</div>
     <div id="nt-ssh-saved-list" class="nt-ssh-saved-list"></div>
 
     <div class="nt-section-label">SSH</div>
@@ -1509,6 +2359,19 @@ async function showNewTabPopover() {
         <input id="nt-ssh-port" type="number" placeholder="Port (22)" min="1" max="65535" />
       </div>
       <input id="nt-ssh-key" type="text" placeholder="SSH key path, e.g. ~/.ssh/id_rsa (optional)" spellcheck="false" />
+      <label class="nt-ssh-default-label nt-ssh-toggle-row">
+        <input type="checkbox" id="nt-ssh-use-tmux"> Use tmux
+      </label>
+      <div id="nt-ssh-tmux-fields" hidden>
+        <div class="nt-ssh-row">
+          <select id="nt-ssh-tmux-mode">
+            <option value="attach">Restore existing session</option>
+            <option value="create">Create new session</option>
+            <option value="attach_or_create">Restore or create session</option>
+          </select>
+          <input id="nt-ssh-session" type="text" placeholder="tmux session name" spellcheck="false" />
+        </div>
+      </div>
       <div class="nt-ssh-actions">
         <label class="nt-ssh-default-label">
           <input type="checkbox" id="nt-ssh-set-default"> Set as default
@@ -1555,61 +2418,112 @@ async function showNewTabPopover() {
   const sshHostInput = popover.querySelector('#nt-ssh-host');
   const sshPortInput = popover.querySelector('#nt-ssh-port');
   const sshKeyInput = popover.querySelector('#nt-ssh-key');
+  const sshUseTmuxInput = popover.querySelector('#nt-ssh-use-tmux');
+  const sshTmuxFields = popover.querySelector('#nt-ssh-tmux-fields');
+  const sshTmuxModeInput = popover.querySelector('#nt-ssh-tmux-mode');
+  const sshSessionInput = popover.querySelector('#nt-ssh-session');
   const sshDefaultInput = popover.querySelector('#nt-ssh-set-default');
   const sshSaveBtn = popover.querySelector('#nt-ssh-save');
-  const sshConnectBtn = popover.querySelector('#nt-ssh-connect');
   const sshFormState = popover.querySelector('#nt-ssh-form-state');
+  const formRefs = {
+    nameInput: sshNameInput,
+    hostInput: sshHostInput,
+    portInput: sshPortInput,
+    keyInput: sshKeyInput,
+    useTmuxInput: sshUseTmuxInput,
+    tmuxFields: sshTmuxFields,
+    sessionModeInput: sshTmuxModeInput,
+    sessionInput: sshSessionInput,
+    defaultInput: sshDefaultInput,
+    saveBtn: sshSaveBtn,
+    formState: sshFormState,
+  };
 
-  const parseSshFormTarget = () => {
-    const raw = sshHostInput.value.trim();
-    const parsedPort = parseInt(sshPortInput.value, 10);
-    const port = Number.isInteger(parsedPort) ? parsedPort : null;
-    if (!raw) return null;
-
-    let user = null;
-    let host = raw;
-    if (raw.includes('@')) [user, host] = raw.split('@', 2);
-
-    return normalizeSshTarget({
-      type: 'ssh',
-      name: sshNameInput.value.trim() || null,
-      host,
-      user,
-      port,
-      identity_file: sshKeyInput.value.trim() || null,
+  const parseConnectionTarget = () => {
+    return buildConnectionTargetFromFields({
+      name: formRefs.nameInput.value,
+      host: formRefs.hostInput.value,
+      port: formRefs.portInput.value,
+      identityFile: formRefs.keyInput.value,
+      useTmux: formRefs.useTmuxInput.checked,
+      sessionMode: formRefs.sessionModeInput.value,
+      sessionName: formRefs.sessionInput.value,
     });
   };
 
-  const updateSshFormState = () => {
-    if (editingSavedSshId) {
-      const existing = savedSshTargets.find((entry) => entry.id === editingSavedSshId);
-      sshFormState.textContent = existing ? `Editing ${sshTargetDisplayName(existing)}` : 'Editing saved SSH connection';
-      sshFormState.classList.add('is-editing');
-      sshSaveBtn.textContent = 'Update';
-      return;
-    }
-    sshFormState.textContent = 'Save a connection to keep it in the picker.';
-    sshFormState.classList.remove('is-editing');
-    sshSaveBtn.textContent = 'Save';
+  const updateTmuxFieldVisibility = () => {
+    formRefs.tmuxFields.hidden = !formRefs.useTmuxInput.checked;
+    formRefs.sessionInput.placeholder = formRefs.sessionModeInput.value === REMOTE_TMUX_SESSION_MODES.CREATE
+      ? 'tmux session name for the new session'
+      : 'tmux session name';
   };
 
-  const fillSshForm = (target, { editingId = null, preserveDefault = false } = {}) => {
+  const clearConnectionForm = () => {
+    formRefs.nameInput.value = '';
+    formRefs.hostInput.value = '';
+    formRefs.portInput.value = '';
+    formRefs.keyInput.value = '';
+    formRefs.useTmuxInput.checked = false;
+    formRefs.sessionModeInput.value = REMOTE_TMUX_SESSION_MODES.ATTACH;
+    formRefs.sessionInput.value = '';
+    formRefs.defaultInput.checked = false;
+    updateTmuxFieldVisibility();
+  };
+
+  const updateConnectionFormState = () => {
+    if (editingSavedSshId) {
+      const existing = savedSshTargets.find((entry) => entry.id === editingSavedSshId);
+      formRefs.formState.textContent = existing ? `Editing ${sshTargetDisplayName(existing)}` : 'Editing saved connection';
+      formRefs.formState.classList.add('is-editing');
+      formRefs.saveBtn.textContent = 'Update';
+      return;
+    }
+
+    const tmuxMode = formRefs.sessionModeInput.value;
+    formRefs.formState.textContent = formRefs.useTmuxInput.checked
+      ? (tmuxMode === REMOTE_TMUX_SESSION_MODES.CREATE
+        ? 'Connect over SSH and create a named tmux session on the remote host.'
+        : tmuxMode === REMOTE_TMUX_SESSION_MODES.ATTACH
+          ? 'Connect over SSH and restore a named tmux session on the remote host.'
+          : 'Connect over SSH and restore or create a named tmux session on the remote host.')
+      : 'Save a plain SSH shell connection to keep it in the picker.';
+    formRefs.formState.classList.remove('is-editing');
+    formRefs.saveBtn.textContent = 'Save';
+  };
+
+  const fillConnectionForm = (target, { editingId = null, preserveDefault = false } = {}) => {
     const normalized = normalizeSshTarget(target);
     if (!normalized) return;
     editingSavedSshId = editingId;
-    sshNameInput.value = normalized.name ?? '';
-    sshHostInput.value = normalized.user ? `${normalized.user}@${normalized.host}` : normalized.host;
-    sshPortInput.value = normalized.port ?? '';
-    sshKeyInput.value = normalized.identity_file ?? '';
-    sshDefaultInput.checked = preserveDefault ? sshDefaultInput.checked : isDefaultTarget(normalized);
-    updateSshFormState();
+    clearConnectionForm();
+    formRefs.nameInput.value = normalized.name ?? '';
+    formRefs.hostInput.value = normalized.user ? `${normalized.user}@${normalized.host}` : normalized.host;
+    formRefs.portInput.value = normalized.port ?? '';
+    formRefs.keyInput.value = normalized.identity_file ?? '';
+    formRefs.useTmuxInput.checked = normalized.type === 'remote_tmux';
+    formRefs.sessionModeInput.value = normalized.type === 'remote_tmux'
+      ? normalized.session_mode ?? REMOTE_TMUX_SESSION_MODES.ATTACH_OR_CREATE
+      : REMOTE_TMUX_SESSION_MODES.ATTACH;
+    formRefs.sessionInput.value = normalized.type === 'remote_tmux' ? normalized.session_name : '';
+    formRefs.defaultInput.checked = preserveDefault ? formRefs.defaultInput.checked : isDefaultTarget(normalized);
+    updateTmuxFieldVisibility();
+    updateConnectionFormState();
+  };
+
+  const validateConnectionTarget = (target) => {
+    if (target) return null;
+    if (!formRefs.hostInput.value.trim()) return 'SSH host is required. Use host or user@host.';
+    if (formRefs.useTmuxInput.checked && !formRefs.sessionInput.value.trim()) {
+      return 'tmux session name is required when Use tmux is enabled.';
+    }
+    return 'SSH host is required. Use host or user@host.';
   };
 
   const renderSavedSshTargets = () => {
     sshSavedList.innerHTML = '';
     if (savedSshTargets.length === 0) {
-      sshSavedList.innerHTML = '<span class="nt-empty">Saved SSH connections will show up here.</span>';
-      updateSshFormState();
+      sshSavedList.innerHTML = '<span class="nt-empty">Saved SSH and remote tmux connections will show up here.</span>';
+      updateConnectionFormState();
       return;
     }
 
@@ -1621,7 +2535,7 @@ async function showNewTabPopover() {
       connectBtn.className = 'nt-saved-ssh-main';
       connectBtn.innerHTML = `
         <span class="nt-saved-ssh-title">${escHtml(sshTargetDisplayName(entry))}</span>
-        <span class="nt-saved-ssh-detail">${escHtml(sshTargetConnectionLabel(entry))}</span>
+        <span class="nt-saved-ssh-detail">${escHtml(sshTargetDetailLabel(entry))}</span>
       `;
       connectBtn.addEventListener('click', () => {
         closePopover();
@@ -1631,14 +2545,27 @@ async function showNewTabPopover() {
       const actions = document.createElement('div');
       actions.className = 'nt-saved-ssh-actions';
 
+      if (entry.type === 'remote_tmux') {
+        const workspaceBtn = document.createElement('button');
+        workspaceBtn.className = 'nt-saved-ssh-action';
+        workspaceBtn.title = 'Open saved remote tmux profile in a dedicated workspace';
+        workspaceBtn.textContent = 'Workspace';
+        workspaceBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          closePopover();
+          void openRemoteTmuxWorkspaceFromProfile(entry);
+        });
+        actions.appendChild(workspaceBtn);
+      }
+
       const editBtn = document.createElement('button');
       editBtn.className = 'nt-saved-ssh-action';
       editBtn.title = 'Edit saved connection';
       editBtn.textContent = 'Edit';
       editBtn.addEventListener('click', (event) => {
         event.stopPropagation();
-        fillSshForm(entry, { editingId: entry.id });
-        sshHostInput.focus();
+        fillConnectionForm(entry, { editingId: entry.id });
+        formRefs.hostInput.focus();
       });
 
       const deleteBtn = document.createElement('button');
@@ -1649,7 +2576,10 @@ async function showNewTabPopover() {
         event.stopPropagation();
         savedSshTargets = savedSshTargets.filter((candidate) => candidate.id !== entry.id);
         saveSavedSshTargets(savedSshTargets);
-        if (editingSavedSshId === entry.id) editingSavedSshId = null;
+        if (editingSavedSshId === entry.id) {
+          editingSavedSshId = null;
+          clearConnectionForm();
+        }
         renderSavedSshTargets();
       });
 
@@ -1661,14 +2591,15 @@ async function showNewTabPopover() {
       sshSavedList.appendChild(row);
     }
 
-    updateSshFormState();
+    updateConnectionFormState();
   };
 
-  const saveSshProfile = () => {
-    const target = parseSshFormTarget();
-    if (!target) {
-      showError('SSH host is required. Use host or user@host.');
-      sshHostInput.focus();
+  const saveConnectionProfile = () => {
+    const target = parseConnectionTarget();
+    const validationError = validateConnectionTarget(target);
+    if (validationError) {
+      showError(validationError);
+      (formRefs.useTmuxInput.checked && !formRefs.sessionInput.value.trim() ? formRefs.sessionInput : formRefs.hostInput)?.focus();
       return null;
     }
 
@@ -1681,7 +2612,7 @@ async function showNewTabPopover() {
     else savedSshTargets.unshift(nextEntry);
     saveSavedSshTargets(savedSshTargets);
     editingSavedSshId = nextEntry.id;
-    if (sshDefaultInput.checked) {
+    if (formRefs.defaultInput.checked) {
       setDefaultTarget(nextEntry);
       defaultTarget = nextEntry;
     }
@@ -1711,23 +2642,32 @@ async function showNewTabPopover() {
   }
 
   // Pre-fill SSH fields if SSH is the current default
-  if (defaultTarget.type === 'ssh') {
-    fillSshForm(defaultTarget, { preserveDefault: true });
-    sshDefaultInput.checked = true;
+  if (defaultTarget.type === 'ssh' || defaultTarget.type === 'remote_tmux') {
+    fillConnectionForm(defaultTarget, { preserveDefault: true });
+    formRefs.defaultInput.checked = true;
   }
 
   renderSavedSshTargets();
+  updateTmuxFieldVisibility();
+  updateConnectionFormState();
 
-  sshSaveBtn.addEventListener('click', () => {
-    saveSshProfile();
+  sshSaveBtn.addEventListener('click', () => { saveConnectionProfile(); });
+  sshUseTmuxInput.addEventListener('change', () => {
+    updateTmuxFieldVisibility();
+    updateConnectionFormState();
+  });
+  sshTmuxModeInput.addEventListener('change', () => {
+    updateTmuxFieldVisibility();
+    updateConnectionFormState();
   });
 
   popover.querySelector('#nt-ssh-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    const target = parseSshFormTarget();
-    if (!target) {
-      showError('SSH host is required. Use host or user@host.');
-      sshHostInput.focus();
+    const target = parseConnectionTarget();
+    const validationError = validateConnectionTarget(target);
+    if (validationError) {
+      showError(validationError);
+      (sshUseTmuxInput.checked && !sshSessionInput.value.trim() ? sshSessionInput : sshHostInput).focus();
       return;
     }
     if (sshDefaultInput.checked) {
@@ -1834,6 +2774,10 @@ panelsRuntime = createUiPanelsRuntime({
   setPaneRing,
   openBrowserSplitForTab,
   splitPaneWithBrowser,
+  listSessionVaultEntries: () => invoke('list_session_vault_entries'),
+  readSessionVaultEntry: (id) => invoke('read_session_vault_entry', { id }),
+  captureSessionVaultEntry: (paneId, options) => saveSessionVaultEntryForPane(paneId, options),
+  openSessionVaultEntry: (entryId) => openSessionVaultEntryInBrowser(entryId),
 });
 
 // Layout persistence
@@ -1900,6 +2844,10 @@ function withTimeout(promise, ms, label) {
 function persistLayoutNow({ force = false, reason = 'manual' } = {}) {
   let layoutJson;
   try {
+    for (const pane of panes.values()) {
+      backfillPaneCwdFromTranscript(pane);
+      pane.screenSnapshot = captureVisibleTerminalScreen(pane.terminal, pane.serializeAddon);
+    }
     layoutJson = buildLayoutSnapshot();
   } catch (err) {
     console.warn(`Failed to serialize layout during ${reason}:`, err);
@@ -1996,6 +2944,12 @@ document.addEventListener('keydown', (e) => {
   if (ctrl && shift && !alt && key.toUpperCase() === 'O') {
     e.preventDefault();
     previewArtifactFromPane();
+    return;
+  }
+
+  if (ctrl && shift && !alt && key.toUpperCase() === 'J') {
+    e.preventDefault();
+    void toggleSessionVaultPanel();
     return;
   }
 
@@ -2120,6 +3074,7 @@ document.addEventListener('keydown', (e) => {
 btnNewTab.addEventListener('click', () => createTab(getDefaultTarget()));
 btnNewTabMore.addEventListener('click', showNewTabPopover);
 updateNewTabTooltip();
+document.getElementById('btn-session-vault')?.addEventListener('click', () => { void toggleSessionVaultPanel(); });
 document.getElementById('btn-settings')?.addEventListener('click', showSettingsPanel);
 
 const wsNameEl = document.getElementById('ws-name-label');
@@ -2128,6 +3083,7 @@ document.getElementById('workspace-bar')?.addEventListener('contextmenu', (event
   event.preventDefault();
   const ws = workspaces.get(activeWorkspaceId);
   if (!ws) return;
+  const remoteTmuxTabIds = workspaceRemoteTmuxTabIds(ws.id);
   const themeItems = WORKSPACE_THEMES.map((theme) => ({
     label: `${ws.themeId === theme.id ? '●' : '○'} Theme: ${theme.label}`,
     action: () => setWorkspaceTheme(ws.id, theme.id),
@@ -2135,6 +3091,7 @@ document.getElementById('workspace-bar')?.addEventListener('contextmenu', (event
   showContextMenu([
     { label: 'Rename workspace', action: () => startWorkspaceRename() },
     { label: ws.pinned ? 'Unpin workspace' : 'Pin workspace', action: () => setWorkspacePinned(ws.id, !ws.pinned) },
+    { label: 'Reconnect remote tmux tabs', action: () => reconnectRemoteTmuxWorkspace(ws.id), disabled: remoteTmuxTabIds.length === 0 },
     { type: 'separator' },
     ...themeItems,
     { type: 'separator' },
@@ -2179,6 +3136,7 @@ getCurrentWindow().onCloseRequested(async (event) => {
       clearTimeout(layoutSaveTimer);
       layoutSaveTimer = null;
     }
+    await withTimeout(flushSessionVaultEntries({ reason: 'shutdown' }), 2500, 'session vault flush');
     await withTimeout(closeBrowserSurfacesForShutdown(), 1500, 'browser cleanup');
     await withTimeout(persistLayoutNow({ force: true, reason: 'close-requested' }), 1500, 'layout save');
   } catch (err) {

@@ -23,9 +23,20 @@ export function createUiPanelsRuntime({
   setPaneRing,
   openBrowserSplitForTab,
   splitPaneWithBrowser,
+  listSessionVaultEntries,
+  readSessionVaultEntry,
+  captureSessionVaultEntry,
+  openSessionVaultEntry,
 }) {
   const artifacts = [];
   let artifactPanelVisible = false;
+  let sessionVaultPanelVisible = false;
+  let sessionVaultEntries = [];
+  let sessionVaultSelectedId = null;
+  let sessionVaultSelectedEntry = null;
+  let sessionVaultFilter = '';
+  let sessionVaultLoading = false;
+  let sessionVaultDetailLoading = false;
 
   function unreadNotificationCount(tabId) {
     return (notifications.get(tabId) ?? []).filter((item) => !item.read).length;
@@ -286,11 +297,40 @@ export function createUiPanelsRuntime({
     return tab.ports.size > 3 ? `${summary} +${tab.ports.size - 3}` : summary;
   }
 
+  function tabTargetBadgeText(tab) {
+    switch (tab?.targetKind) {
+      case 'remote_tmux':
+        return 'TMUX';
+      case 'ssh':
+        return 'SSH';
+      case 'wsl':
+        return 'WSL';
+      default:
+        return 'LOCAL';
+    }
+  }
+
   function updateTabMeta(tabId) {
     const tab = tabs.get(tabId);
     if (!tab) return;
     const targetEl = tab.tabEl.querySelector('.tab-target');
-    if (targetEl) targetEl.textContent = tab.targetLabel ?? '';
+    if (targetEl) {
+      targetEl.textContent = tabTargetBadgeText(tab);
+      targetEl.dataset.kind = tab.targetKind ?? 'local';
+      targetEl.dataset.status = tab.connectionStatus ?? 'unknown';
+      if (tab.targetKind === 'remote_tmux') {
+        const details = [tab.targetLabel];
+        details.push(`status: ${tab.connectionStatus ?? 'unknown'}`);
+        if (tab.remoteTmuxSessionName) details.push(`session: ${tab.remoteTmuxSessionName}`);
+        if (tab.remoteTmuxWindowName) details.push(`window: ${tab.remoteTmuxWindowName}`);
+        if (tab.cwd) details.push(tab.cwd);
+        if (tab.gitBranch) details.push(`branch: ${tab.gitBranch}`);
+        if (tab.remoteProbeError) details.push(`error: ${tab.remoteProbeError}`);
+        targetEl.title = details.filter(Boolean).join('\n');
+      } else {
+        targetEl.title = tab.targetLabel ?? '';
+      }
+    }
     const portsEl = tab.tabEl.querySelector('.tab-ports');
     if (portsEl) portsEl.textContent = getTabPortSummary(tab);
     const notifEl = tab.tabEl.querySelector('.tab-notif');
@@ -471,6 +511,171 @@ export function createUiPanelsRuntime({
     input.focus();
   }
 
+  function filteredSessionVaultEntries() {
+    const needle = sessionVaultFilter.trim().toLowerCase();
+    if (!needle) return sessionVaultEntries;
+    return sessionVaultEntries.filter((entry) => [
+      entry.workspace_name,
+      entry.tab_title,
+      entry.pane_title,
+      entry.pane_detail,
+      entry.target_label,
+      entry.cwd,
+      entry.reason,
+    ].some((value) => String(value ?? '').toLowerCase().includes(needle)));
+  }
+
+  function sessionVaultPreviewText(entry) {
+    const transcript = String(entry?.transcript ?? '');
+    return transcript.length > 20_000
+      ? `[preview clipped to last 20,000 chars]\n\n${transcript.slice(transcript.length - 20_000)}`
+      : transcript;
+  }
+
+  function renderSessionVaultPanel() {
+    document.getElementById('session-vault-panel')?.remove();
+    if (!sessionVaultPanelVisible) return;
+
+    const visibleEntries = filteredSessionVaultEntries();
+    const selectedEntry = sessionVaultSelectedEntry && sessionVaultSelectedEntry.id === sessionVaultSelectedId
+      ? sessionVaultSelectedEntry
+      : null;
+    const panel = document.createElement('div');
+    panel.id = 'session-vault-panel';
+    panel.className = 'session-vault-panel';
+    panel.innerHTML = `
+      <div class="session-vault-header">
+        <div>
+          <div class="session-vault-title">Session Vault</div>
+          <div class="session-vault-subtitle">Saved terminal transcripts outside the layout snapshot</div>
+        </div>
+        <div class="session-vault-actions">
+          <button class="session-vault-btn" data-action="capture">Capture current</button>
+          <button class="session-vault-btn" data-action="refresh">Refresh</button>
+          <button class="session-vault-close" data-action="close" title="Close">x</button>
+        </div>
+      </div>
+      <div class="session-vault-toolbar">
+        <input class="session-vault-filter" placeholder="Filter by workspace, pane, path..." value="${escHtml(sessionVaultFilter)}" />
+      </div>
+      <div class="session-vault-body">
+        <div class="session-vault-list">
+          ${sessionVaultLoading
+            ? '<div class="session-vault-empty">Loading transcripts...</div>'
+            : visibleEntries.length === 0
+              ? '<div class="session-vault-empty">No saved transcripts</div>'
+              : visibleEntries.map((entry) => `
+                <button class="session-vault-item${entry.id === sessionVaultSelectedId ? ' is-selected' : ''}" data-id="${entry.id}">
+                  <div class="session-vault-item-top">
+                    <span class="session-vault-item-title">${escHtml(entry.pane_title || entry.tab_title || 'Terminal')}</span>
+                    <span class="session-vault-item-time">${new Date(entry.saved_at).toLocaleString()}</span>
+                  </div>
+                  <div class="session-vault-item-meta">${escHtml(entry.workspace_name || 'Workspace')} · ${escHtml(entry.target_label || entry.target_kind || 'terminal')}</div>
+                  <div class="session-vault-item-meta">${escHtml(entry.cwd || entry.reason || '')}</div>
+                </button>`).join('')}
+        </div>
+        <div class="session-vault-preview">
+          ${sessionVaultDetailLoading
+            ? '<div class="session-vault-empty">Loading preview...</div>'
+            : selectedEntry
+              ? `
+                <div class="session-vault-preview-head">
+                  <div>
+                    <div class="session-vault-preview-title">${escHtml(selectedEntry.pane_title || selectedEntry.tab_title || 'Terminal')}</div>
+                    <div class="session-vault-preview-meta">${escHtml([selectedEntry.workspace_name, selectedEntry.tab_title, selectedEntry.target_label].filter(Boolean).join(' · '))}</div>
+                    <div class="session-vault-preview-meta">${escHtml([selectedEntry.cwd, selectedEntry.pane_detail, `${selectedEntry.transcript_chars} chars`, selectedEntry.reason].filter(Boolean).join(' · '))}</div>
+                  </div>
+                  <button class="session-vault-open" data-action="open" ${sessionVaultSelectedId ? '' : 'disabled'}>Open</button>
+                </div>
+                <pre class="session-vault-transcript">${escHtml(sessionVaultPreviewText(selectedEntry))}</pre>
+              `
+              : '<div class="session-vault-empty">Select a transcript to preview it</div>'}
+        </div>
+      </div>
+    `;
+
+    panel.querySelector('[data-action="close"]').addEventListener('click', () => {
+      sessionVaultPanelVisible = false;
+      renderSessionVaultPanel();
+    });
+    panel.querySelector('[data-action="refresh"]').addEventListener('click', async () => {
+      await refreshSessionVaultPanel();
+    });
+    panel.querySelector('[data-action="capture"]').addEventListener('click', async () => {
+      const saved = await captureSessionVaultEntry(getActivePaneId(), { force: true, reason: 'manual' });
+      await refreshSessionVaultPanel({ selectedId: saved?.id ?? sessionVaultSelectedId });
+    });
+    panel.querySelector('.session-vault-filter').addEventListener('input', (event) => {
+      sessionVaultFilter = event.target.value;
+      renderSessionVaultPanel();
+    });
+    panel.querySelectorAll('.session-vault-item').forEach((el) => {
+      el.addEventListener('click', async () => {
+        await loadSessionVaultEntry(el.dataset.id);
+      });
+    });
+    panel.querySelector('[data-action="open"]')?.addEventListener('click', async () => {
+      if (!sessionVaultSelectedId) return;
+      await openSessionVaultEntry(sessionVaultSelectedId);
+    });
+
+    document.getElementById('content').appendChild(panel);
+  }
+
+  async function loadSessionVaultEntry(entryId) {
+    if (!entryId) return null;
+    sessionVaultSelectedId = entryId;
+    sessionVaultDetailLoading = true;
+    renderSessionVaultPanel();
+    try {
+      sessionVaultSelectedEntry = await readSessionVaultEntry(entryId);
+      return sessionVaultSelectedEntry;
+    } catch (err) {
+      sessionVaultSelectedEntry = null;
+      showError(`Could not load transcript: ${err}`);
+      return null;
+    } finally {
+      sessionVaultDetailLoading = false;
+      renderSessionVaultPanel();
+    }
+  }
+
+  async function refreshSessionVaultPanel({ selectedId = sessionVaultSelectedId } = {}) {
+    sessionVaultLoading = true;
+    renderSessionVaultPanel();
+    try {
+      sessionVaultEntries = await listSessionVaultEntries();
+      sessionVaultSelectedId = selectedId && sessionVaultEntries.some((entry) => entry.id === selectedId)
+        ? selectedId
+        : sessionVaultEntries[0]?.id ?? null;
+      if (sessionVaultSelectedId) {
+        await loadSessionVaultEntry(sessionVaultSelectedId);
+        return sessionVaultEntries;
+      }
+      sessionVaultSelectedEntry = null;
+      return sessionVaultEntries;
+    } catch (err) {
+      sessionVaultEntries = [];
+      sessionVaultSelectedId = null;
+      sessionVaultSelectedEntry = null;
+      showError(`Could not load session vault: ${err}`);
+      return [];
+    } finally {
+      sessionVaultLoading = false;
+      renderSessionVaultPanel();
+    }
+  }
+
+  async function toggleSessionVaultPanel(force) {
+    sessionVaultPanelVisible = typeof force === 'boolean' ? force : !sessionVaultPanelVisible;
+    if (!sessionVaultPanelVisible) {
+      renderSessionVaultPanel();
+      return false;
+    }
+    await refreshSessionVaultPanel();
+    return true;
+  }
+
   function showSettingsPanel() {
     document.getElementById('settings-panel')?.remove();
     const s = loadSettings();
@@ -538,6 +743,8 @@ export function createUiPanelsRuntime({
     toggleArtifactPanel,
     renderArtifactPanel,
     previewArtifactFromPane,
+    toggleSessionVaultPanel,
+    renderSessionVaultPanel,
     markTabNotificationsRead,
     markPaneNotificationsRead,
     clearTabNotifications,

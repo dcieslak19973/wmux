@@ -70,7 +70,13 @@ impl ConPtySession {
     /// `extra_env` is a list of `("KEY", "VALUE")` pairs that are **merged on
     /// top of** the inherited parent environment before the child starts.
     /// Use this to inject `TERM`, `COLORTERM`, etc.
-    pub fn spawn(cmdline: &str, cols: u16, rows: u16, extra_env: &[(&str, &str)]) -> Result<Self> {
+    pub fn spawn(
+        cmdline: &str,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(&str, &str)],
+        cwd: Option<&str>,
+    ) -> Result<Self> {
         unsafe {
             // ── Create two pipe pairs ────────────────────────────────────────
             // Pipe 1: our write end → ConPTY read end  (keyboard input)
@@ -144,6 +150,11 @@ impl ConPtySession {
             // ── Spawn the shell process ──────────────────────────────────────
             let mut cmdline_w: Vec<u16> =
                 cmdline.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut cwd_w = cwd.map(|value| {
+                value.encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<u16>>()
+            });
             let mut proc_info: PROCESS_INFORMATION = std::mem::zeroed();
 
             CreateProcessW(
@@ -154,7 +165,10 @@ impl ConPtySession {
                 false,
                 creation_flags,
                 lp_env,
-                None,
+                cwd_w
+                    .as_mut()
+                    .map(|value| windows::core::PCWSTR(value.as_ptr()))
+                    .unwrap_or(windows::core::PCWSTR::null()),
                 &siex.StartupInfo as *const _ as *mut _,
                 &mut proc_info,
             )

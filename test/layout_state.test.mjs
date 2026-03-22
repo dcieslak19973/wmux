@@ -7,6 +7,10 @@ import {
   dirnameFromPath,
   resolveMarkdownPath,
 } from '../src/layout_state.mjs';
+import {
+  buildRestoredTerminalState,
+  buildTerminalPaneSnapshot,
+} from '../src/layout_runtime.mjs';
 
 test('resolveMarkdownPath preserves absolute paths and joins relative paths', () => {
   assert.equal(resolveMarkdownPath('README.md', 'C:\\repo\\docs'), 'C:\\repo\\docs\\README.md');
@@ -63,4 +67,66 @@ test('buildSerializedLayout omits notif panel state when no tab is targeted', ()
 
   assert.equal(layout.ui.notifPanel, null);
   assert.deepEqual(layout.workspaces[0].tabs, []);
+});
+
+test('buildTerminalPaneSnapshot preserves terminal restore payload fields', () => {
+  const pane = {
+    target: { type: 'wsl', distro: 'Ubuntu' },
+    cwd: 'C:\\repo\\docs',
+    previousCwd: 'C:\\repo',
+    history: ['git status', 'npm test'],
+    screenSnapshot: 'visible screen buffer',
+    outputSnapshot: 'plain text transcript',
+    labelOverride: 'Docs shell',
+    lastSessionVaultEntryId: 'vault-123',
+  };
+
+  const snapshot = buildTerminalPaneSnapshot(pane);
+
+  assert.deepEqual(snapshot, {
+    kind: 'terminal',
+    target: { type: 'wsl', distro: 'Ubuntu' },
+    cwd: 'C:\\repo\\docs',
+    previousCwd: 'C:\\repo',
+    history: ['git status', 'npm test'],
+    screenSnapshot: 'visible screen buffer',
+    outputSnapshot: 'plain text transcript',
+    labelOverride: 'Docs shell',
+    vaultEntryId: 'vault-123',
+  });
+  assert.notEqual(snapshot.history, pane.history);
+});
+
+test('buildRestoredTerminalState normalizes terminal restore payload fields', () => {
+  const node = {
+    cwd: '/repo',
+    previousCwd: '/repo/prev',
+    history: ['ls'],
+    screenSnapshot: 'visible restore',
+    outputSnapshot: 'restored output',
+    labelOverride: 'Main shell',
+    vaultEntryId: 'vault-abc',
+  };
+
+  const restored = buildRestoredTerminalState(node);
+
+  assert.deepEqual(restored, {
+    cwd: '/repo',
+    previousCwd: '/repo/prev',
+    history: ['ls'],
+    screenSnapshot: 'visible restore',
+    outputSnapshot: 'restored output',
+    labelOverride: 'Main shell',
+    vaultEntryId: 'vault-abc',
+  });
+  assert.notEqual(restored.history, node.history);
+  assert.deepEqual(buildRestoredTerminalState({}), {
+    cwd: '',
+    previousCwd: '',
+    history: [],
+    screenSnapshot: '',
+    outputSnapshot: '',
+    labelOverride: null,
+    vaultEntryId: null,
+  });
 });

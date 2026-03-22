@@ -1,3 +1,4 @@
+mod control_bridge;
 mod commands;
 mod conpty;
 mod ipc_server;
@@ -5,6 +6,7 @@ mod osc_parser;
 mod session_manager;
 mod url_detector;
 
+pub use control_bridge::FrontendControlBridge;
 pub use session_manager::{SessionManager, ShellTarget};
 
 use tauri::Manager;
@@ -14,9 +16,11 @@ pub fn run() {
     env_logger::init();
 
     let session_manager = SessionManager::new();
+    let control_bridge = FrontendControlBridge::new();
 
     tauri::Builder::default()
         .manage(session_manager)
+        .manage(control_bridge)
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
             commands::close_session,
@@ -31,6 +35,7 @@ pub fn run() {
             commands::capture_session_output,
             commands::capture_session_output_by_id,
             commands::get_git_branch,
+            commands::get_git_context,
             commands::save_artifact_preview,
             commands::read_text_file,
             commands::create_app_window,
@@ -39,6 +44,8 @@ pub fn run() {
             commands::set_browser_visible,
             commands::set_browser_geometry,
             commands::close_browser_window,
+            commands::complete_control_request,
+            commands::exit_app,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
@@ -50,16 +57,23 @@ pub fn run() {
             // Start the named-pipe IPC server inside setup() so Tauri's
             // async runtime is already live when we call tauri::async_runtime::spawn.
             let mgr: tauri::State<SessionManager> = app.state();
-            ipc_server::start(mgr.inner().clone());
+            let bridge: tauri::State<FrontendControlBridge> = app.state();
+            ipc_server::start(app.handle().clone(), mgr.inner().clone(), bridge.inner().clone());
 
             Ok(())
         })
         .on_window_event(|window, event| {
             // Exit when the last window closes.  Background tasks (ConPTY loops,
             // IPC pipe server) keep the process alive otherwise.
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                let remaining = window.app_handle().webview_windows().len();
-                if remaining <= 1 {
+            if let tauri::WindowEvent::Destroyed = event {
+                let current_label = window.label().to_string();
+                let remaining = window
+                    .app_handle()
+                    .webview_windows()
+                    .into_iter()
+                    .filter(|(label, _)| label != &current_label)
+                    .count();
+                if remaining == 0 {
                     std::process::exit(0);
                 }
             }

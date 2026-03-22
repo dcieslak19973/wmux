@@ -152,23 +152,35 @@ impl SessionManager {
     ) -> Result<(String, String)> {
         let cmdline = target.cmdline()?;
         let label = target.label();
+        let id = Uuid::new_v4().to_string();
+        let tmux_pane = format!("%{}", &id[..8]);
+        let tmux_session = format!("wmux,{},0", &id[..8]);
 
         // Always inject terminal capability env vars so colors and prompts work
         // for every session type (local, WSL, SSH).
         //
         //  TERM=xterm-256color  — advertises 256-color capability to the shell
         //  COLORTERM=truecolor  — opts into 24-bit RGB (xterm.js supports it)
+        //  TMUX / TMUX_PANE     — minimal tmux-presence hints for agent CLIs
+        //  WMUX*                — wmux-native escape hatch for future tooling
         //
         // For SSH: OpenSSH reads TERM from the local env and sends it in the
         // PTY-request to the server, so the remote $TERM is set automatically.
         // COLORTERM is forwarded via SendEnv=COLORTERM (when server permits it).
-        let env_overrides: &[(&str, &str)] = &[
-            ("TERM", "xterm-256color"),
-            ("COLORTERM", "truecolor"),
+        let env_overrides = vec![
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("COLORTERM".to_string(), "truecolor".to_string()),
+            ("TMUX".to_string(), tmux_session),
+            ("TMUX_PANE".to_string(), tmux_pane.clone()),
+            ("WMUX".to_string(), "1".to_string()),
+            ("WMUX_PANE_ID".to_string(), id.clone()),
         ];
+        let env_override_refs: Vec<(&str, &str)> = env_overrides
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
 
-        let session = ConPtySession::spawn(&cmdline, cols, rows, env_overrides)?;
-        let id = Uuid::new_v4().to_string();
+        let session = ConPtySession::spawn(&cmdline, cols, rows, &env_override_refs)?;
 
         // Start a background task that feeds raw output into the capture buffer.
         let output_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));

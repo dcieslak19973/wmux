@@ -1,9 +1,9 @@
 /// Tauri IPC command handlers — the bridge between the WebView frontend
 /// and the Rust ConPTY session manager.
-use crate::{osc_parser::{self, OscEvent}, session_manager::{ShellTarget, WslDistro}, url_detector, SessionManager};
+use crate::{osc_parser::{self, OscEvent}, session_manager::{ShellTarget, WslDistro}, url_detector, FrontendControlBridge, SessionManager};
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +38,15 @@ pub struct CreateBrowserWindowRequest {
     pub label: String,
     pub url: String,
     pub geometry: BrowserGeometry,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GitContextResult {
+    pub repo_root: String,
+    pub repo_name: String,
+    pub branch: Option<String>,
+    pub worktree_name: Option<String>,
+    pub is_worktree: bool,
 }
 
 /// Create a new terminal session for the given `target`.
@@ -270,18 +279,88 @@ pub async fn read_text_file(path: String) -> Result<String, String> {
 /// Return the current git branch for the given directory, or None.
 #[tauri::command]
 pub async fn get_git_branch(cwd: String) -> Result<Option<String>, String> {
+    git_stdout(&cwd, &["branch", "--show-current"])
+}
+
+/// Return repo/worktree context for the given directory, or None when `cwd`
+/// is not inside a git repository.
+#[tauri::command]
+pub async fn get_git_context(cwd: String) -> Result<Option<GitContextResult>, String> {
+    let repo_root = match git_stdout(&cwd, &["rev-parse", "--show-toplevel"])? {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+
+    let branch = git_stdout(&cwd, &["branch", "--show-current"])?;
+    let git_dir_raw = match git_stdout(&cwd, &["rev-parse", "--git-dir"])? {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let common_dir_raw = match git_stdout(&cwd, &["rev-parse", "--git-common-dir"])? {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+
+    let cwd_path = Path::new(&cwd);
+    let repo_root_path = PathBuf::from(&repo_root);
+    let git_dir = resolve_git_path(cwd_path, &git_dir_raw);
+    let common_dir = resolve_git_path(cwd_path, &common_dir_raw);
+    let is_worktree = git_dir != common_dir;
+
+    let repo_name = common_dir
+        .parent()
+        .and_then(|path| path.file_name())
+        .or_else(|| repo_root_path.file_name())
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+
+    let worktree_name = if is_worktree {
+        repo_root_path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .or_else(|| {
+                git_dir
+                    .parent()
+                    .and_then(|path| path.file_name())
+                    .map(|value| value.to_string_lossy().into_owned())
+            })
+    } else {
+        None
+    };
+
+    Ok(Some(GitContextResult {
+        repo_root,
+        repo_name,
+        branch,
+        worktree_name,
+        is_worktree,
+    }))
+}
+
+fn git_stdout(cwd: &str, args: &[&str]) -> Result<Option<String>, String> {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt as _;
+
     let mut cmd = std::process::Command::new("git");
-    cmd.args(["-C", &cwd, "branch", "--show-current"]);
+    cmd.arg("-C").arg(cwd).args(args);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
     let output = cmd.output().map_err(|e| e.to_string())?;
-    if output.status.success() {
-        let b = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(if b.is_empty() { None } else { Some(b) })
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if value.is_empty() { None } else { Some(value) })
+}
+
+fn resolve_git_path(cwd: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
     } else {
-        Ok(None)
+        cwd.join(path)
     }
 }
 
@@ -387,6 +466,28 @@ pub async fn close_browser_window(app: AppHandle, label: String) -> Result<(), S
     if let Some(win) = app.get_webview(&label) {
         win.close().map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn complete_control_request(
+    bridge: State<'_, FrontendControlBridge>,
+    request_id: String,
+    ok: bool,
+    payload: Option<serde_json::Value>,
+    error: Option<String>,
+) -> Result<(), String> {
+    let result = if ok {
+        Ok(payload.unwrap_or(serde_json::Value::Null))
+    } else {
+        Err(error.unwrap_or_else(|| "frontend control failed".to_string()))
+    };
+    bridge.complete(request_id, result).await
+}
+
+#[tauri::command]
+pub async fn exit_app(app: AppHandle) -> Result<(), String> {
+    app.exit(0);
     Ok(())
 }
 

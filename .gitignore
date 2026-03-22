@@ -1,4 +1,9 @@
-node_modules
-dist
-target
-.vscode
+node_modules/
+dist/
+
+# Rust build artifacts
+target/
+**/target/
+
+# Editor settings
+.vscode/

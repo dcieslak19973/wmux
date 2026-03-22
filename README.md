@@ -100,15 +100,26 @@ wmux/
 │   ├── src/
 │   │   ├── main.rs           # binary entry point
 │   │   ├── lib.rs            # Tauri app setup & command registration
+│   │   ├── control_bridge.rs # frontend control request bridge
 │   │   ├── conpty.rs         # Windows ConPTY pseudoterminal wrapper
 │   │   ├── session_manager.rs# owns the Map<id, ConPtySession>
-│   │   └── commands.rs       # Tauri IPC handlers (create/close/write/resize)
+│   │   ├── ipc_server.rs     # named-pipe automation server
+│   │   ├── osc_parser.rs     # OSC 9 / 99 / 777 notification parsing
+│   │   ├── url_detector.rs   # localhost / URL metadata detection
+│   │   ├── commands.rs       # Tauri IPC handlers (create/close/write/resize)
+│   │   └── bin/tmux.rs       # tmux.exe compatibility shim
 │   ├── icons/                # app icons (auto-generated placeholders)
 │   ├── Cargo.toml
 │   ├── build.rs
 │   └── tauri.conf.json
 ├── src/
-│   ├── main.js               # xterm.js wiring, tab management
+│   ├── main.js               # app orchestration and layout persistence
+│   ├── automation_bridge.mjs # browser/workspace/tab/pane automation API
+│   ├── layout_runtime.mjs    # layout restore + split tree runtime
+│   ├── pane_aux_runtime.mjs  # pane focus/zoom helpers
+│   ├── surfaces_runtime.mjs  # browser + markdown surfaces
+│   ├── ui_panels_runtime.mjs # settings and side panels
+│   ├── workspace_state.mjs   # workspace state model
 │   └── style.css             # split-pane UI styles
 ├── index.html
 ├── vite.config.js
@@ -125,17 +136,35 @@ wmux/
 | `Ctrl+Tab` | Next tab |
 | `Ctrl+Shift+Tab` | Previous tab |
 
+## Current features
+
+- Local PowerShell or cmd tabs, WSL tabs, and SSH tabs from the same launcher.
+- Multiple named workspaces with pinning, rename, move-tab-between-workspaces, and per-workspace active tab restore.
+- Split-pane layouts with terminal, browser, and markdown surfaces in the same tab.
+- Browser panes backed by separate WebView2 windows, including restored URL history and back/forward state.
+- Markdown panes that can load files or inline content with syntax highlighting.
+- Notification ring and notification panel fed by OSC 9, OSC 99, and OSC 777 messages.
+- Sidebar metadata for cwd, git branch, detected localhost ports, unread notification counts, and latest notification text.
+- HTML artifact preview support for generated files.
+- Change-driven layout persistence across launches, with debounced saves plus hide/close fallback for workspaces, tabs, split trees, pinned state, active selections, zoom state, and browser history.
+- Named-pipe automation server for sessions, workspaces, tabs/windows, panes, browser panes, notifications, and layout export.
+- `tmux.exe` compatibility shim that covers the practical command/query subset agent harnesses expect for session creation, pane control, listing, capture, focus changes, and metadata queries. Detailed shim command and flag tracking lives in `docs/tmux-shim-compat.md`.
+- Child shells inherit honest terminal capability vars plus minimal tmux-presence env (`TMUX`, `TMUX_PANE`) and wmux-native identifiers (`WMUX`, `WMUX_PANE_ID`) so agent CLIs can detect multiplexer context without spoofing the terminal itself.
+
 ## Architecture notes
 
 - **ConPTY session lifecycle**: `create_session` → spawns shell via `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` → background thread reads output pipe → broadcasts via `tokio::broadcast` → Tauri emits `terminal-output-{id}` events to WebView.
-- **Notification rings**: When a non-active tab receives output, a yellow dot appears on the sidebar entry; it clears on activation.
+- **Workspace model**: The frontend keeps workspace, tab, pane, browser, and markdown state in memory and serializes that graph to JSON with debounced save-on-change plus visibility/close fallback for restore on the next launch.
+- **Notifications**: OSC 9, 99, and 777 payloads are parsed into per-tab notifications, unread counts, and sidebar ring state.
+- **Embedded browser surfaces**: Browser panes are coordinated through Tauri commands that create and position sibling WebView2 windows so they behave like split panes inside the main layout.
 - **Resize**: A `ResizeObserver` on each terminal pane calls `fitAddon.fit()` then `resize_session` Tauri command → `ResizePseudoConsole`.
+- **Automation surface**: The frontend exposes a `window.wmux` control API, the backend bridges those requests over a named pipe at `\\.\pipe\wmux-ipc`, and the `tmux.exe` shim maps a practical agent-oriented tmux subset onto that API.
 
 ## Roadmap
 
-- [ ] In-app browser panel (WebView2 second pane)
-- [ ] Pattern-based notification ring (`agent done`, `error:`, etc.)
-- [ ] Named-pipe scripting API compatible with cmux protocol
-- [ ] Git branch/status in tab title (via `git` subprocess)
-- [ ] Session persistence (serialize layout to JSON on exit, restore on launch)
+- [ ] Widen `tmux.exe` compatibility for additional harness-driven tmux behaviors and edge cases.
+- [ ] Add agent-grade browser automation primitives beyond open/navigate/close and manual browser panes.
+- [ ] Enrich sidebar metadata with PR/review state, explicit service status, and stronger port attribution.
+- [ ] Add layout import and other state mutation APIs for full external workspace provisioning.
+- [ ] Continue improving restore fidelity for more transient UI state and cross-window coordination.
 - [ ] Replace xterm.js renderer with Ghostty/wgpu terminal for GPU acceleration

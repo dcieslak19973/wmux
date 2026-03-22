@@ -167,7 +167,7 @@ impl SessionManager {
         // For SSH: OpenSSH reads TERM from the local env and sends it in the
         // PTY-request to the server, so the remote $TERM is set automatically.
         // COLORTERM is forwarded via SendEnv=COLORTERM (when server permits it).
-        let env_overrides = vec![
+        let env_overrides = [
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
             ("TMUX".to_string(), tmux_session),

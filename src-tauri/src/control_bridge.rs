@@ -14,8 +14,10 @@ pub struct FrontendControlRequest {
 
 #[derive(Clone, Default)]
 pub struct FrontendControlBridge {
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>,
+    pending: Arc<Mutex<PendingRequestMap>>,
 }
+
+type PendingRequestMap = HashMap<String, oneshot::Sender<Result<Value, String>>>;
 
 impl FrontendControlBridge {
     pub fn new() -> Self {

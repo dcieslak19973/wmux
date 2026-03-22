@@ -3,6 +3,14 @@
 /// Listens on `\\.\pipe\wmux-ipc` and accepts one JSON command per connection,
 /// returning a JSON response. This is the backend that the `tmux` shim binary
 /// and other automation clients talk to.
+struct OptionUpdate {
+    option: String,
+    value: Option<String>,
+    target: Option<String>,
+    global: bool,
+    append: bool,
+    unset: bool,
+}
 use crate::{FrontendControlBridge, SessionManager, ShellTarget};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -232,24 +240,19 @@ impl CompatibilityState {
     async fn store_option(
         &self,
         scope: OptionScope,
-        option: String,
-        value: Option<String>,
-        target: Option<String>,
-        global: bool,
-        append: bool,
-        unset: bool,
+        update: OptionUpdate,
     ) -> IpcResp {
-        if !is_supported_option(scope, &option) {
+        if !is_supported_option(scope, &update.option) {
             return IpcResp::ok();
         }
 
         let mut store = self.option_store.lock().await;
         store.set(OptionKey {
             scope,
-            option,
-            target,
-            global,
-        }, value, append, unset);
+            option: update.option,
+            target: update.target,
+            global: update.global,
+        }, update.value, update.append, update.unset);
         IpcResp::ok()
     }
 }
@@ -546,7 +549,14 @@ async fn dispatch(
             append,
             unset,
         } => compatibility
-            .store_option(OptionScope::Session, option, value, target, global, append, unset)
+            .store_option(OptionScope::Session, OptionUpdate {
+                option,
+                value,
+                target,
+                global,
+                append,
+                unset,
+            })
             .await,
         IpcCmd::SetWindowOption {
             option,
@@ -556,7 +566,14 @@ async fn dispatch(
             append,
             unset,
         } => compatibility
-            .store_option(OptionScope::Window, option, value, target, global, append, unset)
+            .store_option(OptionScope::Window, OptionUpdate {
+                option,
+                value,
+                target,
+                global,
+                append,
+                unset,
+            })
             .await,
         IpcCmd::ListWorkspaces => frontend(control, app, "list-workspaces", json!({})).await,
         IpcCmd::CreateWorkspace { name } => {

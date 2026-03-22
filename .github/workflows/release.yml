@@ -12,6 +12,9 @@
 
 name: Release
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     tags:
@@ -32,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 'lts/*'
+          node-version: '24'
           cache: 'npm'
 
       # ── Rust ─────────────────────────────────────────────────────────────
@@ -76,3 +79,35 @@ jobs:
           releaseDraft: true      # publish as draft so you can review before going live
           prerelease: ${{ contains(github.ref_name, '-') }}  # e.g. v1.0.0-beta.1
           includeUpdaterJson: false
+
+      - name: Package portable build
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $portableDir = "src-tauri/target/release/portable"
+          $zipPath = "src-tauri/target/release/bundle/portable/wmux_${version}_x64_portable.zip"
+
+          New-Item -ItemType Directory -Force $portableDir | Out-Null
+          New-Item -ItemType Directory -Force (Split-Path $zipPath) | Out-Null
+
+          Copy-Item "src-tauri/target/release/wmux.exe" "$portableDir/wmux.exe" -Force
+          Copy-Item "README.md" "$portableDir/README.md" -Force
+          if (Test-Path "LICENSE") {
+            Copy-Item "LICENSE" "$portableDir/LICENSE" -Force
+          }
+
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          Compress-Archive -Path "$portableDir/*" -DestinationPath $zipPath
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wmux-${{ github.ref_name }}-windows
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/portable/*.zip
+            src-tauri/target/release/wmux.exe

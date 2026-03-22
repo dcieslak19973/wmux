@@ -53,7 +53,11 @@ cargo tauri dev
 
 ## Git hooks
 
-This repo ships `pre-commit` and `pre-push` hooks that block direct commits and pushes to `main` and `master`.
+This repo ships `pre-commit` and `pre-push` hooks.
+
+`pre-commit` blocks direct commits to `main` and `master`, and it also runs `cargo clippy --manifest-path src-tauri/Cargo.toml -p wmux -- -D warnings` when staged Rust or Cargo files under `src-tauri/` change.
+
+`pre-push` blocks direct pushes to `main` and `master`.
 
 To enable the checked-in hooks for this clone:
 

@@ -8,19 +8,49 @@ fi
 
 allow_main_commit=$(git config --bool --get wmux.allowMainCommit 2>/dev/null)
 
-if [ "$ALLOW_MAIN_COMMIT" = "1" ] || [ "$allow_main_commit" = "true" ]; then
-  exit 0
-fi
-
 case "$branch" in
   main|master)
-    echo ""
-    echo "Blocked: direct commits to '$branch' are disabled in this repo."
-    echo "Create a feature branch first, for example: git switch -c my-change"
-    echo "If you truly need to bypass this guard, rerun with ALLOW_MAIN_COMMIT=1."
-    echo ""
-    exit 1
+    if [ "$ALLOW_MAIN_COMMIT" != "1" ] && [ "$allow_main_commit" != "true" ]; then
+      echo ""
+      echo "Blocked: direct commits to '$branch' are disabled in this repo."
+      echo "Create a feature branch first, for example: git switch -c my-change"
+      echo "If you truly need to bypass this guard, rerun with ALLOW_MAIN_COMMIT=1."
+      echo ""
+      exit 1
+    fi
     ;;
 esac
+
+staged_files=$(git diff --cached --name-only --diff-filter=ACMR)
+
+case "$staged_files" in
+  *src-tauri/*.rs*|*src-tauri/Cargo.toml*|*src-tauri/Cargo.lock*)
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+if [ -z "$repo_root" ]; then
+  echo ""
+  echo "Blocked: could not determine the repository root for the Clippy pre-commit check."
+  echo ""
+  exit 1
+fi
+
+echo "Running cargo clippy for staged Rust changes..."
+
+if ! (
+  cd "$repo_root" &&
+  cargo clippy --manifest-path src-tauri/Cargo.toml -p wmux -- -D warnings
+); then
+  echo ""
+  echo "Blocked: cargo clippy reported warnings or errors."
+  echo "Fix the issues above before committing."
+  echo ""
+  exit 1
+fi
 
 exit 0

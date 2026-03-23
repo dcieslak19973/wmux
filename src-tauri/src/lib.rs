@@ -5,6 +5,7 @@ mod conpty;
 mod ipc_server;
 mod osc_parser;
 mod remote_tmux;
+mod session_vault;
 mod session_manager;
 mod url_detector;
 
@@ -37,9 +38,9 @@ pub fn run() {
             commands::start_session_stream,
             commands::save_layout,
             commands::load_layout,
-            commands::save_session_vault_entry,
-            commands::list_session_vault_entries,
-            commands::read_session_vault_entry,
+            session_vault::save_session_vault_entry,
+            session_vault::list_session_vault_entries,
+            session_vault::read_session_vault_entry,
             commands::capture_session_output,
             commands::capture_session_output_by_id,
             commands::get_git_branch,

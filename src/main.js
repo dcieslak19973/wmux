@@ -857,6 +857,9 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     restoreReplayApplied = true;
     term.reset();
     writeTerminalSnapshot(term, pendingRestoreSnapshot, { serialized: restoreSnapshotIsSerialized });
+    if (restoreSnapshotIsSerialized && typeof term.scrollToTop === 'function') {
+      term.scrollToTop();
+    }
   };
 
   const scheduleRestoreReplay = () => {

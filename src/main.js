@@ -840,20 +840,35 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   const pendingRestoreSnapshot = screenSnapshot || outputSnapshot;
   const restoreSnapshotIsSerialized = !!screenSnapshot;
   const restoreReplaySanitizeUntil = pendingRestoreSnapshot ? Date.now() + 2200 : 0;
-  const restoreReplayDeadline = pendingRestoreSnapshot ? Date.now() + 3200 : 0;
-  let restoreReplayTimer = null;
+  let restoreReplayFrame = null;
+  let restoreReplayConfirmFrame = null;
   let restoreReplayApplied = false;
 
-  const scheduleRestoreReplay = (delay = 180) => {
+  const flushRestoreReplay = () => {
+    if (!pendingRestoreSnapshot || restoreReplayApplied || !panes.has(sessionId)) return;
+    if (restoreReplayFrame) {
+      cancelAnimationFrame(restoreReplayFrame);
+      restoreReplayFrame = null;
+    }
+    if (restoreReplayConfirmFrame) {
+      cancelAnimationFrame(restoreReplayConfirmFrame);
+      restoreReplayConfirmFrame = null;
+    }
+    restoreReplayApplied = true;
+    term.reset();
+    writeTerminalSnapshot(term, pendingRestoreSnapshot, { serialized: restoreSnapshotIsSerialized });
+  };
+
+  const scheduleRestoreReplay = () => {
     if (!pendingRestoreSnapshot || restoreReplayApplied) return;
-    if (restoreReplayTimer) clearTimeout(restoreReplayTimer);
-    restoreReplayTimer = setTimeout(() => {
-      restoreReplayTimer = null;
-      if (restoreReplayApplied || !panes.has(sessionId)) return;
-      restoreReplayApplied = true;
-      term.reset();
-      writeTerminalSnapshot(term, pendingRestoreSnapshot, { serialized: restoreSnapshotIsSerialized });
-    }, delay);
+    if (restoreReplayFrame || restoreReplayConfirmFrame) return;
+    restoreReplayFrame = requestAnimationFrame(() => {
+      restoreReplayFrame = null;
+      restoreReplayConfirmFrame = requestAnimationFrame(() => {
+        restoreReplayConfirmFrame = null;
+        flushRestoreReplay();
+      });
+    });
   };
 
   const transcriptDecoder = new TextDecoder();
@@ -865,6 +880,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   };
 
   term.onData(async (data) => {
+    flushRestoreReplay();
     try { await invoke('write_to_session', { id: sessionId, data }); }
     catch (err) { console.warn('write_to_session error:', err); }
     // Track commands typed for history picker.
@@ -903,6 +919,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
 
   const unlisten = await listen(`terminal-output-${sessionId}`, (event) => {
+    flushRestoreReplay();
     const bytes = base64Decode(event.payload);
     const decoded = transcriptDecoder.decode(bytes, { stream: true });
     if (restoreReplaySanitizeUntil > Date.now()) {
@@ -911,9 +928,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       term.write(bytes);
     }
     appendTranscriptChunk(decoded);
-    if (!restoreReplayApplied && pendingRestoreSnapshot && Date.now() <= restoreReplayDeadline) {
-      scheduleRestoreReplay(260);
-    }
     if (sessionId !== activePaneId) {
       const tab = tabs.get(tabId);
       if (tab) setTabRing(tab, true);
@@ -954,9 +968,13 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
 
   const unlistenAll = () => {
-    if (restoreReplayTimer) {
-      clearTimeout(restoreReplayTimer);
-      restoreReplayTimer = null;
+    if (restoreReplayFrame) {
+      cancelAnimationFrame(restoreReplayFrame);
+      restoreReplayFrame = null;
+    }
+    if (restoreReplayConfirmFrame) {
+      cancelAnimationFrame(restoreReplayConfirmFrame);
+      restoreReplayConfirmFrame = null;
     }
     appendTranscriptChunk(transcriptDecoder.decode());
     unlisten();
@@ -968,7 +986,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
   try { await invoke('start_session_stream', { id: sessionId }); }
   catch (err) { console.warn('start_session_stream error:', err); }
-  if (pendingRestoreSnapshot) scheduleRestoreReplay(520);
 
   term.onTitleChange((title) => {
     const tab = tabs.get(tabId);
@@ -1042,6 +1059,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   };
   panes.set(sessionId, paneState);
   renderPaneContextBadge(sessionId);
+  if (pendingRestoreSnapshot) scheduleRestoreReplay();
 
   const tabState = tabs.get(tabId);
   if (tabState) tabState.paneIds.add(sessionId);

@@ -1,4 +1,119 @@
 import { buildSerializedLayout } from './layout_state.mjs';
+import { normalizeTerminalTranscript } from './terminal_restore.mjs';
+
+export function trimTrailingPromptFromSerializedSnapshot(snapshot) {
+  const value = String(snapshot ?? '');
+  if (!value) return '';
+  const lines = value.split(/\r?\n/);
+  let index = lines.length - 1;
+  while (index >= 0 && !lines[index].trim()) index -= 1;
+  if (index < 0) return '';
+  const lastLine = lines[index];
+  if (/^(?:\([^)]*\)\s*)?[\w.@-]+@[\w.-]+:(?:~|\/[^#$%\r\n]*)\s*[#$%]\s*$/.test(lastLine)
+    || /^PS\s+[A-Za-z]:\\.*>\s*$/i.test(lastLine)
+    || /^[A-Za-z]:\\.*>\s*$/i.test(lastLine)) {
+    lines.splice(index, 1);
+    return lines.join('\n').replace(/[\r\n]+$/g, '');
+  }
+  return value;
+}
+
+export function getTrimmedViewportRange(terminal) {
+  const buffer = terminal?.buffer?.active;
+  const rows = Number(terminal?.rows) || 0;
+  if (!buffer || rows <= 0 || typeof buffer.getLine !== 'function') return null;
+
+  const viewportStart = Number.isInteger(buffer.viewportY) ? buffer.viewportY : Math.max(0, buffer.baseY);
+  const viewportEnd = Math.min(buffer.length - 1, viewportStart + rows - 1);
+  if (viewportEnd < viewportStart) return null;
+
+  let contentStart = viewportStart;
+  let contentEnd = viewportEnd;
+
+  while (contentStart <= viewportEnd) {
+    const line = buffer.getLine(contentStart)?.translateToString?.(true) ?? '';
+    if (line.trim()) break;
+    contentStart += 1;
+  }
+
+  while (contentEnd >= contentStart) {
+    const line = buffer.getLine(contentEnd)?.translateToString?.(true) ?? '';
+    if (line.trim()) break;
+    contentEnd -= 1;
+  }
+
+  if (contentEnd < contentStart) return null;
+  return { start: contentStart, end: contentEnd };
+}
+
+export function captureVisibleTerminalScreen(terminal, serializeAddon) {
+  const range = getTrimmedViewportRange(terminal);
+  if (!range || !serializeAddon?.serialize) return '';
+
+  const serialized = serializeAddon.serialize({
+    range,
+    excludeAltBuffer: true,
+    excludeModes: true,
+  });
+  return trimTrailingPromptFromSerializedSnapshot(serialized);
+}
+
+export function writeTerminalSnapshot(term, snapshot, { serialized = false } = {}) {
+  if (serialized) {
+    if (snapshot) term.write(String(snapshot));
+    return;
+  }
+  const normalized = normalizeTerminalTranscript(snapshot);
+  if (!normalized) return;
+  term.write(normalized.replace(/\n/g, '\r\n'));
+}
+
+export function sanitizeFallbackOutputSnapshot(snapshot) {
+  const normalized = normalizeTerminalTranscript(snapshot);
+  if (!normalized) return '';
+
+  const trimmedEdges = normalized
+    .replace(/^(?:\s*\n){3,}/, '')
+    .replace(/(?:\n\s*){3,}$/g, '')
+    .replace(/\n{4,}/g, '\n\n');
+
+  return trimmedEdges
+    .replace(/((?:\([^)]*\)\s*)?[\w.@-]+@[\w.-]+:(?:~|\/[^#$%\r\n]*)\s*[#$%])\s+\1$/gm, '$1')
+    .replace(/(PS\s+[A-Za-z]:\\[^>\r\n]*>?)\s+\1$/gmi, '$1')
+    .trimEnd();
+}
+
+export function sanitizeLayoutTreeSnapshots(node) {
+  if (!node || typeof node !== 'object') return node;
+  if (node.kind === 'terminal' || node.kind === 'leaf') {
+    node.outputSnapshot = '';
+    node.screenSnapshot = '';
+    return node;
+  }
+  if (node.kind === 'split') {
+    sanitizeLayoutTreeSnapshots(node.a);
+    sanitizeLayoutTreeSnapshots(node.b);
+  }
+  return node;
+}
+
+export function sanitizeRestoredLayout(layout) {
+  if (!layout || typeof layout !== 'object') return layout;
+  if (Array.isArray(layout.workspaces)) {
+    for (const workspace of layout.workspaces) {
+      for (const tab of workspace?.tabs ?? []) {
+        sanitizeLayoutTreeSnapshots(tab?.tree);
+      }
+    }
+    return layout;
+  }
+  if (Array.isArray(layout.tabs)) {
+    for (const tab of layout.tabs) {
+      sanitizeLayoutTreeSnapshots(tab?.tree);
+    }
+  }
+  return layout;
+}
 
 export function buildTerminalPaneSnapshot(pane) {
   if (!pane) return null;
@@ -8,8 +123,8 @@ export function buildTerminalPaneSnapshot(pane) {
     cwd: pane.cwd ?? '',
     previousCwd: pane.previousCwd ?? '',
     history: Array.isArray(pane.history) ? [...pane.history] : [],
-    screenSnapshot: pane.screenSnapshot ?? '',
-    outputSnapshot: pane.outputSnapshot ?? '',
+    screenSnapshot: '',
+    outputSnapshot: '',
     labelOverride: pane.labelOverride ?? null,
     vaultEntryId: pane.lastSessionVaultEntryId ?? null,
   };
@@ -20,10 +135,163 @@ export function buildRestoredTerminalState(node) {
     cwd: typeof node?.cwd === 'string' ? node.cwd : '',
     previousCwd: typeof node?.previousCwd === 'string' ? node.previousCwd : '',
     history: Array.isArray(node?.history) ? [...node.history] : [],
-    screenSnapshot: typeof node?.screenSnapshot === 'string' ? node.screenSnapshot : '',
-    outputSnapshot: typeof node?.outputSnapshot === 'string' ? node.outputSnapshot : '',
+    screenSnapshot: '',
+    outputSnapshot: '',
     labelOverride: node?.labelOverride ?? null,
     vaultEntryId: typeof node?.vaultEntryId === 'string' ? node.vaultEntryId : null,
+  };
+}
+
+export function createLayoutLifecycleRuntime({
+  document,
+  windowObject,
+  currentWindow,
+  invoke,
+  panes,
+  serializeLayout,
+  restoreLayout,
+  backfillPaneCwdFromTranscript,
+  closeBrowserSurfacesForShutdown,
+  flushSessionVaultEntries,
+  createDefaultLayout,
+}) {
+  let layoutSaveTimer = null;
+  let layoutSaveInFlight = Promise.resolve(false);
+  let lastSavedLayoutJson = null;
+  let windowCloseInProgress = false;
+  let lifecycleBound = false;
+
+  function buildLayoutSnapshot() {
+    return JSON.stringify(serializeLayout());
+  }
+
+  function withTimeout(promise, ms, label) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  }
+
+  function persistLayoutNow({ force = false, reason = 'manual' } = {}) {
+    let layoutJson;
+    try {
+      for (const pane of panes.values()) {
+        backfillPaneCwdFromTranscript(pane);
+      }
+      layoutJson = buildLayoutSnapshot();
+    } catch (err) {
+      console.warn(`Failed to serialize layout during ${reason}:`, err);
+      return Promise.resolve(false);
+    }
+
+    if (!force && layoutJson === lastSavedLayoutJson) return Promise.resolve(false);
+
+    layoutSaveInFlight = layoutSaveInFlight
+      .catch(() => false)
+      .then(async () => {
+        if (!force && layoutJson === lastSavedLayoutJson) return false;
+        await invoke('save_layout', { layoutJson });
+        lastSavedLayoutJson = layoutJson;
+        return true;
+      })
+      .catch((err) => {
+        console.warn(`Failed to save layout during ${reason}:`, err);
+        return false;
+      });
+
+    return layoutSaveInFlight;
+  }
+
+  function scheduleLayoutSave(delay = 300) {
+    if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
+    layoutSaveTimer = setTimeout(() => {
+      layoutSaveTimer = null;
+      void persistLayoutNow({ reason: 'scheduled' });
+    }, delay);
+  }
+
+  function markLayoutDirty({ immediate = false } = {}) {
+    lastSavedLayoutJson = null;
+    if (immediate) return persistLayoutNow({ reason: 'immediate' });
+    scheduleLayoutSave();
+    return Promise.resolve(false);
+  }
+
+  async function handleCloseRequested(event) {
+    if (windowCloseInProgress) return;
+
+    windowCloseInProgress = true;
+    event.preventDefault();
+    try {
+      if (layoutSaveTimer) {
+        clearTimeout(layoutSaveTimer);
+        layoutSaveTimer = null;
+      }
+      await withTimeout(flushSessionVaultEntries({ reason: 'shutdown' }), 2500, 'session vault flush');
+      await withTimeout(closeBrowserSurfacesForShutdown(), 1500, 'browser cleanup');
+      await withTimeout(persistLayoutNow({ force: true, reason: 'close-requested' }), 1500, 'layout save');
+    } catch (err) {
+      console.warn('Close preparation failed, forcing window destruction:', err);
+    }
+
+    try {
+      await invoke('exit_app');
+    } catch (err) {
+      console.warn('Backend app exit failed, falling back to window destruction:', err);
+      try {
+        await currentWindow.destroy();
+      } catch (destroyErr) {
+        console.warn('Failed to destroy window during shutdown:', destroyErr);
+        windowCloseInProgress = false;
+      }
+    }
+  }
+
+  function bindLifecycleEvents() {
+    if (lifecycleBound) return;
+    lifecycleBound = true;
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        void persistLayoutNow({ force: true, reason: 'visibilitychange' });
+      }
+    });
+    windowObject.addEventListener('pagehide', () => {
+      void persistLayoutNow({ force: true, reason: 'pagehide' });
+    });
+    currentWindow.onCloseRequested(handleCloseRequested);
+  }
+
+  async function restoreInitialLayout() {
+    let restored = false;
+    try {
+      const raw = await invoke('load_layout');
+      if (raw) restored = await restoreLayout(sanitizeRestoredLayout(JSON.parse(raw)));
+    } catch (err) {
+      console.warn('Could not restore layout:', err);
+    }
+    if (!restored) {
+      await createDefaultLayout();
+    }
+    try {
+      lastSavedLayoutJson = buildLayoutSnapshot();
+    } catch (err) {
+      console.warn('Could not snapshot initial layout:', err);
+    }
+  }
+
+  async function initializeLifecycle() {
+    bindLifecycleEvents();
+    await restoreInitialLayout();
+  }
+
+  return {
+    persistLayoutNow,
+    scheduleLayoutSave,
+    markLayoutDirty,
+    initializeLifecycle,
   };
 }
 

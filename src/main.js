@@ -28,14 +28,24 @@ import {
   dirnameFromPath,
   resolveMarkdownPath,
 } from './layout_state.mjs';
-import { createLayoutPersistence } from './layout_runtime.mjs';
+import {
+  createLayoutLifecycleRuntime,
+  createLayoutPersistence,
+  sanitizeFallbackOutputSnapshot,
+  writeTerminalSnapshot,
+} from './layout_runtime.mjs';
 import { createAutomationBridge } from './automation_bridge.mjs';
+import { createBrowserPaneRuntime } from './browser_pane_runtime.mjs';
+import { createKeyboardRuntime } from './keyboard_runtime.mjs';
 import { createNewTabPopoverRuntime } from './new_tab_popover_runtime.mjs';
 import { createPaneAuxRuntime } from './pane_aux_runtime.mjs';
 import { createPaneContextRuntime } from './pane_context_runtime.mjs';
+import { createRemoteTmuxInspectorRuntime } from './remote_tmux_inspector_runtime.mjs';
+import { createRemoteTmuxRuntime } from './remote_tmux_runtime.mjs';
+import { createRemoteTmuxUiRuntime } from './remote_tmux_ui_runtime.mjs';
 import { createSessionVaultRuntime } from './session_vault_runtime.mjs';
+import { createTabSurfaceRuntime } from './tab_surface_runtime.mjs';
 import { createUiPanelsRuntime } from './ui_panels_runtime.mjs';
-import { createSurfaceRuntime } from './surfaces_runtime.mjs';
 import {
   createWorkspaceManager,
   WORKSPACE_THEMES,
@@ -72,18 +82,22 @@ let activeBrowserLabel = null;
 let activeMarkdownLabel = null;
 let zoomedSurfaceEl = null;
 let contextMenuCleanup = null;
-let remoteTmuxInspectorCleanup = null;
-let remoteTmuxInspectorState = null;
+let remoteTmuxRuntime = null;
+let remoteTmuxInspectorRuntime = null;
+let remoteTmuxUiRuntime = null;
 
 const notifications = new Map();
 let notifPanelTabId = null;
 
 const markdownPanes = new Map();
-let browserPanes = new Map();
+let browserPanes;
+let browserPaneRuntime = null;
 let surfaceRuntime = null;
 let panelsRuntime = null;
 let paneAuxRuntime = null;
 let sessionVaultRuntime = null;
+let layoutLifecycle = null;
+let tabSurfaceRuntime = null;
 
 const workspaces = new Map();
 let activeWorkspaceId = null;
@@ -112,6 +126,59 @@ const paneContextRuntime = createPaneContextRuntime({
   markLayoutDirty: () => markLayoutDirty(),
 });
 
+remoteTmuxRuntime = createRemoteTmuxRuntime({
+  tabs,
+  panes,
+  invoke,
+  normalizeSshTarget,
+  sshTargetsEqual,
+  REMOTE_TMUX_SESSION_MODES,
+  defaultTargetLabel,
+  updateTabMeta,
+  markLayoutDirty: () => markLayoutDirty(),
+  updateTabCwd,
+  renderPaneContextBadge,
+  createWorkspaceMeta: (...args) => _createWorkspaceMeta(...args),
+  renderWorkspaceBar: (...args) => renderWorkspaceBar(...args),
+  switchWorkspace: (...args) => switchWorkspace(...args),
+  getActiveWorkspaceId: () => activeWorkspaceId,
+  serializeTabState,
+  closeTab,
+  createTab,
+  getNotifPanelTabId: () => notifPanelTabId,
+  setNotifPanelTabId: (tabId) => { notifPanelTabId = tabId; },
+  renderNotifPanel,
+  isInspectorOpen: (tabId) => remoteTmuxInspectorRuntime?.isOpenForTab(tabId) ?? false,
+  renderInspector: () => remoteTmuxInspectorRuntime?.renderInspector(),
+});
+
+remoteTmuxInspectorRuntime = createRemoteTmuxInspectorRuntime({
+  document,
+  windowObject: window,
+  invoke,
+  tabs,
+  panes,
+  defaultTargetLabel,
+  normalizeSshTarget,
+  REMOTE_TMUX_SESSION_MODES,
+  hasRemoteTmuxTab: tabHasRemoteTmux,
+  isRemoteTmuxTarget,
+  escHtml: (value) => escHtml(value),
+  updateTabMeta,
+  probeRemoteTmuxMetadata,
+  refreshRemoteTmuxTabHealth,
+});
+
+remoteTmuxUiRuntime = createRemoteTmuxUiRuntime({
+  hasRemoteTmuxTab: tabHasRemoteTmux,
+  activateTab,
+  openRemoteTmuxInspector,
+  reconnectRemoteTmuxTab,
+  workspaceRemoteTmuxTabIds,
+  reconnectRemoteTmuxWorkspace,
+  openRemoteTmuxWorkspaceFromProfile: (target) => remoteTmuxRuntime?.openRemoteTmuxWorkspaceFromProfile(target) ?? null,
+});
+
 function loadSettings() {
   try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(localStorage.getItem('wmux-settings') ?? '{}') }; }
   catch { return { ...SETTINGS_DEFAULTS }; }
@@ -119,6 +186,10 @@ function loadSettings() {
 
 function saveSettings(settings) {
   localStorage.setItem('wmux-settings', JSON.stringify(settings));
+}
+
+function markLayoutDirty({ immediate = false } = {}) {
+  return layoutLifecycle?.markLayoutDirty({ immediate }) ?? Promise.resolve(false);
 }
 
 function applySettingsToAllPanes(settings) {
@@ -171,30 +242,35 @@ const {
 function getDefaultTarget() {
   try {
     const raw = localStorage.getItem('wmux-default-target');
-    if (raw) return JSON.parse(raw);
+    if (raw) return normalizeLaunchTarget(JSON.parse(raw));
   } catch {}
   return { type: 'local' };
 }
 
 function setDefaultTarget(target) {
-  localStorage.setItem('wmux-default-target', JSON.stringify(target));
+  localStorage.setItem('wmux-default-target', JSON.stringify(normalizeLaunchTarget(target)));
   updateNewTabTooltip();
 }
 
+function normalizeLaunchTarget(target) {
+  if (!target || target.type === 'local') return { type: 'local' };
+  if (target.type === 'wsl') {
+    const distro = String(target.distro ?? '').trim();
+    return distro ? { type: 'wsl', distro } : { type: 'local' };
+  }
+  return normalizeSshTarget(target) ?? { type: 'local' };
+}
+
 function isRemoteTmuxTarget(target) {
-  return normalizeSshTarget(target)?.type === 'remote_tmux';
+  return remoteTmuxRuntime?.isRemoteTmuxTarget(target) ?? false;
 }
 
 function tabHasRemoteTmux(tabId) {
-  const tab = tabs.get(tabId);
-  if (!tab) return false;
-  return [...tab.paneIds].some((paneId) => isRemoteTmuxTarget(panes.get(paneId)?.target));
+  return remoteTmuxRuntime?.tabHasRemoteTmux(tabId) ?? false;
 }
 
 function workspaceRemoteTmuxTabIds(workspaceId = activeWorkspaceId) {
-  return [...tabs.values()]
-    .filter((tab) => tab.workspaceId === workspaceId && tabHasRemoteTmux(tab.tabId))
-    .map((tab) => tab.tabId);
+  return remoteTmuxRuntime?.workspaceRemoteTmuxTabIds(workspaceId) ?? [];
 }
 
 function loadSavedSshTargets() {
@@ -224,50 +300,6 @@ function backfillPaneCwdFromTranscript(pane) {
   return paneContextRuntime.backfillPaneCwdFromTranscript(pane);
 }
 
-function trimTrailingPromptFromSerializedSnapshot(snapshot) {
-  const value = String(snapshot ?? '');
-  if (!value) return '';
-  const lines = value.split(/\r?\n/);
-  let index = lines.length - 1;
-  while (index >= 0 && !lines[index].trim()) index -= 1;
-  if (index < 0) return '';
-  const lastLine = lines[index];
-  if (/^(?:\([^)]*\)\s*)?[\w.@-]+@[\w.-]+:(?:~|\/[^#$%\r\n]*)\s*[#$%]\s*$/.test(lastLine)
-    || /^PS\s+[A-Za-z]:\\.*>\s*$/i.test(lastLine)
-    || /^[A-Za-z]:\\.*>\s*$/i.test(lastLine)) {
-    lines.splice(index, 1);
-    return lines.join('\n').replace(/[\r\n]+$/g, '');
-  }
-  return value;
-}
-
-function captureVisibleTerminalScreen(terminal, serializeAddon) {
-  const buffer = terminal?.buffer?.active;
-  const rows = Number(terminal?.rows) || 0;
-  if (!buffer || rows <= 0 || !serializeAddon?.serialize) return '';
-
-  const viewportStart = Number.isInteger(buffer.viewportY) ? buffer.viewportY : Math.max(0, buffer.baseY);
-  const viewportEnd = Math.min(buffer.length - 1, viewportStart + rows - 1);
-  if (viewportEnd < viewportStart) return '';
-
-  const serialized = serializeAddon.serialize({
-    range: { start: viewportStart, end: viewportEnd },
-    excludeAltBuffer: true,
-    excludeModes: true,
-  });
-  return trimTrailingPromptFromSerializedSnapshot(serialized);
-}
-
-function writeTerminalSnapshot(term, snapshot, { serialized = false } = {}) {
-  if (serialized) {
-    if (snapshot) term.write(String(snapshot));
-    return;
-  }
-  const normalized = normalizeTerminalTranscript(snapshot);
-  if (!normalized) return;
-  term.write(normalized.replace(/\n/g, '\r\n'));
-}
-
 function getPaneAutoLabel(pane) {
   return paneContextRuntime.getPaneAutoLabel(pane);
 }
@@ -290,9 +322,7 @@ function closeContextMenu() {
 }
 
 function closeRemoteTmuxInspector() {
-  remoteTmuxInspectorCleanup?.();
-  remoteTmuxInspectorCleanup = null;
-  remoteTmuxInspectorState = null;
+  remoteTmuxInspectorRuntime?.closeInspector();
 }
 
 function showContextMenu(items, x, y) {
@@ -337,14 +367,11 @@ function showContextMenu(items, x, y) {
 }
 
 function getCurrentSurfaceElement() {
-  if (activePaneId) return panes.get(activePaneId)?.domEl ?? null;
-  if (activeBrowserLabel) return browserPanes.get(activeBrowserLabel)?.browserEl ?? null;
-  if (activeMarkdownLabel) return markdownPanes.get(activeMarkdownLabel)?.markdownEl ?? null;
-  return null;
+  return tabSurfaceRuntime?.getCurrentSurfaceElement() ?? null;
 }
 
 function getActiveTabState() {
-  return activeTabId ? tabs.get(activeTabId) : null;
+  return tabSurfaceRuntime?.getActiveTabState() ?? null;
 }
 
 function childElementIndex(node) {
@@ -375,26 +402,8 @@ function elementFromPath(ancestor, path) {
   return current;
 }
 
-function getTabSurfaceElementByPath(tab, path) {
-  if (!tab) return null;
-  return elementFromPath(tab.contentEl, path);
-}
-
-function activateSurfaceElement(surfaceEl) {
-  if (!surfaceEl) return;
-  if (surfaceEl.classList.contains('browser-pane-leaf')) {
-    activateBrowser(surfaceEl.dataset.browserLabel);
-    return;
-  }
-  if (surfaceEl.classList.contains('markdown-pane-leaf')) {
-    activateMarkdown(surfaceEl.dataset.markdownLabel);
-    return;
-  }
-  if (surfaceEl.classList.contains('pane-leaf')) activatePane(surfaceEl.dataset.sessionId);
-}
-
 function syncBrowserVisibility() {
-  return surfaceRuntime?.syncBrowserVisibility();
+  return browserPaneRuntime?.syncBrowserVisibility();
 }
 
 function serializeTabState(tab) {
@@ -474,12 +483,7 @@ function listPaneSummaries(tabId = null) {
 }
 
 function clearActiveSurface() {
-  if (activePaneId) panes.get(activePaneId)?.domEl.classList.remove('active-pane');
-  if (activeBrowserLabel) browserPanes.get(activeBrowserLabel)?.browserEl.classList.remove('active-pane');
-  if (activeMarkdownLabel) markdownPanes.get(activeMarkdownLabel)?.markdownEl.classList.remove('active-pane');
-  activePaneId = null;
-  activeBrowserLabel = null;
-  activeMarkdownLabel = null;
+  return tabSurfaceRuntime?.clearActiveSurface();
 }
 
 function requirePane(paneId = activePaneId) {
@@ -536,13 +540,14 @@ const newTabPopoverRuntime = createNewTabPopoverRuntime({
   sshTargetsEqual,
   escHtml: (value) => escHtml(value),
   showError,
-  openRemoteTmuxWorkspaceFromProfile,
+  openRemoteTmuxWorkspaceFromProfile: (target) => remoteTmuxUiRuntime?.openWorkspaceFromProfile(target) ?? null,
   getAnchorElement: () => btnNewTabMore,
 });
 
 // Create a new tab
 
 async function createTab(target = { type: 'local' }, restoreData = null) {
+  const normalizedTarget = normalizeLaunchTarget(target);
   const tabId = crypto.randomUUID();
   const wsId  = activeWorkspaceId;
   const workspace = workspaces.get(wsId);
@@ -587,15 +592,7 @@ async function createTab(target = { type: 'local' }, restoreData = null) {
   });
   tabEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    const reconnectItems = tabHasRemoteTmux(tabId)
-      ? [
-          { label: 'Browse remote tmux', action: () => openRemoteTmuxInspector(tabId) },
-          { label: 'Refresh remote tmux state', action: () => openRemoteTmuxInspector(tabId, { forceRefresh: true }) },
-          { type: 'separator' },
-          { label: 'Reconnect remote tmux tab', action: () => reconnectRemoteTmuxTab(tabId) },
-          { type: 'separator' },
-        ]
-      : [];
+    const reconnectItems = remoteTmuxUiRuntime?.buildTabContextMenuItems(tabId) ?? [];
     const workspaceActions = orderedWorkspaceEntries()
       .filter(ws => ws.id !== wsId)
       .map(ws => ({
@@ -625,10 +622,7 @@ async function createTab(target = { type: 'local' }, restoreData = null) {
   tabEl.querySelector('.tab-close').addEventListener('click', () => closeTab(tabId));
   tabEl.querySelector('.tab-title').addEventListener('dblclick', (e) => startTabRename(tabId, e.target));
   tabEl.querySelector('.tab-target').addEventListener('click', (event) => {
-    if (!tabHasRemoteTmux(tabId)) return;
-    event.stopPropagation();
-    activateTab(tabId);
-    void openRemoteTmuxInspector(tabId);
+    remoteTmuxUiRuntime?.handleTabTargetClick(tabId, event);
   });
 
   const tabState = {
@@ -643,11 +637,11 @@ async function createTab(target = { type: 'local' }, restoreData = null) {
     cwd: restoreData?.meta?.cwd ?? '',
     gitBranch: restoreData?.meta?.gitBranch ?? '',
     ports: new Set(restoreData?.meta?.ports ?? []),
-    targetLabel: restoreData?.meta?.targetLabel ?? defaultTargetLabel(target),
-    targetKind: restoreData?.meta?.targetKind ?? getTargetKind(target),
-    remoteTmuxSessionName: restoreData?.meta?.remoteTmuxSessionName ?? (target?.type === 'remote_tmux' ? target.session_name : ''),
+    targetLabel: restoreData?.meta?.targetLabel ?? defaultTargetLabel(normalizedTarget),
+    targetKind: restoreData?.meta?.targetKind ?? getTargetKind(normalizedTarget),
+    remoteTmuxSessionName: restoreData?.meta?.remoteTmuxSessionName ?? (normalizedTarget?.type === 'remote_tmux' ? normalizedTarget.session_name : ''),
     remoteTmuxWindowName: restoreData?.meta?.remoteTmuxWindowName ?? '',
-    connectionStatus: restoreData?.meta?.targetKind === 'remote_tmux' || target?.type === 'remote_tmux' ? 'connecting' : 'connected',
+    connectionStatus: restoreData?.meta?.targetKind === 'remote_tmux' || normalizedTarget?.type === 'remote_tmux' ? 'connecting' : 'connected',
     remoteProbeError: '',
     lastRemoteProbeAt: 0,
     browserLabels: new Set(),
@@ -665,7 +659,16 @@ async function createTab(target = { type: 'local' }, restoreData = null) {
   if (restoreData?.tree) {
     await restorePaneTree(tabId, restoreData.tree, contentEl);
   } else {
-    await createLeafPane(tabId, target, contentEl);
+    await createLeafPane(tabId, normalizedTarget, contentEl);
+  }
+
+  if (tabState.paneIds.size === 0 && tabState.browserLabels.size === 0 && tabState.markdownLabels.size === 0) {
+    tabs.delete(tabId);
+    contentEl.remove();
+    tabEl.remove();
+    if (workspace?.lastActiveTabId === tabId) workspace.lastActiveTabId = null;
+    if (tabs.size === 0) document.body.classList.remove('has-tabs');
+    return null;
   }
 
   if (Array.isArray(restoreData?.notifications)) {
@@ -726,7 +729,7 @@ async function moveTabToWorkspace(tabId, wsId) {
 }
 
 async function openBrowserSplitForTab(tabId, url = '') {
-  return surfaceRuntime?.openBrowserSplitForTab(tabId, url);
+  return browserPaneRuntime?.openBrowserSplitForTab(tabId, url);
 }
 
 // Create a leaf pane (session + xterm)
@@ -744,7 +747,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     ? String(initialState.screenSnapshot)
     : '';
   let outputSnapshot = typeof initialState?.outputSnapshot === 'string'
-    ? normalizeTerminalTranscript(initialState.outputSnapshot)
+    ? sanitizeFallbackOutputSnapshot(initialState.outputSnapshot)
     : '';
 
   const trimTranscript = (value) => value.length > MAX_TRANSCRIPT_CHARS
@@ -961,13 +964,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
 
   const unlistenExit = await listen(`terminal-exit-${sessionId}`, () => {
-    const pane = panes.get(sessionId);
-    const tab = tabs.get(tabId);
-    if (!pane || !tab || !isRemoteTmuxTarget(pane.target)) return;
-    tab.connectionStatus = 'disconnected';
-    tab.remoteProbeError = 'Remote tmux session disconnected.';
-    tab.lastRemoteProbeAt = Date.now();
-    updateTabMeta(tabId);
+    remoteTmuxRuntime?.handleRemoteTmuxSessionExit(tabId, sessionId);
   });
 
   const unlistenAll = () => {
@@ -1027,13 +1024,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
   if (isRemoteTmuxTarget(target)) {
     leafEl.classList.add('pane-remote-tmux');
-    for (const selector of ['[data-action="split-h"]', '[data-action="split-v"]']) {
-      const btn = toolbarEl.querySelector(selector);
-      if (btn) {
-        btn.disabled = true;
-        btn.title = 'Remote tmux tabs keep one terminal session per tab. Use tmux splits inside the remote session.';
-      }
-    }
+    remoteTmuxRuntime?.applyRemoteTmuxPanePolicy(target, toolbarEl);
   }
 
   const paneState = {
@@ -1089,7 +1080,7 @@ async function splitPane(paneId, dir) {
   const pane = panes.get(paneId);
   if (!pane) return;
   if (isRemoteTmuxTarget(pane.target)) {
-    showError('Remote tmux tabs keep one terminal session per tab. Use tmux splits inside the remote session; wmux browser and markdown splits still work here.');
+    showError(remoteTmuxRuntime?.getRemoteTmuxSplitBlockedMessage() ?? 'Remote tmux tabs keep one terminal session per tab.');
     return;
   }
   const tabState = tabs.get(pane.tabId);
@@ -1165,32 +1156,11 @@ function makeDividerDrag(splitEl, dir) {
 // Activate a pane
 
 function activatePane(paneId) {
-  const pane = panes.get(paneId);
-  if (!pane) return;
-
-  clearActiveSurface();
-  activePaneId = paneId;
-  pane.domEl.classList.add('active-pane');
-  const tab = tabs.get(pane.tabId);
-  if (tab) tab.lastActiveSurfaceEl = pane.domEl;
-  setPaneRing(paneId, false);
-  markPaneNotificationsRead(pane.tabId, paneId);
-  markLayoutDirty();
-
-  if (pane.tabId !== activeTabId) {
-    activateTab(pane.tabId);
-    return;
-  }
-
-  requestAnimationFrame(() => {
-    fitAndResizePane(paneId);
-    pane.terminal.focus();
-    if (tab) setTabRing(tab, false);
-  });
+  return tabSurfaceRuntime?.activatePane(paneId);
 }
 
 function activateBrowser(label) {
-  return surfaceRuntime?.activateBrowser(label);
+  return browserPaneRuntime?.activateBrowser(label);
 }
 
 function activateMarkdown(label) {
@@ -1200,731 +1170,49 @@ function activateMarkdown(label) {
 // Activate a tab
 
 function activateTab(tabId) {
-  if (activeTabId && activeTabId !== tabId) {
-    const prev = tabs.get(activeTabId);
-    if (prev) {
-      prev.contentEl.classList.remove('visible');
-      prev.tabEl.classList.remove('active');
-    }
-  }
-
-  activeTabId = tabId;
-  const tab = tabs.get(tabId);
-  if (!tab) return;
-  const workspace = workspaces.get(tab.workspaceId);
-  if (workspace) workspace.lastActiveTabId = tabId;
-
-  tab.contentEl.classList.add('visible');
-  tab.tabEl.classList.add('active');
-  setTabRing(tab, false);
-  markTabNotificationsRead(tabId);
-  updateTabMeta(tabId);
-  syncBrowserVisibility();
-  markLayoutDirty();
-
-  requestAnimationFrame(() => {
-    const target = (activePaneId && tab.paneIds.has(activePaneId))
-      ? activePaneId
-      : [...tab.paneIds][0];
-    if (target) activatePane(target);
-    if (tab.pendingRestoreUi) {
-      const { activeSurfacePath, zoomedSurfacePath } = tab.pendingRestoreUi;
-      tab.pendingRestoreUi = null;
-      const surfaceEl = getTabSurfaceElementByPath(tab, activeSurfacePath);
-      if (surfaceEl) activateSurfaceElement(surfaceEl);
-      const zoomEl = getTabSurfaceElementByPath(tab, zoomedSurfacePath);
-      if (zoomEl) {
-        tab.contentEl.classList.add('zoom-mode');
-        zoomEl.classList.add('zoomed-pane');
-        tab.zoomedSurfaceEl = zoomEl;
-        zoomedSurfaceEl = zoomEl;
-      }
-    }
-    syncBrowserVisibility();
-    void refreshRemoteTmuxTabHealth(tabId);
-  });
+  return tabSurfaceRuntime?.activateTab(tabId);
 }
 
 // Close a pane
 
 function collapsePaneBranch(leafEl) {
-  if (!leafEl) return;
-
-  let branchEl = leafEl;
-  let parentEl = leafEl.parentElement;
-
-  while (parentEl && !parentEl.classList.contains('pane-split')) {
-    branchEl = parentEl;
-    parentEl = parentEl.parentElement;
-  }
-
-  if (parentEl && parentEl.classList.contains('pane-split')) {
-    const sibling = [...parentEl.children].find(
-      c => c !== branchEl && !c.classList.contains('pane-divider'),
-    );
-    if (sibling) {
-      let promote = sibling;
-      if (!sibling.classList.contains('pane-leaf') && !sibling.classList.contains('pane-split')) {
-        const inner = [...sibling.children].find(c => !c.classList.contains('pane-divider'));
-        if (inner) promote = inner;
-      }
-      promote.style.flex = '';
-      parentEl.parentElement.replaceChild(promote, parentEl);
-      return;
-    }
-  }
-
-  leafEl.remove();
+  return tabSurfaceRuntime?.collapsePaneBranch(leafEl);
 }
 
 async function closePane(paneId) {
-  const pane = panes.get(paneId);
-  if (!pane) return;
-
-  const tab = tabs.get(pane.tabId);
-  if (!tab || tab.paneIds.size <= 1) {
-    await closeTab(pane.tabId);
-    return;
-  }
-
-  await saveSessionVaultEntryForPane(paneId, { reason: 'pane-close' });
-  await _destroyPane(paneId);
-  collapsePaneBranch(pane.domEl);
-
-  if (activePaneId === paneId) {
-    const remaining = [...tab.paneIds];
-    if (remaining.length > 0) activatePane(remaining[remaining.length - 1]);
-  }
-
-  // Re-fit all remaining panes after the DOM has settled.
-  requestAnimationFrame(() => {
-    for (const pid of [...tab.paneIds]) fitAndResizePane(pid);
-  });
-  markLayoutDirty();
+  return tabSurfaceRuntime?.closePane(paneId);
 }
 
-// Close an entire tab
-
 async function closeTab(tabId, _skipWorkspaceCheck = false) {
-  const tab = tabs.get(tabId);
-  if (!tab) return;
-  if (remoteTmuxInspectorState?.tabId === tabId) closeRemoteTmuxInspector();
-  const workspace = workspaces.get(tab.workspaceId);
-
-  for (const browserEl of [...tab.contentEl.querySelectorAll('.browser-pane-leaf')]) {
-    const label = browserEl.dataset.browserLabel;
-    if (label) await closeBrowserSurface(label, { collapse: false });
-  }
-
-  for (const markdownEl of [...tab.contentEl.querySelectorAll('.markdown-pane-leaf')]) {
-    const label = markdownEl.dataset.markdownLabel;
-    if (label) closeMarkdownSurface(label, { collapse: false });
-  }
-
-  for (const paneId of [...tab.paneIds]) {
-    await saveSessionVaultEntryForPane(paneId, { reason: 'tab-close' });
-    await _destroyPane(paneId);
-  }
-
-  tab.contentEl.remove();
-  tab.tabEl.remove();
-  tabs.delete(tabId);
-  if (notifPanelTabId === tabId) notifPanelTabId = null;
-  if (workspace?.lastActiveTabId === tabId) {
-    const replacement = [...tabs.values()].find(t => t.workspaceId === tab.workspaceId);
-    workspace.lastActiveTabId = replacement?.tabId ?? null;
-  }
-
-  if (activeTabId === tabId) {
-    activeTabId  = null;
-    activePaneId = null;
-    // Find another tab in same workspace
-    const remaining = [...tabs.values()].filter(
-      t => t.workspaceId === activeWorkspaceId,
-    );
-    if (remaining.length > 0) {
-      activateTab(remaining[remaining.length - 1].tabId);
-    } else {
-      document.body.classList.remove('has-tabs');
-    }
-  }
-
-  updateTabNumbers();
-  syncBrowserVisibility();
-  markLayoutDirty();
+  return tabSurfaceRuntime?.closeTab(tabId, _skipWorkspaceCheck);
 }
 
 async function probeRemoteTmuxMetadata(tabId, sessionId, target) {
-  const normalized = normalizeSshTarget(target);
-  if (!normalized || normalized.type !== 'remote_tmux') return;
-  const tab = tabs.get(tabId);
-  if (tab) {
-    tab.connectionStatus = 'connecting';
-    tab.remoteProbeError = '';
-    updateTabMeta(tabId);
-  }
-  try {
-    const metadata = await invoke('probe_remote_tmux_metadata', { target: normalized });
-    const pane = panes.get(sessionId);
-    const tab = tabs.get(tabId);
-    if (!pane || !tab || !isRemoteTmuxTarget(pane.target) || !sshTargetsEqual(pane.target, normalized)) {
-      return;
-    }
-
-    if (pane.target.session_mode === REMOTE_TMUX_SESSION_MODES.CREATE) {
-      pane.target = {
-        ...pane.target,
-        session_mode: REMOTE_TMUX_SESSION_MODES.ATTACH,
-      };
-      tab.targetLabel = defaultTargetLabel(pane.target);
-    }
-
-    tab.remoteTmuxSessionName = metadata.session_name ?? normalized.session_name;
-    tab.remoteTmuxWindowName = metadata.window_name ?? '';
-    tab.connectionStatus = 'connected';
-    tab.remoteProbeError = '';
-    tab.lastRemoteProbeAt = Date.now();
-
-    if (metadata.cwd) {
-      pane.cwd = metadata.cwd;
-      const gitContext = metadata.repo_name ? {
-        repo_root: metadata.repo_root || metadata.cwd,
-        repo_name: metadata.repo_name,
-        branch: metadata.git_branch || null,
-        worktree_name: metadata.worktree_name || null,
-        is_worktree: !!metadata.is_worktree,
-      } : null;
-      const cwdMeta = await updateTabCwd(tabId, metadata.cwd, {
-        skipLocalGit: true,
-        gitBranch: metadata.git_branch || '',
-        gitContext,
-      });
-      pane.gitContext = cwdMeta?.gitContext ?? gitContext;
-      renderPaneContextBadge(sessionId);
-    }
-
-    if (!tab.userRenamed && metadata.window_name) {
-      tab.title = `${tab.remoteTmuxSessionName}:${metadata.window_name}`;
-      const titleEl = tab.tabEl.querySelector('.tab-title');
-      if (titleEl) titleEl.textContent = tab.title;
-    }
-
-    updateTabMeta(tabId);
-    markLayoutDirty();
-    if (remoteTmuxInspectorState?.tabId === tabId) renderRemoteTmuxInspector();
-  } catch (err) {
-    const tab = tabs.get(tabId);
-    if (tab) {
-      tab.connectionStatus = 'disconnected';
-      tab.remoteProbeError = String(err);
-      tab.lastRemoteProbeAt = Date.now();
-      updateTabMeta(tabId);
-    }
-    if (remoteTmuxInspectorState?.tabId === tabId) renderRemoteTmuxInspector();
-    console.warn('probe_remote_tmux_metadata error:', err);
-  }
+  return remoteTmuxRuntime?.probeRemoteTmuxMetadata(tabId, sessionId, target);
 }
 
-function getRemoteTmuxPaneForTab(tabId) {
-  const tab = tabs.get(tabId);
-  if (!tab) return null;
-  return [...tab.paneIds]
-    .map((paneId) => panes.get(paneId))
-    .find((pane) => isRemoteTmuxTarget(pane?.target)) ?? null;
-}
-
-function quotePosixShellArg(value) {
-  return `'${String(value ?? '').replace(/'/g, `'"'"'`)}'`;
-}
-
-function remoteTmuxEndpointLabel(target) {
-  const normalized = normalizeSshTarget(target);
-  if (!normalized) return 'remote tmux';
-  const host = normalized.user ? `${normalized.user}@${normalized.host}` : normalized.host;
-  return normalized.port ? `${host}:${normalized.port}` : host;
-}
-
-async function sendRemoteTmuxCommand(tabId, command, { nextSessionName = null } = {}) {
-  const pane = getRemoteTmuxPaneForTab(tabId);
-  const tab = tabs.get(tabId);
-  if (!pane || !tab) return false;
-
-  await invoke('write_to_session', { id: pane.sessionId, data: `${command}\r` });
-
-  if (nextSessionName && isRemoteTmuxTarget(pane.target)) {
-    pane.target = {
-      ...pane.target,
-      session_name: nextSessionName,
-      session_mode: REMOTE_TMUX_SESSION_MODES.ATTACH,
-    };
-    tab.remoteTmuxSessionName = nextSessionName;
-    tab.targetLabel = defaultTargetLabel(pane.target);
-    tab.connectionStatus = 'connecting';
-    updateTabMeta(tabId);
-  }
-
-  await new Promise((resolve) => window.setTimeout(resolve, 180));
-  await probeRemoteTmuxMetadata(tabId, pane.sessionId, pane.target);
-  if (remoteTmuxInspectorState?.tabId === tabId) {
-    await refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
-  }
-  return true;
-}
-
-async function manageRemoteTmux(tabId, scope, action, { tmuxTarget = null, name = null } = {}) {
-  const pane = getRemoteTmuxPaneForTab(tabId);
-  const target = normalizeSshTarget(pane?.target);
-  if (!pane || !target || target.type !== 'remote_tmux') return null;
-
-  const result = await invoke('manage_remote_tmux', {
-    target,
-    scope,
-    action,
-    tmuxTarget,
-    name,
-  });
-
-  if (remoteTmuxInspectorState?.tabId === tabId) {
-    await refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
-  }
-  return result;
-}
-
-function promptRemoteTmuxName(message, defaultValue = '') {
-  const value = window.prompt(message, defaultValue);
-  if (value === null) return null;
-  const trimmed = value.trim();
-  return trimmed || null;
-}
-
-async function createRemoteTmuxSession(tabId) {
-  const state = remoteTmuxInspectorState;
-  const sessionName = promptRemoteTmuxName('New remote tmux session name', state?.selectedSessionName ? `${state.selectedSessionName}-2` : 'team-shell');
-  if (!sessionName) return false;
-  await manageRemoteTmux(tabId, 'session', 'create', { name: sessionName });
-  await switchRemoteTmuxSession(tabId, sessionName);
-  return true;
-}
-
-async function renameRemoteTmuxSession(tabId, sessionName) {
-  const nextName = promptRemoteTmuxName(`Rename remote tmux session ${sessionName}`, sessionName);
-  if (!nextName || nextName === sessionName) return false;
-  await manageRemoteTmux(tabId, 'session', 'rename', { tmuxTarget: sessionName, name: nextName });
-  const pane = getRemoteTmuxPaneForTab(tabId);
-  const tab = tabs.get(tabId);
-  if (pane && tab && isRemoteTmuxTarget(pane.target) && tab.remoteTmuxSessionName === sessionName) {
-    pane.target = { ...pane.target, session_name: nextName };
-    tab.remoteTmuxSessionName = nextName;
-    tab.targetLabel = defaultTargetLabel(pane.target);
-  }
-  await refreshRemoteTmuxTabHealth(tabId, { force: true });
-  await refreshRemoteTmuxInspector({ force: true, preserveSelection: false });
-  return true;
-}
-
-async function killRemoteTmuxSession(tabId, sessionName, isCurrent) {
-  const confirmed = window.confirm(`Kill remote tmux session ${sessionName}?${isCurrent ? ' This is the current session for this wmux tab.' : ''}`);
-  if (!confirmed) return false;
-  await manageRemoteTmux(tabId, 'session', 'kill', { tmuxTarget: sessionName });
-  if (isCurrent) {
-    await refreshRemoteTmuxTabHealth(tabId, { force: true });
-  }
-  await refreshRemoteTmuxInspector({ force: true, preserveSelection: false });
-  return true;
-}
-
-async function createRemoteTmuxWindow(tabId, sessionName) {
-  const windowName = promptRemoteTmuxName(`New window name for session ${sessionName}`, 'editor');
-  if (!windowName) return false;
-  const result = await manageRemoteTmux(tabId, 'window', 'create', { tmuxTarget: sessionName, name: windowName });
-  if (result?.resolved_target) {
-    await switchRemoteTmuxWindow(tabId, result.resolved_target);
-  }
-  return true;
-}
-
-async function renameRemoteTmuxWindow(tabId, windowId, windowName) {
-  const nextName = promptRemoteTmuxName(`Rename remote tmux window ${windowName || windowId}`, windowName || 'window');
-  if (!nextName || nextName === windowName) return false;
-  await manageRemoteTmux(tabId, 'window', 'rename', { tmuxTarget: windowId, name: nextName });
-  await refreshRemoteTmuxTabHealth(tabId, { force: true });
-  await refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
-  return true;
-}
-
-async function killRemoteTmuxWindow(tabId, windowId, windowName, isCurrent) {
-  const confirmed = window.confirm(`Kill remote tmux window ${windowName || windowId}?${isCurrent ? ' This is the current window for this wmux tab.' : ''}`);
-  if (!confirmed) return false;
-  await manageRemoteTmux(tabId, 'window', 'kill', { tmuxTarget: windowId });
-  await refreshRemoteTmuxTabHealth(tabId, { force: true });
-  await refreshRemoteTmuxInspector({ force: true, preserveSelection: false });
-  return true;
-}
-
-async function switchRemoteTmuxSession(tabId, sessionName) {
-  return sendRemoteTmuxCommand(
-    tabId,
-    `tmux switch-client -t ${quotePosixShellArg(sessionName)}`,
-    { nextSessionName: sessionName },
-  );
-}
-
-async function switchRemoteTmuxWindow(tabId, windowId) {
-  return sendRemoteTmuxCommand(tabId, `tmux select-window -t ${quotePosixShellArg(windowId)}`);
-}
-
-async function switchRemoteTmuxPane(tabId, paneId) {
-  return sendRemoteTmuxCommand(tabId, `tmux select-pane -t ${quotePosixShellArg(paneId)}`);
-}
-
-function renderRemoteTmuxInspector() {
-  const panel = document.getElementById('remote-tmux-inspector');
-  const state = remoteTmuxInspectorState;
-  if (!panel || !state) return;
-
-  const body = panel.querySelector('.rti-body');
-  const titleEl = panel.querySelector('.rti-title');
-  const subtitleEl = panel.querySelector('.rti-subtitle');
-  const refreshBtn = panel.querySelector('[data-action="refresh"]');
-  const closeBtn = panel.querySelector('[data-action="close"]');
-
-  const tab = tabs.get(state.tabId);
-  const remotePane = getRemoteTmuxPaneForTab(state.tabId);
-  titleEl.textContent = tab ? `Remote tmux - ${tab.title}` : 'Remote tmux';
-  subtitleEl.textContent = remotePane ? remoteTmuxEndpointLabel(remotePane.target) : 'Remote tmux tab not available';
-
-  refreshBtn.onclick = () => { void refreshRemoteTmuxInspector({ force: true, preserveSelection: true }); };
-  closeBtn.onclick = () => closeRemoteTmuxInspector();
-
-  if (!tab || !remotePane) {
-    body.innerHTML = '<div class="rti-empty">This remote tmux tab is no longer available.</div>';
-    return;
-  }
-
-  if (state.loading) {
-    body.innerHTML = '<div class="rti-loading">Loading remote tmux sessions, windows, and panes...</div>';
-    return;
-  }
-
-  if (state.error) {
-    body.innerHTML = `
-      <div class="rti-error">${escHtml(state.error)}</div>
-      <button class="rti-inline-action" data-action="retry">Retry</button>
-    `;
-    body.querySelector('[data-action="retry"]')?.addEventListener('click', () => {
-      void refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
-    });
-    return;
-  }
-
-  const data = state.data;
-  if (!data?.sessions?.length) {
-    body.innerHTML = '<div class="rti-empty">No remote tmux sessions were found.</div>';
-    return;
-  }
-
-  const selectedSession = data.sessions.find((session) => session.session_name === state.selectedSessionName)
-    ?? data.sessions.find((session) => session.session_name === data.current_session_name)
-    ?? data.sessions[0];
-  state.selectedSessionName = selectedSession?.session_name ?? '';
-
-  const selectedWindow = selectedSession?.windows.find((windowState) => windowState.window_id === state.selectedWindowId)
-    ?? selectedSession?.windows.find((windowState) => windowState.window_id === data.current_window_id)
-    ?? selectedSession?.windows[0]
-    ?? null;
-  state.selectedWindowId = selectedWindow?.window_id ?? '';
-
-  body.innerHTML = `
-    <div class="rti-grid">
-      <section class="rti-column">
-        <div class="rti-column-head">
-          <div class="rti-column-title">Sessions</div>
-          <button class="rti-mini-action" data-action="new-session">New</button>
-        </div>
-        <div class="rti-list rti-sessions"></div>
-      </section>
-      <section class="rti-column">
-        <div class="rti-column-head">
-          <div class="rti-column-title">Windows</div>
-          <button class="rti-mini-action" data-action="new-window" ${selectedSession ? '' : 'disabled'}>New</button>
-        </div>
-        <div class="rti-list rti-windows"></div>
-      </section>
-      <section class="rti-column">
-        <div class="rti-column-title">Panes</div>
-        <div class="rti-list rti-panes"></div>
-      </section>
-    </div>
-  `;
-
-  const sessionsEl = body.querySelector('.rti-sessions');
-  const windowsEl = body.querySelector('.rti-windows');
-  const panesEl = body.querySelector('.rti-panes');
-
-  for (const session of data.sessions) {
-    const row = document.createElement('div');
-    row.className = `rti-row${session.session_name === state.selectedSessionName ? ' is-selected' : ''}${session.is_current ? ' is-current' : ''}`;
-    row.innerHTML = `
-      <button class="rti-main" data-session-name="${escHtml(session.session_name)}">
-        <span class="rti-primary">${escHtml(session.session_name)}</span>
-        <span class="rti-secondary">${session.window_count} windows · ${session.attached_clients} clients</span>
-      </button>
-      <button class="rti-action" data-switch-session="${escHtml(session.session_name)}" ${session.is_current ? 'disabled' : ''}>Switch</button>
-      <button class="rti-action" data-rename-session="${escHtml(session.session_name)}">Rename</button>
-      <button class="rti-action danger" data-kill-session="${escHtml(session.session_name)}">Kill</button>
-    `;
-    sessionsEl.appendChild(row);
-  }
-
-  if (!selectedSession?.windows?.length) {
-    windowsEl.innerHTML = '<div class="rti-empty">No windows in this session.</div>';
-  } else {
-    for (const windowState of selectedSession.windows) {
-      const row = document.createElement('div');
-      row.className = `rti-row${windowState.window_id === state.selectedWindowId ? ' is-selected' : ''}${windowState.window_id === data.current_window_id ? ' is-current' : ''}`;
-      row.innerHTML = `
-        <button class="rti-main" data-window-id="${escHtml(windowState.window_id)}">
-          <span class="rti-primary">${escHtml(`${windowState.window_index}: ${windowState.window_name || 'window'}`)}</span>
-          <span class="rti-secondary">${windowState.panes.length} panes · ${escHtml(windowState.window_id)}</span>
-        </button>
-        <button class="rti-action" data-switch-window="${escHtml(windowState.window_id)}" ${windowState.window_id === data.current_window_id ? 'disabled' : ''}>Switch</button>
-        <button class="rti-action" data-rename-window="${escHtml(windowState.window_id)}">Rename</button>
-        <button class="rti-action danger" data-kill-window="${escHtml(windowState.window_id)}">Kill</button>
-      `;
-      windowsEl.appendChild(row);
-    }
-  }
-
-  if (!selectedWindow?.panes?.length) {
-    panesEl.innerHTML = '<div class="rti-empty">No panes in this window.</div>';
-  } else {
-    for (const paneState of selectedWindow.panes) {
-      const row = document.createElement('div');
-      row.className = `rti-row${paneState.pane_id === data.current_pane_id ? ' is-current' : ''}`;
-      row.innerHTML = `
-        <div class="rti-main rti-pane-main">
-          <span class="rti-primary">${escHtml(`${paneState.pane_index}: ${paneState.current_command || paneState.title || paneState.pane_id}`)}</span>
-          <span class="rti-secondary">${escHtml([
-            paneState.cwd || paneState.title || paneState.pane_id,
-            paneState.command_age ? `age ${paneState.command_age}` : '',
-            paneState.was_last_active ? 'last-active' : '',
-          ].filter(Boolean).join(' · '))}</span>
-        </div>
-        <button class="rti-action" data-switch-pane="${escHtml(paneState.pane_id)}" ${paneState.pane_id === data.current_pane_id ? 'disabled' : ''}>Select</button>
-      `;
-      panesEl.appendChild(row);
-    }
-  }
-
-  sessionsEl.querySelectorAll('[data-session-name]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      state.selectedSessionName = btn.dataset.sessionName ?? '';
-      state.selectedWindowId = '';
-      renderRemoteTmuxInspector();
-    });
-  });
-  sessionsEl.querySelectorAll('[data-switch-session]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      void switchRemoteTmuxSession(state.tabId, btn.dataset.switchSession ?? '');
-    });
-  });
-  sessionsEl.querySelectorAll('[data-rename-session]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      void renameRemoteTmuxSession(state.tabId, btn.dataset.renameSession ?? '');
-    });
-  });
-  sessionsEl.querySelectorAll('[data-kill-session]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const sessionName = btn.dataset.killSession ?? '';
-      void killRemoteTmuxSession(state.tabId, sessionName, sessionName === data.current_session_name);
-    });
-  });
-  windowsEl.querySelectorAll('[data-window-id]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      state.selectedWindowId = btn.dataset.windowId ?? '';
-      renderRemoteTmuxInspector();
-    });
-  });
-  windowsEl.querySelectorAll('[data-switch-window]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      void switchRemoteTmuxWindow(state.tabId, btn.dataset.switchWindow ?? '');
-    });
-  });
-  windowsEl.querySelectorAll('[data-rename-window]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const windowId = btn.dataset.renameWindow ?? '';
-      const windowState = selectedSession?.windows.find((candidate) => candidate.window_id === windowId);
-      void renameRemoteTmuxWindow(state.tabId, windowId, windowState?.window_name ?? '');
-    });
-  });
-  windowsEl.querySelectorAll('[data-kill-window]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const windowId = btn.dataset.killWindow ?? '';
-      const windowState = selectedSession?.windows.find((candidate) => candidate.window_id === windowId);
-      void killRemoteTmuxWindow(state.tabId, windowId, windowState?.window_name ?? '', windowId === data.current_window_id);
-    });
-  });
-  panesEl.querySelectorAll('[data-switch-pane]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      void switchRemoteTmuxPane(state.tabId, btn.dataset.switchPane ?? '');
-    });
-  });
-  body.querySelector('[data-action="new-session"]')?.addEventListener('click', () => {
-    void createRemoteTmuxSession(state.tabId);
-  });
-  body.querySelector('[data-action="new-window"]')?.addEventListener('click', () => {
-    if (selectedSession?.session_name) {
-      void createRemoteTmuxWindow(state.tabId, selectedSession.session_name);
-    }
-  });
-}
-
-async function refreshRemoteTmuxInspector({ force = false, preserveSelection = false } = {}) {
-  const state = remoteTmuxInspectorState;
-  if (!state) return;
-  const pane = getRemoteTmuxPaneForTab(state.tabId);
-  const target = normalizeSshTarget(pane?.target);
-  if (!pane || !target || target.type !== 'remote_tmux') {
-    state.error = 'Remote tmux pane is not available.';
-    state.data = null;
-    state.loading = false;
-    renderRemoteTmuxInspector();
-    return;
-  }
-
-  if (!force && state.loading) return;
-
-  const previousSessionName = preserveSelection ? state.selectedSessionName : '';
-  const previousWindowId = preserveSelection ? state.selectedWindowId : '';
-  state.loading = true;
-  state.error = '';
-  renderRemoteTmuxInspector();
-
-  try {
-    state.data = await invoke('inspect_remote_tmux_state', { target });
-    state.selectedSessionName = previousSessionName || state.data.current_session_name || state.data.sessions[0]?.session_name || '';
-    const currentSession = state.data.sessions.find((session) => session.session_name === state.selectedSessionName);
-    state.selectedWindowId = previousWindowId || state.data.current_window_id || currentSession?.windows[0]?.window_id || '';
-  } catch (err) {
-    state.data = null;
-    state.error = String(err);
-  } finally {
-    state.loading = false;
-    renderRemoteTmuxInspector();
-  }
-}
-
-async function openRemoteTmuxInspector(tabId, { forceRefresh: _forceRefresh = false } = {}) {
-  if (!tabHasRemoteTmux(tabId)) return;
-  const previousState = remoteTmuxInspectorState;
-  closeRemoteTmuxInspector();
-
-  const panel = document.createElement('div');
-  panel.id = 'remote-tmux-inspector';
-  panel.className = 'remote-tmux-inspector';
-  panel.innerHTML = `
-    <div class="rti-header">
-      <div>
-        <div class="rti-title">Remote tmux</div>
-        <div class="rti-subtitle"></div>
-      </div>
-      <div class="rti-header-actions">
-        <button class="rti-header-btn" data-action="refresh">Refresh</button>
-        <button class="rti-header-btn" data-action="close">Close</button>
-      </div>
-    </div>
-    <div class="rti-body"></div>
-  `;
-  document.body.appendChild(panel);
-
-  const onEscape = (event) => {
-    if (event.key === 'Escape') closeRemoteTmuxInspector();
-  };
-  remoteTmuxInspectorCleanup = () => {
-    panel.remove();
-    document.removeEventListener('keydown', onEscape);
-  };
-  document.addEventListener('keydown', onEscape);
-
-  remoteTmuxInspectorState = {
-    tabId,
-    loading: false,
-    error: '',
-    data: null,
-    selectedSessionName: previousState?.tabId === tabId ? previousState.selectedSessionName : '',
-    selectedWindowId: previousState?.tabId === tabId ? previousState.selectedWindowId : '',
-  };
-  renderRemoteTmuxInspector();
-  await refreshRemoteTmuxInspector({ force: true, preserveSelection: true });
+async function openRemoteTmuxInspector(tabId, options = {}) {
+  return remoteTmuxInspectorRuntime?.openInspector(tabId, options);
 }
 
 async function refreshRemoteTmuxTabHealth(tabId, { force = false } = {}) {
-  const tab = tabs.get(tabId);
-  if (!tab || tab.targetKind !== 'remote_tmux') return;
-  if (!force && tab.connectionStatus === 'connecting') return;
-  if (!force && tab.lastRemoteProbeAt && Date.now() - tab.lastRemoteProbeAt < 30_000) return;
-  const remotePane = getRemoteTmuxPaneForTab(tabId);
-  if (!remotePane) return;
-  await probeRemoteTmuxMetadata(tabId, remotePane.sessionId, remotePane.target);
+  return remoteTmuxRuntime?.refreshRemoteTmuxTabHealth(tabId, { force });
 }
 
 async function reconnectRemoteTmuxTab(tabId) {
-  const tab = tabs.get(tabId);
-  if (!tab || !tabHasRemoteTmux(tabId)) return false;
-  if (tab.workspaceId !== activeWorkspaceId) switchWorkspace(tab.workspaceId);
-  const remotePane = getRemoteTmuxPaneForTab(tabId);
-  if (!remotePane) return false;
-
-  const restoreData = serializeTabState(tab);
-  const reopenTarget = remotePane.target;
-  const showNotifPanel = notifPanelTabId === tabId;
-
-  await closeTab(tabId);
-  const newTabId = await createTab(reopenTarget, restoreData);
-  if (showNotifPanel) {
-    notifPanelTabId = newTabId;
-    renderNotifPanel(newTabId);
-  }
-  return true;
+  return remoteTmuxRuntime?.reconnectRemoteTmuxTab(tabId) ?? false;
 }
 
 async function reconnectRemoteTmuxWorkspace(workspaceId = activeWorkspaceId) {
-  if (workspaceId !== activeWorkspaceId) switchWorkspace(workspaceId);
-  const tabIds = workspaceRemoteTmuxTabIds(workspaceId);
-  for (const tabId of tabIds) {
-    await reconnectRemoteTmuxTab(tabId);
-  }
-}
-
-async function openRemoteTmuxWorkspaceFromProfile(target) {
-  const normalized = normalizeSshTarget(target);
-  if (!normalized || normalized.type !== 'remote_tmux') return null;
-  const workspaceName = normalized.name || `tmux ${normalized.session_name}`;
-  const workspaceId = _createWorkspaceMeta(workspaceName);
-  renderWorkspaceBar();
-  switchWorkspace(workspaceId);
-  return createTab(normalized);
+  return remoteTmuxRuntime?.reconnectRemoteTmuxWorkspace(workspaceId);
 }
 
 async function _destroyPane(paneId) {
-  const pane = panes.get(paneId);
-  if (!pane) return;
-  pane.unlisten();
-  pane.resizeObserver.disconnect();
-  pane.terminal.dispose();
-  const tab = tabs.get(pane.tabId);
-  if (tab) {
-    tab.paneIds.delete(paneId);
-    if (tab.lastActiveSurfaceEl === pane.domEl) tab.lastActiveSurfaceEl = null;
-    if (tab.zoomedSurfaceEl === pane.domEl) tab.zoomedSurfaceEl = null;
-  }
-  if (zoomedSurfaceEl === pane.domEl) zoomedSurfaceEl = null;
-  panes.delete(paneId);
-  try { await invoke('close_session', { id: paneId }); } catch { /* already dead */ }
+  return tabSurfaceRuntime?.destroyPaneSession(paneId);
 }
 
 async function closeBrowserSurface(label, { collapse = true } = {}) {
-  return surfaceRuntime?.closeBrowserSurface(label, { collapse });
+  return browserPaneRuntime?.closeBrowserSurface(label, { collapse });
 }
 
 function closeMarkdownSurface(label, { collapse = true } = {}) {
@@ -2108,11 +1396,11 @@ async function createMarkdownLeaf(tabId, mountEl, initialState = {}) {
 }
 
 async function createBrowserLeaf(tabId, mountEl, initialState = {}) {
-  return surfaceRuntime?.createBrowserLeaf(tabId, mountEl, initialState);
+  return browserPaneRuntime?.createBrowserLeaf(tabId, mountEl, initialState);
 }
 
 async function splitPaneWithBrowser(paneId, dir, initialState = {}) {
-  return surfaceRuntime?.splitPaneWithBrowser(paneId, dir, initialState);
+  return browserPaneRuntime?.splitPaneWithBrowser(paneId, dir, initialState);
 }
 
 async function splitPaneWithMarkdown(paneId, dir, initialState = {}) {
@@ -2150,7 +1438,7 @@ paneAuxRuntime = createPaneAuxRuntime({
   saveSettings,
 });
 
-surfaceRuntime = createSurfaceRuntime({
+browserPaneRuntime = createBrowserPaneRuntime({
   invoke,
   document,
   getWindowLabel: () => getCurrentWindow().label,
@@ -2164,7 +1452,6 @@ surfaceRuntime = createSurfaceRuntime({
   setActiveBrowserLabel: (label) => { activeBrowserLabel = label; },
   getActiveMarkdownLabel: () => activeMarkdownLabel,
   setActiveMarkdownLabel: (label) => { activeMarkdownLabel = label; },
-  getZoomedSurfaceEl: () => zoomedSurfaceEl,
   setZoomedSurfaceEl: (surfaceEl) => { zoomedSurfaceEl = surfaceEl; },
   clearActiveSurface,
   activatePane,
@@ -2183,7 +1470,62 @@ surfaceRuntime = createSurfaceRuntime({
   updateTabMeta,
   onLayoutChanged: () => markLayoutDirty(),
 });
-browserPanes = surfaceRuntime.browserPanes;
+surfaceRuntime = browserPaneRuntime.surfaceRuntime;
+browserPanes = browserPaneRuntime.browserPanes;
+
+tabSurfaceRuntime = createTabSurfaceRuntime({
+  document,
+  tabs,
+  panes,
+  browserPanes,
+  markdownPanes,
+  workspaces,
+  getActiveTabId: () => activeTabId,
+  setActiveTabId: (tabId) => { activeTabId = tabId; },
+  getActivePaneId: () => activePaneId,
+  setActivePaneId: (paneId) => { activePaneId = paneId; },
+  getActiveBrowserLabel: () => activeBrowserLabel,
+  setActiveBrowserLabel: (label) => { activeBrowserLabel = label; },
+  getActiveMarkdownLabel: () => activeMarkdownLabel,
+  setActiveMarkdownLabel: (label) => { activeMarkdownLabel = label; },
+  getZoomedSurfaceEl: () => zoomedSurfaceEl,
+  setZoomedSurfaceEl: (surfaceEl) => { zoomedSurfaceEl = surfaceEl; },
+  getNotifPanelTabId: () => notifPanelTabId,
+  setNotifPanelTabId: (tabId) => { notifPanelTabId = tabId; },
+  syncBrowserVisibility,
+  fitAndResizePane,
+  setPaneRing,
+  markPaneNotificationsRead,
+  markTabNotificationsRead,
+  updateTabMeta,
+  setTabRing,
+  markLayoutDirty,
+  activateBrowser,
+  activateMarkdown,
+  closeBrowserSurface,
+  closeMarkdownSurface,
+  saveSessionVaultEntryForPane,
+  destroyPane: async (paneId) => {
+    const pane = panes.get(paneId);
+    if (!pane) return;
+    pane.unlisten();
+    pane.resizeObserver.disconnect();
+    pane.terminal.dispose();
+    const tab = tabs.get(pane.tabId);
+    if (tab) {
+      tab.paneIds.delete(paneId);
+      if (tab.lastActiveSurfaceEl === pane.domEl) tab.lastActiveSurfaceEl = null;
+      if (tab.zoomedSurfaceEl === pane.domEl) tab.zoomedSurfaceEl = null;
+    }
+    if (zoomedSurfaceEl === pane.domEl) zoomedSurfaceEl = null;
+    panes.delete(paneId);
+    try { await invoke('close_session', { id: paneId }); } catch { /* already dead */ }
+  },
+  updateTabNumbers,
+  closeRemoteTmuxInspector,
+  isRemoteTmuxInspectorOpen: (tabId) => remoteTmuxInspectorRuntime?.isOpenForTab(tabId) ?? false,
+  refreshRemoteTmuxTabHealth,
+});
 
 sessionVaultRuntime = createSessionVaultRuntime({
   invoke,
@@ -2267,89 +1609,36 @@ const {
   restoreLayout,
 } = layoutPersistence;
 
-let layoutSaveTimer = null;
-let layoutSaveInFlight = Promise.resolve(false);
-let lastSavedLayoutJson = null;
-let windowCloseInProgress = false;
-
-async function closeBrowserSurfacesForShutdown() {
-  const browserLabels = [...browserPanes.keys()];
-  if (browserLabels.length === 0) return;
-
-  await Promise.allSettled(
-    browserLabels.map((label) => closeBrowserSurface(label, { collapse: false })),
-  );
-}
-
-function buildLayoutSnapshot() {
-  return JSON.stringify(serializeLayout());
-}
-
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    }),
-  ]);
-}
-
-function persistLayoutNow({ force = false, reason = 'manual' } = {}) {
-  let layoutJson;
-  try {
-    for (const pane of panes.values()) {
-      backfillPaneCwdFromTranscript(pane);
-      pane.screenSnapshot = captureVisibleTerminalScreen(pane.terminal, pane.serializeAddon);
-    }
-    layoutJson = buildLayoutSnapshot();
-  } catch (err) {
-    console.warn(`Failed to serialize layout during ${reason}:`, err);
-    return Promise.resolve(false);
-  }
-
-  if (!force && layoutJson === lastSavedLayoutJson) return Promise.resolve(false);
-
-  layoutSaveInFlight = layoutSaveInFlight
-    .catch(() => false)
-    .then(async () => {
-      if (!force && layoutJson === lastSavedLayoutJson) return false;
-      await invoke('save_layout', { layoutJson });
-      lastSavedLayoutJson = layoutJson;
-      return true;
-    })
-    .catch((err) => {
-      console.warn(`Failed to save layout during ${reason}:`, err);
-      return false;
-    });
-
-  return layoutSaveInFlight;
-}
-
-function scheduleLayoutSave(delay = 300) {
-  if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
-  layoutSaveTimer = setTimeout(() => {
-    layoutSaveTimer = null;
-    void persistLayoutNow({ reason: 'scheduled' });
-  }, delay);
-}
-
-function markLayoutDirty({ immediate = false } = {}) {
-  lastSavedLayoutJson = null;
-  if (immediate) return persistLayoutNow({ reason: 'immediate' });
-  scheduleLayoutSave();
-  return Promise.resolve(false);
-}
+layoutLifecycle = createLayoutLifecycleRuntime({
+  document,
+  windowObject: window,
+  currentWindow: getCurrentWindow(),
+  invoke,
+  panes,
+  serializeLayout,
+  restoreLayout,
+  backfillPaneCwdFromTranscript,
+  closeBrowserSurfacesForShutdown: () => browserPaneRuntime?.closeBrowserSurfacesForShutdown(),
+  flushSessionVaultEntries: (options) => flushSessionVaultEntries(options),
+  createDefaultLayout: async () => {
+    const wsId = _createWorkspaceMeta('Workspace 1');
+    activeWorkspaceId = wsId;
+    applyWorkspaceTheme(wsId);
+    renderWorkspaceBar();
+    await createTab(getDefaultTarget());
+  },
+});
 
 function focusBrowserUrl() {
-  return surfaceRuntime?.focusBrowserUrl() ?? false;
+  return browserPaneRuntime?.focusBrowserUrl() ?? false;
 }
 
 function browserNavigateRelative(direction) {
-  return surfaceRuntime?.browserNavigateRelative(direction) ?? false;
+  return browserPaneRuntime?.browserNavigateRelative(direction) ?? false;
 }
 
 function reloadActiveBrowser() {
-  return surfaceRuntime?.reloadActiveBrowser() ?? false;
+  return browserPaneRuntime?.reloadActiveBrowser() ?? false;
 }
 
 function focusAdjacentSurface(direction) {
@@ -2360,163 +1649,44 @@ function closeCurrentSurface() {
   return paneAuxRuntime?.closeCurrentSurface() ?? false;
 }
 
-// Keyboard shortcuts
+function handlePaneFontShortcut(key) {
+  return paneAuxRuntime?.handlePaneFontShortcut(key) ?? false;
+}
 
-document.addEventListener('keydown', (e) => {
-  const ctrl  = e.ctrlKey;
-  const shift = e.shiftKey;
-  const alt   = e.altKey;
-  const key   = e.key;
-
-  if (ctrl && shift && key === 'T') { e.preventDefault(); createTab(getDefaultTarget()); return; }
-  if (ctrl && shift && key === 'W') { e.preventDefault(); closeCurrentSurface(); return; }
-
-  if (ctrl && shift && (key === '\\' || key === '|')) { e.preventDefault(); if (activePaneId) splitPane(activePaneId, 'h'); return; }
-  if (ctrl && shift && (key === '_' || key === '-')) { e.preventDefault(); if (activePaneId) splitPane(activePaneId, 'v'); return; }
-
-  if (ctrl && key === 'Tab') {
-    e.preventDefault();
-    const wsTabIds = [...tabs.values()]
-      .filter(t => t.workspaceId === activeWorkspaceId)
-      .map(t => t.tabId);
-    if (wsTabIds.length < 2) return;
-    const idx  = wsTabIds.indexOf(activeTabId);
-    const next = shift
-      ? wsTabIds[(idx - 1 + wsTabIds.length) % wsTabIds.length]
-      : wsTabIds[(idx + 1) % wsTabIds.length];
-    activateTab(next);
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key === 'i') { e.preventDefault(); toggleNotifPanel(); return; }
-
-  if (ctrl && shift && !alt && key.toUpperCase() === 'O') {
-    e.preventDefault();
-    previewArtifactFromPane();
-    return;
-  }
-
-  if (ctrl && shift && !alt && key.toUpperCase() === 'J') {
-    e.preventDefault();
-    void toggleSessionVaultPanel();
-    return;
-  }
-
-  if (ctrl && shift && key === 'U') {
-    e.preventDefault();
-    const unread = [...tabs.values()]
-      .filter(t => t.workspaceId === activeWorkspaceId && unreadNotificationCount(t.tabId) > 0);
-    if (unread.length > 0) activateTab(unread[unread.length - 1].tabId);
-    else {
-      const allNotif = [...tabs.values()].filter(t => unreadNotificationCount(t.tabId) > 0);
-      if (allNotif.length > 0) {
-        const t = allNotif[allNotif.length - 1];
-        switchWorkspace(t.workspaceId);
-        activateTab(t.tabId);
-      }
-    }
-    return;
-  }
-
-  if (ctrl && alt && key.toLowerCase() === 'h') { e.preventDefault(); showHistoryPicker(); return; }
-  if (ctrl && !shift && !alt && key === 'f') { e.preventDefault(); showFindBar(); return; }
-
-  if (ctrl && shift && !alt && key.toUpperCase() === 'L') {
-    e.preventDefault();
-    if (activePaneId) splitPaneWithBrowser(activePaneId, 'h');
-    else if (activeTabId) openBrowserSplitForTab(activeTabId);
-    return;
-  }
-
-  if (ctrl && shift && !alt && key.toUpperCase() === 'M') {
-    e.preventDefault();
-    if (activePaneId) splitPaneWithMarkdown(activePaneId, 'h');
-    else if (activeTabId) openMarkdownSplitForTab(activeTabId);
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key.toLowerCase() === 'l' && focusBrowserUrl()) {
-    e.preventDefault();
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key === '[' && browserNavigateRelative('back')) {
-    e.preventDefault();
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key === ']' && browserNavigateRelative('forward')) {
-    e.preventDefault();
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key.toLowerCase() === 'r' && reloadActiveBrowser()) {
-    e.preventDefault();
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key === 'k') {
-    const pane = panes.get(activePaneId);
-    if (pane) { e.preventDefault(); pane.terminal.clear(); }
-    return;
-  }
-
-  if (ctrl && !shift && !alt) {
-    const pane = panes.get(activePaneId);
-    if (key === ',' && !pane) { e.preventDefault(); showSettingsPanel(); return; }
-    if (!pane) return;
-    if (key === '=' || key === '+') {
-      e.preventDefault();
-      const ns = Math.min(32, (pane.terminal.options.fontSize ?? 13) + 1);
-      for (const [id, p] of panes) { p.terminal.options.fontSize = ns; fitAndResizePane(id); }
-      const sv = loadSettings(); sv.fontSize = ns; saveSettings(sv);
-      return;
-    }
-    if (key === '-' || key === '_') {
-      e.preventDefault();
-      const ns = Math.max(8, (pane.terminal.options.fontSize ?? 13) - 1);
-      for (const [id, p] of panes) { p.terminal.options.fontSize = ns; fitAndResizePane(id); }
-      const sv = loadSettings(); sv.fontSize = ns; saveSettings(sv);
-      return;
-    }
-    if (key === '0') {
-      e.preventDefault();
-      const ns = SETTINGS_DEFAULTS.fontSize;
-      for (const [id, p] of panes) { p.terminal.options.fontSize = ns; fitAndResizePane(id); }
-      const sv = loadSettings(); sv.fontSize = ns; saveSettings(sv);
-      return;
-    }
-    if (key === ',') { e.preventDefault(); showSettingsPanel(); return; }
-  }
-
-  if (ctrl && alt && key.toLowerCase() === 'n') { e.preventDefault(); createWorkspace(); return; }
-  if (ctrl && alt && key === 'Enter') { e.preventDefault(); toggleSurfaceZoom(getCurrentSurfaceElement()); return; }
-  if (alt && ctrl && key === 'ArrowLeft') { e.preventDefault(); focusAdjacentSurface('left'); return; }
-  if (alt && ctrl && key === 'ArrowRight') { e.preventDefault(); focusAdjacentSurface('right'); return; }
-  if (alt && ctrl && key === 'ArrowUp') { e.preventDefault(); focusAdjacentSurface('up'); return; }
-  if (alt && ctrl && key === 'ArrowDown') { e.preventDefault(); focusAdjacentSurface('down'); return; }
-  if (ctrl && alt && (key === '[' || key === '{')) {
-    e.preventDefault();
-    const ids = orderedWorkspaceIds();
-    const i = ids.indexOf(activeWorkspaceId);
-    if (i > 0) switchWorkspace(ids[i - 1]);
-    return;
-  }
-  if (ctrl && alt && (key === ']' || key === '}')) {
-    e.preventDefault();
-    const ids = orderedWorkspaceIds();
-    const i = ids.indexOf(activeWorkspaceId);
-    if (i < ids.length - 1) switchWorkspace(ids[i + 1]);
-    return;
-  }
-  if (ctrl && alt && /^[1-9]$/.test(key)) {
-    e.preventDefault();
-    const n = parseInt(key, 10) - 1;
-    const ids = orderedWorkspaceIds();
-    if (ids[n]) switchWorkspace(ids[n]);
-    return;
-  }
-});
+createKeyboardRuntime({
+  document,
+  tabs,
+  panes,
+  getActiveWorkspaceId: () => activeWorkspaceId,
+  getActiveTabId: () => activeTabId,
+  getActivePaneId: () => activePaneId,
+  createTab,
+  getDefaultTarget,
+  closeCurrentSurface,
+  splitPane,
+  activateTab,
+  toggleNotifPanel,
+  previewArtifactFromPane,
+  toggleSessionVaultPanel,
+  unreadNotificationCount,
+  switchWorkspace,
+  showHistoryPicker,
+  showFindBar,
+  splitPaneWithBrowser,
+  openBrowserSplitForTab,
+  splitPaneWithMarkdown,
+  openMarkdownSplitForTab,
+  focusBrowserUrl,
+  browserNavigateRelative,
+  reloadActiveBrowser,
+  showSettingsPanel,
+  handlePaneFontShortcut,
+  createWorkspace,
+  toggleSurfaceZoom,
+  getCurrentSurfaceElement,
+  focusAdjacentSurface,
+  orderedWorkspaceIds,
+}).bindKeyboardShortcuts();
 
 // Boot
 
@@ -2532,7 +1702,7 @@ document.getElementById('workspace-bar')?.addEventListener('contextmenu', (event
   event.preventDefault();
   const ws = workspaces.get(activeWorkspaceId);
   if (!ws) return;
-  const remoteTmuxTabIds = workspaceRemoteTmuxTabIds(ws.id);
+  const remoteTmuxItems = remoteTmuxUiRuntime?.buildWorkspaceContextMenuItems(ws.id) ?? [];
   const themeItems = WORKSPACE_THEMES.map((theme) => ({
     label: `${ws.themeId === theme.id ? '●' : '○'} Theme: ${theme.label}`,
     action: () => setWorkspaceTheme(ws.id, theme.id),
@@ -2540,7 +1710,7 @@ document.getElementById('workspace-bar')?.addEventListener('contextmenu', (event
   showContextMenu([
     { label: 'Rename workspace', action: () => startWorkspaceRename() },
     { label: ws.pinned ? 'Unpin workspace' : 'Pin workspace', action: () => setWorkspacePinned(ws.id, !ws.pinned) },
-    { label: 'Reconnect remote tmux tabs', action: () => reconnectRemoteTmuxWorkspace(ws.id), disabled: remoteTmuxTabIds.length === 0 },
+    ...remoteTmuxItems,
     { type: 'separator' },
     ...themeItems,
     { type: 'separator' },
@@ -2565,67 +1735,7 @@ document.getElementById('btn-pin-ws')?.addEventListener('click', () => {
   if (ws) setWorkspacePinned(ws.id, !ws.pinned);
 });
 
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') void persistLayoutNow({ force: true, reason: 'visibilitychange' });
-});
-window.addEventListener('pagehide', () => {
-  void persistLayoutNow({ force: true, reason: 'pagehide' });
-});
-
-getCurrentWindow().onCloseRequested(async (event) => {
-  if (windowCloseInProgress) {
-    return;
-  }
-
-  windowCloseInProgress = true;
-  event.preventDefault();
-  const currentWindow = getCurrentWindow();
-  try {
-    if (layoutSaveTimer) {
-      clearTimeout(layoutSaveTimer);
-      layoutSaveTimer = null;
-    }
-    await withTimeout(flushSessionVaultEntries({ reason: 'shutdown' }), 2500, 'session vault flush');
-    await withTimeout(closeBrowserSurfacesForShutdown(), 1500, 'browser cleanup');
-    await withTimeout(persistLayoutNow({ force: true, reason: 'close-requested' }), 1500, 'layout save');
-  } catch (err) {
-    console.warn('Close preparation failed, forcing window destruction:', err);
-  }
-
-  try {
-    await invoke('exit_app');
-  } catch (err) {
-    console.warn('Backend app exit failed, falling back to window destruction:', err);
-    try {
-      await currentWindow.destroy();
-    } catch (destroyErr) {
-      console.warn('Failed to destroy window during shutdown:', destroyErr);
-      windowCloseInProgress = false;
-    }
-  }
-});
-
-(async () => {
-  let restored = false;
-  try {
-    const raw = await invoke('load_layout');
-    if (raw) restored = await restoreLayout(JSON.parse(raw));
-  } catch (err) {
-    console.warn('Could not restore layout:', err);
-  }
-  if (!restored) {
-    const wsId = _createWorkspaceMeta('Workspace 1');
-    activeWorkspaceId = wsId;
-    applyWorkspaceTheme(wsId);
-    renderWorkspaceBar();
-    await createTab(getDefaultTarget());
-  }
-  try {
-    lastSavedLayoutJson = buildLayoutSnapshot();
-  } catch (err) {
-    console.warn('Could not snapshot initial layout:', err);
-  }
-})();
+void layoutLifecycle.initializeLifecycle();
 
 function requireTab(tabId = activeTabId) {
   const tab = tabs.get(tabId);
@@ -2683,5 +1793,7 @@ const automationBridge = createAutomationBridge({
   renderWorkspaceBar,
 });
 
-window.wmux = automationBridge.api;
+window.wmux = {
+  ...automationBridge.api,
+};
 listen('wmux-control-request', automationBridge.handleControlRequest);

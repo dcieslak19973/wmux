@@ -1,72 +1,12 @@
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionVaultEntrySummary {
-    pub id: String,
-    pub saved_at: u64,
-    pub pane_id: String,
-    pub workspace_name: String,
-    pub tab_title: String,
-    pub pane_title: String,
-    pub pane_detail: Option<String>,
-    pub target_kind: String,
-    pub target_label: String,
-    pub cwd: Option<String>,
-    pub reason: String,
-    pub transcript_chars: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionVaultEntryDetail {
-    pub id: String,
-    pub saved_at: u64,
-    pub pane_id: String,
-    pub workspace_name: String,
-    pub tab_title: String,
-    pub pane_title: String,
-    pub pane_detail: Option<String>,
-    pub target_kind: String,
-    pub target_label: String,
-    pub cwd: Option<String>,
-    pub reason: String,
-    pub transcript_chars: usize,
-    pub transcript: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveSessionVaultEntryRequest {
-    pub pane_id: String,
-    pub workspace_name: String,
-    pub tab_title: String,
-    pub pane_title: String,
-    pub pane_detail: Option<String>,
-    pub target_kind: String,
-    pub target_label: String,
-    pub cwd: Option<String>,
-    pub transcript: String,
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionVaultEntryRecord {
-    pub id: String,
-    pub saved_at: u64,
-    pub pane_id: String,
-    pub workspace_name: String,
-    pub tab_title: String,
-    pub pane_title: String,
-    pub pane_detail: Option<String>,
-    pub target_kind: String,
-    pub target_label: String,
-    pub cwd: Option<String>,
-    pub reason: String,
-    pub transcript_chars: usize,
-    pub transcript_file: String,
-}
+use crate::session_vault::model::{
+    SaveSessionVaultEntryRequest, SessionVaultEntryDetail, SessionVaultEntryRecord,
+    SessionVaultEntrySummary,
+};
+use crate::session_vault::store::{
+    is_safe_session_vault_id, now_unix_millis, session_vault_dir, session_vault_metadata_path,
+    session_vault_summary_from_record,
+};
+use tauri::AppHandle;
 
 #[tauri::command]
 pub async fn save_session_vault_entry(
@@ -108,7 +48,9 @@ pub async fn save_session_vault_entry(
 }
 
 #[tauri::command]
-pub async fn list_session_vault_entries(app: AppHandle) -> Result<Vec<SessionVaultEntrySummary>, String> {
+pub async fn list_session_vault_entries(
+    app: AppHandle,
+) -> Result<Vec<SessionVaultEntrySummary>, String> {
     let dir = session_vault_dir(&app)?;
     if !dir.exists() {
         return Ok(Vec::new());
@@ -173,46 +115,4 @@ pub async fn read_session_vault_entry(
         transcript_chars: record.transcript_chars,
         transcript,
     })
-}
-
-fn session_vault_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map(|path| path.join("session-vault"))
-        .map_err(|e| e.to_string())
-}
-
-fn session_vault_metadata_path(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.json"))
-}
-
-fn session_vault_summary_from_record(record: SessionVaultEntryRecord) -> SessionVaultEntrySummary {
-    SessionVaultEntrySummary {
-        id: record.id,
-        saved_at: record.saved_at,
-        pane_id: record.pane_id,
-        workspace_name: record.workspace_name,
-        tab_title: record.tab_title,
-        pane_title: record.pane_title,
-        pane_detail: record.pane_detail,
-        target_kind: record.target_kind,
-        target_label: record.target_label,
-        cwd: record.cwd,
-        reason: record.reason,
-        transcript_chars: record.transcript_chars,
-    }
-}
-
-fn is_safe_session_vault_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
-fn now_unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }

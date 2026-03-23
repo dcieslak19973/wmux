@@ -39,6 +39,7 @@ export function createUiPanelsRuntime({
   let sessionVaultFilter = '';
   let sessionVaultLoading = false;
   let sessionVaultDetailLoading = false;
+  let settingsPanelCleanup = null;
 
   function unreadNotificationCount(tabId) {
     return (notifications.get(tabId) ?? []).filter((item) => !item.read).length;
@@ -534,8 +535,7 @@ export function createUiPanelsRuntime({
     `;
 
     panel.querySelector('[data-action="close"]').addEventListener('click', () => {
-      sessionVaultPanelVisible = false;
-      renderSessionVaultPanel();
+      closeSessionVaultPanel();
     });
     panel.querySelector('[data-action="refresh"]').addEventListener('click', async () => {
       await refreshSessionVaultPanel();
@@ -608,14 +608,31 @@ export function createUiPanelsRuntime({
   async function toggleSessionVaultPanel(force) {
     sessionVaultPanelVisible = typeof force === 'boolean' ? force : !sessionVaultPanelVisible;
     if (!sessionVaultPanelVisible) {
-      renderSessionVaultPanel();
+      closeSessionVaultPanel();
       return false;
     }
     await refreshSessionVaultPanel();
     return true;
   }
 
+  function focusActivePaneTerminal() {
+    const pane = panes.get(getActivePaneId());
+    if (!pane?.terminal) return;
+    setTimeout(() => {
+      if (panes.get(getActivePaneId())?.terminal === pane.terminal) {
+        pane.terminal.focus();
+      }
+    }, 0);
+  }
+
+  function closeSessionVaultPanel({ restoreFocus = true } = {}) {
+    sessionVaultPanelVisible = false;
+    renderSessionVaultPanel();
+    if (restoreFocus) focusActivePaneTerminal();
+  }
+
   function showSettingsPanel() {
+    settingsPanelCleanup?.();
     document.getElementById('settings-panel')?.remove();
     const s = loadSettings();
     const panel = document.createElement('div');
@@ -638,8 +655,19 @@ export function createUiPanelsRuntime({
       </div>
     `;
     document.body.appendChild(panel);
+    panel.tabIndex = -1;
+    panel.focus();
     const draft = { ...s };
     const fontValEl = panel.querySelector('#sp-font-val');
+    const outsideClickController = new AbortController();
+    const closePanel = ({ restoreFocus = true } = {}) => {
+      settingsPanelCleanup = null;
+      outsideClickController.abort();
+      if (panel.isConnected) panel.remove();
+      if (restoreFocus) focusActivePaneTerminal();
+    };
+    settingsPanelCleanup = () => closePanel({ restoreFocus: false });
+
     panel.querySelector('#sp-font-dec').addEventListener('click', () => { draft.fontSize = Math.max(8, (draft.fontSize ?? 13) - 1); fontValEl.textContent = draft.fontSize; });
     panel.querySelector('#sp-font-inc').addEventListener('click', () => { draft.fontSize = Math.min(32, (draft.fontSize ?? 13) + 1); fontValEl.textContent = draft.fontSize; });
     panel.querySelector('#sp-apply').addEventListener('click', () => {
@@ -650,30 +678,28 @@ export function createUiPanelsRuntime({
       draft.cursorBlink = panel.querySelector('#sp-cursor-blink').checked;
       saveSettings(draft);
       applySettingsToAllPanes(draft);
-      panel.remove();
+      closePanel();
     });
-    panel.querySelector('#sp-reset').addEventListener('click', () => { saveSettings({ ...SETTINGS_DEFAULTS }); applySettingsToAllPanes(SETTINGS_DEFAULTS); panel.remove(); });
+    panel.querySelector('#sp-reset').addEventListener('click', () => { saveSettings({ ...SETTINGS_DEFAULTS }); applySettingsToAllPanes(SETTINGS_DEFAULTS); closePanel(); });
     panel.querySelector('#sp-new-window').addEventListener('click', async () => {
-      panel.remove();
+      closePanel({ restoreFocus: false });
       try { await invoke('create_app_window'); } catch (err) { showError(`Could not open window: ${err}`); }
     });
-    panel.querySelector('.settings-close').addEventListener('click', () => panel.remove());
-    panel.addEventListener('keydown', (event) => { if (event.key === 'Escape') panel.remove(); });
+    panel.querySelector('.settings-close').addEventListener('click', () => closePanel());
+    panel.addEventListener('keydown', (event) => { if (event.key === 'Escape') closePanel(); });
     setTimeout(() => {
+      if (!panel.isConnected) return;
       const onOut = (event) => {
         if (!panel.contains(event.target)) {
-          panel.remove();
-          document.removeEventListener('click', onOut);
+          closePanel();
         }
       };
-      document.addEventListener('click', onOut);
+      document.addEventListener('click', onOut, { signal: outsideClickController.signal });
     }, 0);
   }
 
   return {
     artifacts,
-    unreadNotificationCount,
-    showError,
     showUrlBanner,
     base64Decode,
     escHtml,

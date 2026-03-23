@@ -17,7 +17,10 @@ export function createNewTabPopoverRuntime({
   openRemoteTmuxWorkspaceFromProfile,
   getAnchorElement,
 }) {
+  let popoverCleanup = null;
+
   async function showNewTabPopover() {
+    popoverCleanup?.();
     document.getElementById('new-tab-popover')?.remove();
 
     let defaultTarget = getDefaultTarget();
@@ -109,10 +112,15 @@ export function createNewTabPopoverRuntime({
 
     document.body.appendChild(popover);
 
+    const outsideClickController = new AbortController();
+
     function closePopover() {
-      popover.remove();
-      document.removeEventListener('click', onOutside);
+      popoverCleanup = null;
+      outsideClickController.abort();
+      if (popover.isConnected) popover.remove();
     }
+
+    popoverCleanup = closePopover;
 
     const localTarget = { type: 'local' };
     const localBtn = document.createElement('button');
@@ -403,7 +411,10 @@ export function createNewTabPopoverRuntime({
       const trigger = getAnchorElement();
       if (!popover.contains(event.target) && event.target !== trigger) closePopover();
     };
-    setTimeout(() => document.addEventListener('click', onOutside), 0);
+    setTimeout(() => {
+      if (!popover.isConnected) return;
+      document.addEventListener('click', onOutside, { signal: outsideClickController.signal });
+    }, 0);
   }
 
   return { showNewTabPopover };

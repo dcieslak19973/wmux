@@ -6,11 +6,15 @@
     "tauri": "tauri",
     "dev": "vite",
     "build": "vite build",
+    "lint": "eslint src test vite.config.js eslint.config.mjs",
     "preview": "vite preview",
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2.0.0",
+    "eslint": "^10.1.0",
+    "globals": "^17.4.0",
     "vite": "^6.0.0"
   },
   "dependencies": {

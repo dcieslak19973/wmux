@@ -1,8 +1,10 @@
+mod browser_windows;
 mod control_bridge;
 mod commands;
 mod conpty;
 mod ipc_server;
 mod osc_parser;
+mod remote_tmux;
 mod session_manager;
 mod url_detector;
 
@@ -23,9 +25,9 @@ pub fn run() {
         .manage(control_bridge)
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
-            commands::probe_remote_tmux_metadata,
-            commands::inspect_remote_tmux_state,
-            commands::manage_remote_tmux,
+            remote_tmux::probe_remote_tmux_metadata,
+            remote_tmux::inspect_remote_tmux_state,
+            remote_tmux::manage_remote_tmux,
             commands::close_session,
             commands::write_to_session,
             commands::list_sessions,
@@ -45,11 +47,11 @@ pub fn run() {
             commands::save_artifact_preview,
             commands::read_text_file,
             commands::create_app_window,
-            commands::create_browser_window,
-            commands::navigate_browser,
-            commands::set_browser_visible,
-            commands::set_browser_geometry,
-            commands::close_browser_window,
+            browser_windows::create_browser_window,
+            browser_windows::navigate_browser,
+            browser_windows::set_browser_visible,
+            browser_windows::set_browser_geometry,
+            browser_windows::close_browser_window,
             commands::complete_control_request,
             commands::exit_app,
         ])

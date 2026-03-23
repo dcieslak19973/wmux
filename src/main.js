@@ -30,12 +30,13 @@ import {
 } from './layout_state.mjs';
 import { createLayoutPersistence } from './layout_runtime.mjs';
 import { createAutomationBridge } from './automation_bridge.mjs';
+import { createNewTabPopoverRuntime } from './new_tab_popover_runtime.mjs';
 import { createPaneAuxRuntime } from './pane_aux_runtime.mjs';
+import { createPaneContextRuntime } from './pane_context_runtime.mjs';
 import { createUiPanelsRuntime } from './ui_panels_runtime.mjs';
 import { createSurfaceRuntime } from './surfaces_runtime.mjs';
 import {
   createWorkspaceManager,
-  DEFAULT_WORKSPACE_THEME_ID,
   WORKSPACE_THEMES,
 } from './workspace_state.mjs';
 import {
@@ -76,9 +77,6 @@ let remoteTmuxInspectorState = null;
 const notifications = new Map();
 let notifPanelTabId = null;
 
-const artifacts = [];
-let artifactPanelVisible = false;
-
 const markdownPanes = new Map();
 let browserPanes = new Map();
 let surfaceRuntime = null;
@@ -98,6 +96,19 @@ const SETTINGS_DEFAULTS = {
 };
 
 const SAVED_SSH_TARGETS_KEY = 'wmux-saved-ssh-targets';
+
+const paneContextRuntime = createPaneContextRuntime({
+  document,
+  tabs,
+  panes,
+  defaultTargetLabel,
+  inferCwdFromTerminalTranscript,
+  inferRecentCwdsFromTerminalTranscript,
+  sanitizeCwdForTarget,
+  getActivePaneId: () => activePaneId,
+  escHtml: (value) => escHtml(value),
+  markLayoutDirty: () => markLayoutDirty(),
+});
 
 function loadSettings() {
   try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(localStorage.getItem('wmux-settings') ?? '{}') }; }
@@ -207,23 +218,8 @@ function saveSavedSshTargets(entries) {
   localStorage.setItem(SAVED_SSH_TARGETS_KEY, JSON.stringify(entries));
 }
 
-function basenameFromAnyPath(path) {
-  return String(path ?? '').split(/[\\/]/).filter(Boolean).pop() ?? '';
-}
-
 function backfillPaneCwdFromTranscript(pane) {
-  if (!pane) return '';
-  const [currentCwd = '', previousCwd = ''] = inferRecentCwdsFromTerminalTranscript(pane.outputSnapshot)
-    .map((value) => sanitizeCwdForTarget(pane.target, value));
-  const inferredCwd = currentCwd || sanitizeCwdForTarget(pane.target, inferCwdFromTerminalTranscript(pane.outputSnapshot));
-  if (!inferredCwd) return '';
-  if (previousCwd && previousCwd !== inferredCwd) pane.previousCwd = previousCwd;
-  pane.cwd = inferredCwd;
-  const tab = tabs.get(pane.tabId);
-  if (tab && (tab.paneIds.size === 1 || tab.lastActiveSurfaceEl === pane.domEl || activePaneId === pane.sessionId)) {
-    tab.cwd = inferredCwd;
-  }
-  return inferredCwd;
+  return paneContextRuntime.backfillPaneCwdFromTranscript(pane);
 }
 
 function trimTrailingPromptFromSerializedSnapshot(snapshot) {
@@ -270,110 +266,16 @@ function writeTerminalSnapshot(term, snapshot, { serialized = false } = {}) {
   term.write(normalized.replace(/\n/g, '\r\n'));
 }
 
-function relativePathWithin(root, fullPath) {
-  const normalizedRoot = String(root ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
-  const normalizedFull = String(fullPath ?? '').replace(/\\/g, '/');
-  if (!normalizedRoot || !normalizedFull.toLowerCase().startsWith(normalizedRoot.toLowerCase())) return '';
-  return normalizedFull.slice(normalizedRoot.length).replace(/^\/+/, '');
-}
-
-function shortPathLabel(path) {
-  const parts = String(path ?? '').replace(/\\/g, '/').split('/').filter(Boolean);
-  if (parts.length === 0) return '';
-  return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : parts.join('/');
-}
-
 function getPaneAutoLabel(pane) {
-  if (!pane) return { primary: 'Terminal', secondary: '' };
-
-  const cwdShort = shortPathLabel(pane.cwd);
-  const git = pane.gitContext;
-  if (!git?.repo_root) {
-    return {
-      primary: basenameFromAnyPath(pane.cwd) || defaultTargetLabel(pane.target),
-      secondary: cwdShort,
-    };
-  }
-
-  const repoName = git.repo_name || basenameFromAnyPath(git.repo_root) || 'repo';
-  const worktreeName = git.is_worktree ? (git.worktree_name || basenameFromAnyPath(git.repo_root) || repoName) : null;
-  const relativePath = relativePathWithin(git.repo_root, pane.cwd);
-  const shortRelative = shortPathLabel(relativePath);
-
-  const primary = worktreeName || repoName;
-  const secondaryBits = [];
-  if (worktreeName && worktreeName !== repoName) secondaryBits.push(repoName);
-  if (git.branch) secondaryBits.push(git.branch);
-  if (shortRelative) secondaryBits.push(shortRelative);
-
-  return {
-    primary,
-    secondary: secondaryBits.join(' · '),
-  };
+  return paneContextRuntime.getPaneAutoLabel(pane);
 }
 
 function renderPaneContextBadge(paneId) {
-  const pane = panes.get(paneId);
-  const badgeEl = pane?.contextBadgeEl;
-  if (!pane || !badgeEl) return;
-
-  const auto = getPaneAutoLabel(pane);
-  const primary = pane.labelOverride?.trim() || auto.primary || 'Terminal';
-  const secondary = auto.secondary || '';
-  badgeEl.classList.toggle('is-override', !!pane.labelOverride?.trim());
-  badgeEl.innerHTML = `
-    <span class="pane-context-primary">${escHtml(primary)}</span>
-    ${secondary ? `<span class="pane-context-secondary">${escHtml(secondary)}</span>` : ''}
-  `;
-  badgeEl.title = pane.labelOverride?.trim()
-    ? `${pane.labelOverride.trim()}${secondary ? `\n${secondary}` : ''}`
-    : `${auto.primary}${secondary ? `\n${secondary}` : ''}`;
+  return paneContextRuntime.renderPaneContextBadge(paneId);
 }
 
 function startPaneContextRename(paneId) {
-  const pane = panes.get(paneId);
-  if (!pane?.contextBadgeEl || pane.contextBadgeEl.querySelector('input')) return;
-
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'pane-context-input';
-  input.value = pane.labelOverride ?? '';
-  input.placeholder = getPaneAutoLabel(pane).primary;
-
-  const commit = () => {
-    const value = input.value.trim();
-    pane.labelOverride = value || null;
-    renderPaneContextBadge(paneId);
-    markLayoutDirty();
-  };
-
-  const cancel = () => {
-    renderPaneContextBadge(paneId);
-  };
-
-  input.addEventListener('click', (event) => event.stopPropagation());
-  input.addEventListener('mousedown', (event) => event.stopPropagation());
-  input.addEventListener('blur', commit);
-  input.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      input.blur();
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      cancel();
-    }
-  });
-
-  pane.contextBadgeEl.innerHTML = '';
-  pane.contextBadgeEl.appendChild(input);
-  input.focus();
-  input.select();
-}
-
-function parsePortFromUrl(url) {
-  const match = String(url ?? '').match(/^https?:\/\/[\w.-]+:(\d+)(?:\/|$)/i);
-  return match ? Number(match[1]) : null;
+  return paneContextRuntime.startPaneContextRename(paneId);
 }
 
 function unreadNotificationCount(tabId) {
@@ -441,14 +343,6 @@ function getCurrentSurfaceElement() {
 
 function getActiveTabState() {
   return activeTabId ? tabs.get(activeTabId) : null;
-}
-
-function getActiveBrowserState() {
-  return activeBrowserLabel ? browserPanes.get(activeBrowserLabel) : null;
-}
-
-function getActiveMarkdownState() {
-  return activeMarkdownLabel ? markdownPanes.get(activeMarkdownLabel) : null;
 }
 
 function childElementIndex(node) {
@@ -623,6 +517,26 @@ const tabList = document.getElementById('tab-list');
 const terminalContainer = document.getElementById('terminal-container');
 const btnNewTab = document.getElementById('btn-new-tab');
 const btnNewTabMore = document.getElementById('btn-new-tab-more');
+
+const newTabPopoverRuntime = createNewTabPopoverRuntime({
+  document,
+  invoke,
+  createTab: (target) => createTab(target),
+  getDefaultTarget,
+  setDefaultTarget,
+  loadSavedSshTargets,
+  saveSavedSshTargets,
+  buildConnectionTargetFromFields,
+  normalizeSshTarget,
+  REMOTE_TMUX_SESSION_MODES,
+  sshTargetDisplayName,
+  sshTargetDetailLabel,
+  sshTargetsEqual,
+  escHtml: (value) => escHtml(value),
+  showError,
+  openRemoteTmuxWorkspaceFromProfile,
+  getAnchorElement: () => btnNewTabMore,
+});
 
 // Create a new tab
 
@@ -1368,7 +1282,7 @@ async function closePane(paneId) {
 
 // Close an entire tab
 
-async function closeTab(tabId, skipWorkspaceCheck = false) {
+async function closeTab(tabId, _skipWorkspaceCheck = false) {
   const tab = tabs.get(tabId);
   if (!tab) return;
   if (remoteTmuxInspectorState?.tabId === tabId) closeRemoteTmuxInspector();
@@ -1877,7 +1791,7 @@ async function refreshRemoteTmuxInspector({ force = false, preserveSelection = f
   }
 }
 
-async function openRemoteTmuxInspector(tabId, { forceRefresh = false } = {}) {
+async function openRemoteTmuxInspector(tabId, { forceRefresh: _forceRefresh = false } = {}) {
   if (!tabHasRemoteTmux(tabId)) return;
   const previousState = remoteTmuxInspectorState;
   closeRemoteTmuxInspector();
@@ -2069,55 +1983,12 @@ function escHtml(s) {
   return panelsRuntime?.escHtml(s) ?? String(s);
 }
 
-function looksLikeHtmlArtifact(snippet) {
-  return /<(?:!doctype\s+html|html|body|head|svg|div|section|article|main|aside|header|footer|nav|canvas|form|table|style|script)\b/i.test(snippet);
-}
-
-function normalizeArtifactHtml(raw, kind) {
-  const trimmed = raw.trim();
-  const baseHead = '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
-
-  if (/^<!doctype html/i.test(trimmed) || /^<html\b/i.test(trimmed)) return trimmed;
-  if (/^<head\b/i.test(trimmed)) return `<!doctype html><html>${trimmed}<body></body></html>`;
-  if (/^<body\b/i.test(trimmed)) return `<!doctype html><html><head>${baseHead}</head>${trimmed}</html>`;
-  if (kind === 'svg' || /^<svg\b/i.test(trimmed)) {
-    return `<!doctype html><html><head>${baseHead}<title>SVG Artifact</title><style>html,body{margin:0;padding:0;background:#111827;color:#e5e7eb}body{display:flex;align-items:center;justify-content:center;min-height:100vh}svg{max-width:100vw;max-height:100vh}</style></head><body>${trimmed}</body></html>`;
-  }
-  return `<!doctype html><html><head>${baseHead}</head><body>${trimmed}</body></html>`;
-}
-
-function artifactTitleFromHtml(html, kind) {
-  const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
-  if (titleMatch?.[1]?.trim()) return titleMatch[1].trim();
-  if (kind === 'svg') return 'SVG Artifact';
-  if (kind === 'body') return 'Body Fragment';
-  if (kind === 'head') return 'Head Fragment';
-  if (kind === 'fragment') return 'HTML Fragment';
-  return 'HTML Artifact';
-}
-
-function extractHtmlArtifacts(output) {
-  return panelsRuntime?.extractHtmlArtifacts(output) ?? [];
-}
-
-async function openArtifactPreview(artifactId) {
-  return panelsRuntime?.openArtifactPreview(artifactId);
-}
-
 async function openMarkdownSplitForTab(tabId, initialState = {}) {
   const tab = tabs.get(tabId);
   if (!tab) return;
   const paneId = [...tab.paneIds][0] ?? null;
   if (paneId) return splitPaneWithMarkdown(paneId, 'h', initialState);
   return createMarkdownLeaf(tabId, tab.contentEl, initialState);
-}
-
-function toggleArtifactPanel(force) {
-  return panelsRuntime?.toggleArtifactPanel(force);
-}
-
-function renderArtifactPanel() {
-  return panelsRuntime?.renderArtifactPanel();
 }
 
 async function previewArtifactFromPane(paneId = activePaneId) {
@@ -2140,10 +2011,6 @@ function clearTabNotifications(tabId) {
   const result = panelsRuntime?.clearTabNotifications(tabId);
   markLayoutDirty();
   return result;
-}
-
-function getTabPortSummary(tab) {
-  return panelsRuntime?.getTabPortSummary(tab) ?? '';
 }
 
 function updateTabMeta(tabId) {
@@ -2296,397 +2163,7 @@ async function splitPaneWithMarkdown(paneId, dir, initialState = {}) {
 // New-tab popover
 
 async function showNewTabPopover() {
-  document.getElementById('new-tab-popover')?.remove();
-
-  let defaultTarget = getDefaultTarget();
-  let savedSshTargets = loadSavedSshTargets();
-  let editingSavedSshId = null;
-
-  const isDefaultTarget = (t) => {
-    if (t.type !== defaultTarget.type) return false;
-    if (t.type === 'local') return true;
-    if (t.type === 'wsl')   return t.distro === defaultTarget.distro;
-    if (t.type === 'ssh' || t.type === 'remote_tmux') return sshTargetsEqual(t, defaultTarget);
-    return false;
-  };
-
-  const makeStarBtn = (target) => {
-    const isDefault = isDefaultTarget(target);
-    const btn = document.createElement('button');
-    btn.className = 'nt-set-default' + (isDefault ? ' is-default' : '');
-    btn.title = isDefault ? 'Current default' : 'Set as default';
-    btn.textContent = isDefault ? '★' : '☆';
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setDefaultTarget(target);
-      defaultTarget = target;
-      closePopover();
-    });
-    return btn;
-  };
-
-  const makeItemRow = (target, itemBtn) => {
-    const row = document.createElement('div');
-    row.className = 'nt-item-row';
-    row.appendChild(itemBtn);
-    row.appendChild(makeStarBtn(target));
-    return row;
-  };
-
-  const popover = document.createElement('div');
-  popover.id = 'new-tab-popover';
-  popover.className = 'nt-popover';
-  popover.innerHTML = `
-    <div class="nt-section-label">Shell</div>
-    <div id="nt-local-row"></div>
-
-    <div class="nt-section-label">WSL</div>
-    <div id="nt-wsl-list" class="nt-wsl-list">
-      <span class="nt-loading">Detecting distros...</span>
-    </div>
-
-    <div class="nt-section-label">Window</div>
-    <div id="nt-window-row"></div>
-
-    <div class="nt-section-label">Saved connections</div>
-    <div id="nt-ssh-saved-list" class="nt-ssh-saved-list"></div>
-
-    <div class="nt-section-label">SSH</div>
-    <form id="nt-ssh-form" class="nt-ssh-form" autocomplete="off">
-      <input id="nt-ssh-name" type="text" placeholder="Connection name (optional)" spellcheck="false" />
-      <div class="nt-ssh-row">
-        <input id="nt-ssh-host" type="text" placeholder="user@host or host" spellcheck="false" />
-        <input id="nt-ssh-port" type="number" placeholder="Port (22)" min="1" max="65535" />
-      </div>
-      <input id="nt-ssh-key" type="text" placeholder="SSH key path, e.g. ~/.ssh/id_rsa (optional)" spellcheck="false" />
-      <label class="nt-ssh-default-label nt-ssh-toggle-row">
-        <input type="checkbox" id="nt-ssh-use-tmux"> Use tmux
-      </label>
-      <div id="nt-ssh-tmux-fields" hidden>
-        <div class="nt-ssh-row">
-          <select id="nt-ssh-tmux-mode">
-            <option value="attach">Restore existing session</option>
-            <option value="create">Create new session</option>
-            <option value="attach_or_create">Restore or create session</option>
-          </select>
-          <input id="nt-ssh-session" type="text" placeholder="tmux session name" spellcheck="false" />
-        </div>
-      </div>
-      <div class="nt-ssh-actions">
-        <label class="nt-ssh-default-label">
-          <input type="checkbox" id="nt-ssh-set-default"> Set as default
-        </label>
-        <div class="nt-ssh-action-buttons">
-          <button type="button" id="nt-ssh-save">Save</button>
-          <button type="submit" id="nt-ssh-connect">Connect</button>
-        </div>
-      </div>
-      <div id="nt-ssh-form-state" class="nt-ssh-form-state"></div>
-    </form>
-  `;
-
-  document.body.appendChild(popover);
-
-  // Local button
-  const localTarget = { type: 'local' };
-  const localBtn = document.createElement('button');
-  localBtn.className = 'nt-item nt-item-local';
-  localBtn.innerHTML = `<span class="nt-icon">+</span> Local (PowerShell / cmd)`;
-  localBtn.addEventListener('click', () => { closePopover(); createTab(localTarget); });
-  popover.querySelector('#nt-local-row').appendChild(makeItemRow(localTarget, localBtn));
-
-  // New window button
-  const newWinBtn = document.createElement('button');
-  newWinBtn.className = 'nt-item';
-  newWinBtn.innerHTML = `<span class="nt-icon">&#x2750;</span> New window`;
-  newWinBtn.addEventListener('click', async () => {
-    closePopover();
-    try { await invoke('create_app_window'); }
-    catch (err) { showError(`Could not open window: ${err}`); }
-  });
-  popover.querySelector('#nt-window-row')?.appendChild(newWinBtn);
-
-  const anchor = document.getElementById('btn-new-tab-more');
-  const rect   = anchor.getBoundingClientRect();
-  popover.style.bottom    = `${window.innerHeight - rect.top + 6}px`;
-  popover.style.left      = `${rect.left}px`;
-  popover.style.maxHeight = `${rect.top - 12}px`;
-  popover.style.overflowY = 'auto';
-
-  const sshSavedList = popover.querySelector('#nt-ssh-saved-list');
-  const sshNameInput = popover.querySelector('#nt-ssh-name');
-  const sshHostInput = popover.querySelector('#nt-ssh-host');
-  const sshPortInput = popover.querySelector('#nt-ssh-port');
-  const sshKeyInput = popover.querySelector('#nt-ssh-key');
-  const sshUseTmuxInput = popover.querySelector('#nt-ssh-use-tmux');
-  const sshTmuxFields = popover.querySelector('#nt-ssh-tmux-fields');
-  const sshTmuxModeInput = popover.querySelector('#nt-ssh-tmux-mode');
-  const sshSessionInput = popover.querySelector('#nt-ssh-session');
-  const sshDefaultInput = popover.querySelector('#nt-ssh-set-default');
-  const sshSaveBtn = popover.querySelector('#nt-ssh-save');
-  const sshFormState = popover.querySelector('#nt-ssh-form-state');
-  const formRefs = {
-    nameInput: sshNameInput,
-    hostInput: sshHostInput,
-    portInput: sshPortInput,
-    keyInput: sshKeyInput,
-    useTmuxInput: sshUseTmuxInput,
-    tmuxFields: sshTmuxFields,
-    sessionModeInput: sshTmuxModeInput,
-    sessionInput: sshSessionInput,
-    defaultInput: sshDefaultInput,
-    saveBtn: sshSaveBtn,
-    formState: sshFormState,
-  };
-
-  const parseConnectionTarget = () => {
-    return buildConnectionTargetFromFields({
-      name: formRefs.nameInput.value,
-      host: formRefs.hostInput.value,
-      port: formRefs.portInput.value,
-      identityFile: formRefs.keyInput.value,
-      useTmux: formRefs.useTmuxInput.checked,
-      sessionMode: formRefs.sessionModeInput.value,
-      sessionName: formRefs.sessionInput.value,
-    });
-  };
-
-  const updateTmuxFieldVisibility = () => {
-    formRefs.tmuxFields.hidden = !formRefs.useTmuxInput.checked;
-    formRefs.sessionInput.placeholder = formRefs.sessionModeInput.value === REMOTE_TMUX_SESSION_MODES.CREATE
-      ? 'tmux session name for the new session'
-      : 'tmux session name';
-  };
-
-  const clearConnectionForm = () => {
-    formRefs.nameInput.value = '';
-    formRefs.hostInput.value = '';
-    formRefs.portInput.value = '';
-    formRefs.keyInput.value = '';
-    formRefs.useTmuxInput.checked = false;
-    formRefs.sessionModeInput.value = REMOTE_TMUX_SESSION_MODES.ATTACH;
-    formRefs.sessionInput.value = '';
-    formRefs.defaultInput.checked = false;
-    updateTmuxFieldVisibility();
-  };
-
-  const updateConnectionFormState = () => {
-    if (editingSavedSshId) {
-      const existing = savedSshTargets.find((entry) => entry.id === editingSavedSshId);
-      formRefs.formState.textContent = existing ? `Editing ${sshTargetDisplayName(existing)}` : 'Editing saved connection';
-      formRefs.formState.classList.add('is-editing');
-      formRefs.saveBtn.textContent = 'Update';
-      return;
-    }
-
-    const tmuxMode = formRefs.sessionModeInput.value;
-    formRefs.formState.textContent = formRefs.useTmuxInput.checked
-      ? (tmuxMode === REMOTE_TMUX_SESSION_MODES.CREATE
-        ? 'Connect over SSH and create a named tmux session on the remote host.'
-        : tmuxMode === REMOTE_TMUX_SESSION_MODES.ATTACH
-          ? 'Connect over SSH and restore a named tmux session on the remote host.'
-          : 'Connect over SSH and restore or create a named tmux session on the remote host.')
-      : 'Save a plain SSH shell connection to keep it in the picker.';
-    formRefs.formState.classList.remove('is-editing');
-    formRefs.saveBtn.textContent = 'Save';
-  };
-
-  const fillConnectionForm = (target, { editingId = null, preserveDefault = false } = {}) => {
-    const normalized = normalizeSshTarget(target);
-    if (!normalized) return;
-    editingSavedSshId = editingId;
-    clearConnectionForm();
-    formRefs.nameInput.value = normalized.name ?? '';
-    formRefs.hostInput.value = normalized.user ? `${normalized.user}@${normalized.host}` : normalized.host;
-    formRefs.portInput.value = normalized.port ?? '';
-    formRefs.keyInput.value = normalized.identity_file ?? '';
-    formRefs.useTmuxInput.checked = normalized.type === 'remote_tmux';
-    formRefs.sessionModeInput.value = normalized.type === 'remote_tmux'
-      ? normalized.session_mode ?? REMOTE_TMUX_SESSION_MODES.ATTACH_OR_CREATE
-      : REMOTE_TMUX_SESSION_MODES.ATTACH;
-    formRefs.sessionInput.value = normalized.type === 'remote_tmux' ? normalized.session_name : '';
-    formRefs.defaultInput.checked = preserveDefault ? formRefs.defaultInput.checked : isDefaultTarget(normalized);
-    updateTmuxFieldVisibility();
-    updateConnectionFormState();
-  };
-
-  const validateConnectionTarget = (target) => {
-    if (target) return null;
-    if (!formRefs.hostInput.value.trim()) return 'SSH host is required. Use host or user@host.';
-    if (formRefs.useTmuxInput.checked && !formRefs.sessionInput.value.trim()) {
-      return 'tmux session name is required when Use tmux is enabled.';
-    }
-    return 'SSH host is required. Use host or user@host.';
-  };
-
-  const renderSavedSshTargets = () => {
-    sshSavedList.innerHTML = '';
-    if (savedSshTargets.length === 0) {
-      sshSavedList.innerHTML = '<span class="nt-empty">Saved SSH and remote tmux connections will show up here.</span>';
-      updateConnectionFormState();
-      return;
-    }
-
-    for (const entry of savedSshTargets) {
-      const row = document.createElement('div');
-      row.className = 'nt-saved-ssh-row';
-
-      const connectBtn = document.createElement('button');
-      connectBtn.className = 'nt-saved-ssh-main';
-      connectBtn.innerHTML = `
-        <span class="nt-saved-ssh-title">${escHtml(sshTargetDisplayName(entry))}</span>
-        <span class="nt-saved-ssh-detail">${escHtml(sshTargetDetailLabel(entry))}</span>
-      `;
-      connectBtn.addEventListener('click', () => {
-        closePopover();
-        createTab(entry);
-      });
-
-      const actions = document.createElement('div');
-      actions.className = 'nt-saved-ssh-actions';
-
-      if (entry.type === 'remote_tmux') {
-        const workspaceBtn = document.createElement('button');
-        workspaceBtn.className = 'nt-saved-ssh-action';
-        workspaceBtn.title = 'Open saved remote tmux profile in a dedicated workspace';
-        workspaceBtn.textContent = 'Workspace';
-        workspaceBtn.addEventListener('click', (event) => {
-          event.stopPropagation();
-          closePopover();
-          void openRemoteTmuxWorkspaceFromProfile(entry);
-        });
-        actions.appendChild(workspaceBtn);
-      }
-
-      const editBtn = document.createElement('button');
-      editBtn.className = 'nt-saved-ssh-action';
-      editBtn.title = 'Edit saved connection';
-      editBtn.textContent = 'Edit';
-      editBtn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        fillConnectionForm(entry, { editingId: entry.id });
-        formRefs.hostInput.focus();
-      });
-
-      const deleteBtn = document.createElement('button');
-      deleteBtn.className = 'nt-saved-ssh-action danger';
-      deleteBtn.title = 'Delete saved connection';
-      deleteBtn.textContent = 'Delete';
-      deleteBtn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        savedSshTargets = savedSshTargets.filter((candidate) => candidate.id !== entry.id);
-        saveSavedSshTargets(savedSshTargets);
-        if (editingSavedSshId === entry.id) {
-          editingSavedSshId = null;
-          clearConnectionForm();
-        }
-        renderSavedSshTargets();
-      });
-
-      actions.appendChild(editBtn);
-      actions.appendChild(deleteBtn);
-      actions.appendChild(makeStarBtn(entry));
-      row.appendChild(connectBtn);
-      row.appendChild(actions);
-      sshSavedList.appendChild(row);
-    }
-
-    updateConnectionFormState();
-  };
-
-  const saveConnectionProfile = () => {
-    const target = parseConnectionTarget();
-    const validationError = validateConnectionTarget(target);
-    if (validationError) {
-      showError(validationError);
-      (formRefs.useTmuxInput.checked && !formRefs.sessionInput.value.trim() ? formRefs.sessionInput : formRefs.hostInput)?.focus();
-      return null;
-    }
-
-    const nextEntry = {
-      id: editingSavedSshId ?? crypto.randomUUID(),
-      ...target,
-    };
-    const existingIndex = savedSshTargets.findIndex((entry) => entry.id === nextEntry.id);
-    if (existingIndex >= 0) savedSshTargets.splice(existingIndex, 1, nextEntry);
-    else savedSshTargets.unshift(nextEntry);
-    saveSavedSshTargets(savedSshTargets);
-    editingSavedSshId = nextEntry.id;
-    if (formRefs.defaultInput.checked) {
-      setDefaultTarget(nextEntry);
-      defaultTarget = nextEntry;
-    }
-    renderSavedSshTargets();
-    return nextEntry;
-  };
-
-  // WSL list
-  const wslList = popover.querySelector('#nt-wsl-list');
-  try {
-    const distros = await invoke('list_wsl_distros');
-    if (distros.length === 0) {
-      wslList.innerHTML = '<span class="nt-empty">WSL not installed</span>';
-    } else {
-      wslList.innerHTML = '';
-      for (const d of distros) {
-        const target = { type: 'wsl', distro: d.name };
-        const btn = document.createElement('button');
-        btn.className = 'nt-item';
-        btn.innerHTML = `<span class="nt-icon">🐧</span> ${d.name}${d.is_default ? ' <em>(default wsl)</em>' : ''}`;
-        btn.addEventListener('click', () => { closePopover(); createTab(target); });
-        wslList.appendChild(makeItemRow(target, btn));
-      }
-    }
-  } catch {
-    wslList.innerHTML = '<span class="nt-empty">WSL unavailable</span>';
-  }
-
-  // Pre-fill SSH fields if SSH is the current default
-  if (defaultTarget.type === 'ssh' || defaultTarget.type === 'remote_tmux') {
-    fillConnectionForm(defaultTarget, { preserveDefault: true });
-    formRefs.defaultInput.checked = true;
-  }
-
-  renderSavedSshTargets();
-  updateTmuxFieldVisibility();
-  updateConnectionFormState();
-
-  sshSaveBtn.addEventListener('click', () => { saveConnectionProfile(); });
-  sshUseTmuxInput.addEventListener('change', () => {
-    updateTmuxFieldVisibility();
-    updateConnectionFormState();
-  });
-  sshTmuxModeInput.addEventListener('change', () => {
-    updateTmuxFieldVisibility();
-    updateConnectionFormState();
-  });
-
-  popover.querySelector('#nt-ssh-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const target = parseConnectionTarget();
-    const validationError = validateConnectionTarget(target);
-    if (validationError) {
-      showError(validationError);
-      (sshUseTmuxInput.checked && !sshSessionInput.value.trim() ? sshSessionInput : sshHostInput).focus();
-      return;
-    }
-    if (sshDefaultInput.checked) {
-      setDefaultTarget(target);
-      defaultTarget = target;
-    }
-    closePopover();
-    createTab(target);
-  });
-
-  const onOutside = (e) => {
-    if (!popover.contains(e.target) && e.target !== btnNewTabMore) closePopover();
-  };
-  setTimeout(() => document.addEventListener('click', onOutside), 0);
-
-  function closePopover() {
-    popover.remove();
-    document.removeEventListener('click', onOutside);
-  }
+  return newTabPopoverRuntime.showNewTabPopover();
 }
 
 paneAuxRuntime = createPaneAuxRuntime({
@@ -2897,10 +2374,6 @@ function browserNavigateRelative(direction) {
 
 function reloadActiveBrowser() {
   return surfaceRuntime?.reloadActiveBrowser() ?? false;
-}
-
-function getFocusableSurfaces(tabId) {
-  return paneAuxRuntime?.getFocusableSurfaces(tabId) ?? [];
 }
 
 function focusAdjacentSurface(direction) {

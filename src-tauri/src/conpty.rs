@@ -21,6 +21,7 @@ use windows::Win32::
             CreateProcessW, DeleteProcThreadAttributeList,
             InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
             WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
+            LPPROC_THREAD_ATTRIBUTE_LIST,
             PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
             STARTUPINFOEXW,
         },
@@ -40,6 +41,46 @@ impl Drop for OwnedHandle {
 
 unsafe impl Send for OwnedHandle {}
 unsafe impl Sync for OwnedHandle {}
+
+struct ProcThreadAttributeList {
+    buffer: Vec<u8>,
+    list: LPPROC_THREAD_ATTRIBUTE_LIST,
+}
+
+impl ProcThreadAttributeList {
+    fn new(attribute_count: u32) -> Result<Self> {
+        unsafe {
+            let mut attr_list_size: usize = 0;
+            let _ = InitializeProcThreadAttributeList(
+                LPPROC_THREAD_ATTRIBUTE_LIST::default(),
+                attribute_count,
+                0,
+                &mut attr_list_size,
+            );
+
+            let mut buffer = vec![0u8; attr_list_size];
+            let list = LPPROC_THREAD_ATTRIBUTE_LIST(buffer.as_mut_ptr() as *mut _);
+
+            InitializeProcThreadAttributeList(list, attribute_count, 0, &mut attr_list_size)
+                .context("InitializeProcThreadAttributeList failed")?;
+
+            Ok(Self { buffer, list })
+        }
+    }
+
+    fn as_mut_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+        let _ = self.buffer.len();
+        self.list
+    }
+}
+
+impl Drop for ProcThreadAttributeList {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteProcThreadAttributeList(self.list);
+        }
+    }
+}
 
 /// A live pseudoterminal session backed by ConPTY.
 pub struct ConPtySession {
@@ -95,25 +136,10 @@ impl ConPtySession {
             drop(pipe_pty_out_write);
 
             // ── Build STARTUPINFOEX with PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE ─
-            let mut attr_list_size: usize = 0;
-            // First call: query required size.
-            let _ = InitializeProcThreadAttributeList(
-                windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST::default(),
-                1,
-                0,
-                &mut attr_list_size,
-            );
-
-            let mut attr_list_buf: Vec<u8> = vec![0u8; attr_list_size];
-            let attr_list = windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST(
-                attr_list_buf.as_mut_ptr() as *mut _,
-            );
-
-            InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_list_size)
-                .context("InitializeProcThreadAttributeList failed")?;
+            let mut attr_list = ProcThreadAttributeList::new(1)?;
 
             UpdateProcThreadAttribute(
-                attr_list,
+                attr_list.as_mut_ptr(),
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
                 Some(hpc.0 as *const _),
@@ -125,7 +151,7 @@ impl ConPtySession {
 
             let mut siex: STARTUPINFOEXW = std::mem::zeroed();
             siex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-            siex.lpAttributeList = attr_list;
+            siex.lpAttributeList = attr_list.as_mut_ptr();
 
             // ── Build environment block ──────────────────────────────────────
             // Start from the current process environment, then overlay
@@ -173,8 +199,6 @@ impl ConPtySession {
                 &mut proc_info,
             )
             .context("CreateProcessW failed — is the shell path valid?")?;
-
-            DeleteProcThreadAttributeList(attr_list);
 
             // ── Start output reader task ─────────────────────────────────────
             let (output_tx, _) = broadcast::channel::<Vec<u8>>(128);

@@ -178,6 +178,7 @@ impl ConPtySession {
 
             // ── Start output reader task ─────────────────────────────────────
             let (output_tx, _) = broadcast::channel::<Vec<u8>>(128);
+            let initial_rx = tokio::sync::Mutex::new(Some(output_tx.subscribe()));
             let tx_clone = output_tx.clone();
             // Transmit the raw handle value as isize to cross the thread
             // boundary; HANDLE is a newtype over *mut c_void which isn't Send.
@@ -205,9 +206,6 @@ impl ConPtySession {
             // Transfer ownership of the read handle to the thread above;
             // prevent double-close by forgetting the OwnedHandle wrapper.
             std::mem::forget(pipe_pty_out_read);
-
-            // Subscribe before returning so all output is buffered for late consumer.
-            let initial_rx = tokio::sync::Mutex::new(Some(output_tx.subscribe()));
 
             Ok(Self {
                 write_pipe: Arc::new(Mutex::new(pipe_pty_in_write)),
@@ -317,4 +315,48 @@ fn build_env_block(overrides: &[(&str, &str)]) -> Vec<u16> {
     }
     block.push(0); // final null = end of block
     block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConPtySession;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    #[ignore = "Windows-only smoke test that requires WSL to be installed locally"]
+    async fn conpty_wsl_smoke_test_emits_output() {
+        let session = ConPtySession::spawn(
+            "wsl.exe -- echo conpty-wsl-smoke",
+            120,
+            30,
+            &[("TERM", "xterm-256color"), ("COLORTERM", "truecolor")],
+            None,
+        )
+        .expect("failed to spawn WSL under ConPTY");
+
+        let mut rx = session.output_tx.subscribe();
+        let read_visible = async {
+            let mut combined = Vec::new();
+            loop {
+                let chunk = rx
+                    .recv()
+                    .await
+                    .expect("failed to receive WSL ConPTY output chunk");
+                combined.extend_from_slice(&chunk);
+                let text = String::from_utf8_lossy(&combined);
+                if text.contains("conpty-wsl-smoke") {
+                    return text.into_owned();
+                }
+            }
+        };
+
+        let text = timeout(Duration::from_secs(5), read_visible)
+            .await
+            .expect("timed out waiting for visible WSL ConPTY output");
+
+        assert!(
+            text.contains("conpty-wsl-smoke"),
+            "expected WSL smoke output, got: {text:?}"
+        );
+    }
 }

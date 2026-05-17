@@ -31,6 +31,7 @@ pub fn run() {
             commands::list_sessions,
             commands::resize_session,
             commands::open_url,
+            commands::read_clipboard_text,
             commands::list_wsl_distros,
             commands::start_session_stream,
             commands::save_layout,

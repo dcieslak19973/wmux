@@ -649,7 +649,7 @@ html, body, #app {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  padding: 4px 4px 0;
+  padding: 4px 4px 6px;
 }
 
 .pane-footer {
@@ -1386,11 +1386,10 @@ body.has-tabs #empty-state { display: none; }
   color: #60a5fa;
 }
 
+.url-banner-copy,
 .url-banner-open {
   flex-shrink: 0;
   padding: 4px 10px;
-  background: var(--accent);
-  color: #fff;
   border: none;
   border-radius: 5px;
   font-size: 11px;
@@ -1398,6 +1397,15 @@ body.has-tabs #empty-state { display: none; }
   cursor: pointer;
   transition: opacity 0.1s;
 }
+.url-banner-copy {
+  background: rgba(255,255,255,0.1);
+  color: var(--text-primary);
+}
+.url-banner-open {
+  background: var(--accent);
+  color: #fff;
+}
+.url-banner-copy:hover,
 .url-banner-open:hover { opacity: 0.85; }
 
 .url-banner-close {

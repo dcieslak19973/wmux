@@ -75,6 +75,9 @@ impl ShellTarget {
                     args.push("-d".to_string());
                     args.push(quote_windows_cmd_arg(d));
                 }
+                args.push("--".to_string());
+                args.push("bash".to_string());
+                args.push("-i".to_string());
                 Ok(if args.is_empty() {
                     wsl
                 } else {
@@ -319,10 +322,14 @@ impl SessionManager {
                 ));
             }
         }
-        let env_override_refs: Vec<(&str, &str)> = env_overrides
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str()))
-            .collect();
+        let env_override_refs: Vec<(&str, &str)> = if matches!(target, ShellTarget::Wsl { .. }) {
+            Vec::new()
+        } else {
+            env_overrides
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect()
+        };
 
         let create_process_cwd = match &target {
             ShellTarget::Local => startup_cwd,

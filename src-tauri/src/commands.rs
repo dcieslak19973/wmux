@@ -21,6 +21,11 @@ pub struct UrlDetectedPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ClipboardPayload {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CreateSessionResult {
     pub id: String,
     pub label: String,
@@ -714,6 +719,7 @@ pub async fn start_session_stream(
         let mut seen_urls: HashSet<String> = HashSet::new();
         let url_event_id = format!("terminal-url-{id_clone}");
         let exit_event_id = format!("terminal-exit-{id_clone}");
+        let clipboard_event_id = format!("terminal-clipboard-{id_clone}");
 
         loop {
             match rx.recv().await {
@@ -741,6 +747,9 @@ pub async fn start_session_stream(
                             }
                             OscEvent::Cwd(path) => {
                                 let _ = app.emit(&cwd_ev, path);
+                            }
+                            OscEvent::Clipboard(text) => {
+                                let _ = app.emit(&clipboard_event_id, ClipboardPayload { text });
                             }
                         }
                     }
@@ -820,6 +829,20 @@ pub async fn open_url(url: String) -> Result<(), String> {
         return Err(format!("Refused to open non-localhost or malformed URL: {url}"));
     }
     opener::open_browser(&url).map_err(|e| e.to_string())
+}
+
+/// Read plain text from the system clipboard.
+#[tauri::command]
+pub async fn read_clipboard_text() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        clipboard_win::get_clipboard_string().map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("clipboard read is only implemented on Windows".to_string())
+    }
 }
 
 /// Save the serialised tab/pane layout JSON to the app data directory.

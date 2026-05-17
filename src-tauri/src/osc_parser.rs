@@ -13,6 +13,8 @@ pub enum OscEvent {
     Notification(OscNotification),
     /// Current working directory emitted by shell via OSC 7.
     Cwd(String),
+    /// Clipboard text emitted by OSC 52.
+    Clipboard(String),
 }
 
 /// A notification parsed from OSC 9/99/777 terminal output.
@@ -39,6 +41,8 @@ pub fn extract_osc_events(data: &[u8]) -> Vec<OscEvent> {
             if let Ok(s) = std::str::from_utf8(&data[start..end]) {
                 if let Some(uri) = s.strip_prefix("7;") {
                     result.push(OscEvent::Cwd(extract_path_from_file_uri(uri)));
+                } else if let Some(text) = parse_osc_52(s) {
+                    result.push(OscEvent::Clipboard(text));
                 } else if let Some(n) = parse_osc(s) {
                     result.push(OscEvent::Notification(n));
                 }
@@ -113,4 +117,57 @@ fn parse_osc(s: &str) -> Option<OscNotification> {
         });
     }
     None
+}
+
+fn parse_osc_52(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("52;")?;
+    let (_, encoded) = rest.split_once(';').unwrap_or(("", rest));
+    if encoded.is_empty() || encoded == "?" {
+        return None;
+    }
+    let decoded = decode_base64(encoded.trim())?;
+    let text = String::from_utf8(decoded).ok()?;
+    (!text.is_empty()).then_some(text)
+}
+
+fn decode_base64(value: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity((value.len() * 3) / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0usize;
+
+    for byte in value.bytes() {
+        let sextet = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            b'\r' | b'\n' | b'\t' | b' ' => continue,
+            _ => return None,
+        } as u32;
+
+        buffer = (buffer << 6) | sextet;
+        bits += 6;
+
+        while bits >= 8 {
+            bits -= 8;
+            output.push(((buffer >> bits) & 0xff) as u8);
+            buffer &= (1u32 << bits).saturating_sub(1);
+        }
+    }
+
+    Some(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_osc_events, OscEvent};
+
+    #[test]
+    fn parses_osc52_clipboard_payload() {
+        let input = b"\x1b]52;c;aHR0cHM6Ly9jbGF1ZGUuYWkvbG9naW4=\x07";
+        let events = extract_osc_events(input);
+        assert!(matches!(events.first(), Some(OscEvent::Clipboard(value)) if value == "https://claude.ai/login"));
+    }
 }

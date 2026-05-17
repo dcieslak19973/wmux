@@ -50,6 +50,25 @@ export function createUiPanelsRuntime({
     setTimeout(() => el.remove(), 5000);
   }
 
+  async function copyTextToClipboard(text) {
+    const value = String(text ?? '');
+    if (!value) return;
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, value.length);
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    if (!copied) throw new Error('clipboard write not available');
+  }
+
   function showUrlBanner(sessionId, url, isOauth) {
     const pane = panes.get(sessionId);
     if (!pane) return;
@@ -64,9 +83,13 @@ export function createUiPanelsRuntime({
         <strong>${label}</strong>
         <span class="url-banner-url" title="${url}">${short}</span>
       </span>
+      <button class="url-banner-copy" data-url="${url}">Copy URL</button>
       <button class="url-banner-open" data-url="${url}">Open in browser</button>
       <button class="url-banner-close" title="Dismiss">x</button>
     `;
+    banner.querySelector('.url-banner-copy').addEventListener('click', async () => {
+      try { await copyTextToClipboard(url); } catch (err) { showError(`Could not copy URL: ${err}`); }
+    });
     banner.querySelector('.url-banner-open').addEventListener('click', async () => {
       try { await invoke('open_url', { url }); } catch (err) { showError(`Could not open URL: ${err}`); }
     });
@@ -735,6 +758,7 @@ export function createUiPanelsRuntime({
     artifacts,
     unreadNotificationCount,
     showError,
+    copyTextToClipboard,
     showUrlBanner,
     base64Decode,
     escHtml,

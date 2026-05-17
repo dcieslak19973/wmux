@@ -2,6 +2,7 @@
 name = "wmux"
 version = "0.0.5"
 edition = "2021"
+default-run = "wmux"
 
 [lib]
 name = "wmux_lib"
@@ -39,6 +40,7 @@ windows = { version = "0.58", features = [
   "Win32_System_Pipes",
   "Win32_UI_WindowsAndMessaging",
 ] }
+clipboard-win = "5"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

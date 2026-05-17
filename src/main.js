@@ -836,23 +836,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     : value;
   outputSnapshot = trimTranscript(outputSnapshot);
 
-  let result;
-  try {
-    result = await invoke('create_session', {
-      cols: DEFAULT_COLS,
-      rows: DEFAULT_ROWS,
-      target,
-      cwd: restoredCwd || null,
-      previousCwd: restoredPreviousCwd || null,
-    });
-  } catch (err) {
-    showError(`Could not start terminal: ${err}`);
-    return null;
-  }
-
-  const sessionId    = result.id;
-  const sessionLabel = result.label;
-
+  // Build the terminal DOM and measure actual dimensions BEFORE spawning the
+  // session so ConPTY is created at the correct size from the start. This
+  // prevents PSReadLine from initialising at 120×30 and then receiving a resize
+  // that causes it to clear the screen and redraw.
   const _s = loadSettings();
   const term = new Terminal({
     cols: DEFAULT_COLS,
@@ -887,10 +874,25 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   term.loadAddon(searchAddon);
   term.loadAddon(serializeAddon);
   term.loadAddon(new WebLinksAddon());
+  term.attachCustomKeyEventHandler((event) => {
+    const key = event.key?.toLowerCase();
+    const wantsPaste = (event.ctrlKey && !event.altKey && !event.shiftKey && key === 'v')
+      || (!event.ctrlKey && !event.altKey && event.shiftKey && event.key === 'Insert');
+    if (!wantsPaste) return true;
+    event.preventDefault();
+    void readClipboardText()
+      .then((text) => pasteTextIntoPane(sessionId, text))
+      .catch((err) => showError(`Could not paste clipboard: ${err}`));
+    return false;
+  });
+
+  // sessionId is declared here so closures below capture the variable by
+  // reference; it is assigned after create_session resolves.
+  let sessionId;
+  let sessionLabel;
 
   const leafEl = document.createElement('div');
   leafEl.className = 'pane-leaf';
-  leafEl.dataset.sessionId = sessionId;
   mountEl.appendChild(leafEl);
 
   const terminalHostEl = document.createElement('div');
@@ -915,29 +917,88 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
   footerEl.appendChild(contextBadgeEl);
 
+  const handleTerminalPaste = async (event) => {
+    const text = event.clipboardData?.getData('text/plain') ?? '';
+    if (!text) return;
+    event.preventDefault();
+    try {
+      await pasteTextIntoPane(sessionId, text);
+    } catch (err) {
+      showError(`Could not paste into terminal: ${err}`);
+    }
+  };
+  terminalHostEl.addEventListener('paste', handleTerminalPaste);
+
   // Per-pane command input buffer and history for Ctrl+Alt+H picker.
   let cmdLineBuf = '';
   let escapeSequenceState = 0;
 
   term.open(terminalHostEl);
+  fitAddon.fit();
+  const initialCols = term.cols || DEFAULT_COLS;
+  const initialRows = term.rows || DEFAULT_ROWS;
+
+  let result;
+  try {
+    result = await invoke('create_session', {
+      cols: initialCols,
+      rows: initialRows,
+      target,
+      cwd: restoredCwd || null,
+      previousCwd: restoredPreviousCwd || null,
+    });
+  } catch (err) {
+    showError(`Could not start terminal: ${err}`);
+    term.dispose();
+    leafEl.remove();
+    return null;
+  }
+
+  sessionId    = result.id;
+  sessionLabel = result.label;
+  leafEl.dataset.sessionId = sessionId;
 
   const pendingRestoreSnapshot = screenSnapshot || outputSnapshot;
   const restoreSnapshotIsSerialized = !!screenSnapshot;
+  const isWslTarget = getTargetKind(target) === 'wsl';
   const restoreReplaySanitizeUntil = pendingRestoreSnapshot ? Date.now() + 2200 : 0;
-  const restoreReplayDeadline = pendingRestoreSnapshot ? Date.now() + 3200 : 0;
-  let restoreReplayTimer = null;
+  const wslStartupSanitizeUntil = isWslTarget ? Date.now() + 2200 : 0;
+  let restoreReplayFrame = null;
+  let restoreReplayConfirmFrame = null;
   let restoreReplayApplied = false;
 
-  const scheduleRestoreReplay = (delay = 180) => {
+  const cancelRestoreReplay = () => {
+    if (restoreReplayFrame) {
+      cancelAnimationFrame(restoreReplayFrame);
+      restoreReplayFrame = null;
+    }
+    if (restoreReplayConfirmFrame) {
+      cancelAnimationFrame(restoreReplayConfirmFrame);
+      restoreReplayConfirmFrame = null;
+    }
+    restoreReplayApplied = true;
+  };
+
+  const flushRestoreReplay = () => {
+    if (!pendingRestoreSnapshot || restoreReplayApplied || !panes.has(sessionId)) return;
+    cancelRestoreReplay();
+    term.reset();
+    writeTerminalSnapshot(term, pendingRestoreSnapshot, { serialized: restoreSnapshotIsSerialized });
+    if (restoreSnapshotIsSerialized && typeof term.scrollToTop === 'function') {
+      term.scrollToTop();
+    }
+  };
+
+  const scheduleRestoreReplay = () => {
     if (!pendingRestoreSnapshot || restoreReplayApplied) return;
-    if (restoreReplayTimer) clearTimeout(restoreReplayTimer);
-    restoreReplayTimer = setTimeout(() => {
-      restoreReplayTimer = null;
-      if (restoreReplayApplied || !panes.has(sessionId)) return;
-      restoreReplayApplied = true;
-      term.reset();
-      writeTerminalSnapshot(term, pendingRestoreSnapshot, { serialized: restoreSnapshotIsSerialized });
-    }, delay);
+    if (restoreReplayFrame || restoreReplayConfirmFrame) return;
+    restoreReplayFrame = requestAnimationFrame(() => {
+      restoreReplayFrame = null;
+      restoreReplayConfirmFrame = requestAnimationFrame(() => {
+        restoreReplayConfirmFrame = null;
+        flushRestoreReplay();
+      });
+    });
   };
 
   const transcriptDecoder = new TextDecoder();
@@ -949,6 +1010,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   };
 
   term.onData(async (data) => {
+    cancelRestoreReplay();
     try { await invoke('write_to_session', { id: sessionId, data }); }
     catch (err) { console.warn('write_to_session error:', err); }
     // Track commands typed for history picker.
@@ -987,17 +1049,17 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
 
   const unlisten = await listen(`terminal-output-${sessionId}`, (event) => {
+    cancelRestoreReplay();
     const bytes = base64Decode(event.payload);
     const decoded = transcriptDecoder.decode(bytes, { stream: true });
-    if (restoreReplaySanitizeUntil > Date.now()) {
+    if (restoreReplaySanitizeUntil > Date.now() || wslStartupSanitizeUntil > Date.now()) {
       term.write(stripTerminalStartupResetSequences(decoded));
+    } else if (isWslTarget) {
+      term.write(decoded);
     } else {
       term.write(bytes);
     }
     appendTranscriptChunk(decoded);
-    if (!restoreReplayApplied && pendingRestoreSnapshot && Date.now() <= restoreReplayDeadline) {
-      scheduleRestoreReplay(260);
-    }
     if (sessionId !== activePaneId) {
       const tab = tabs.get(tabId);
       if (tab) setTabRing(tab, true);
@@ -1008,6 +1070,17 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     const { url, is_oauth } = event.payload;
     registerTabUrl(tabId, url);
     showUrlBanner(sessionId, url, is_oauth);
+  });
+
+  const unlistenClipboard = await listen(`terminal-clipboard-${sessionId}`, async (event) => {
+    const text = String(event.payload?.text ?? '').trim();
+    if (!text) return;
+    try {
+      await copyTextToClipboard(text);
+    } catch (err) {
+      console.warn('clipboard write error:', err);
+      showError(`Could not copy terminal text: ${err}`);
+    }
   });
 
   const unlistenNotify = await listen(`terminal-notify-${sessionId}`, (event) => {
@@ -1038,21 +1111,32 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
 
   const unlistenAll = () => {
-    if (restoreReplayTimer) {
-      clearTimeout(restoreReplayTimer);
-      restoreReplayTimer = null;
+    terminalHostEl.removeEventListener('paste', handleTerminalPaste);
+    if (restoreReplayFrame) {
+      cancelAnimationFrame(restoreReplayFrame);
+      restoreReplayFrame = null;
+    }
+    if (restoreReplayConfirmFrame) {
+      cancelAnimationFrame(restoreReplayConfirmFrame);
+      restoreReplayConfirmFrame = null;
     }
     appendTranscriptChunk(transcriptDecoder.decode());
     unlisten();
     unlistenUrl();
+    unlistenClipboard();
     unlistenNotify();
     unlistenCwd();
     unlistenExit();
   };
 
-  try { await invoke('start_session_stream', { id: sessionId }); }
-  catch (err) { console.warn('start_session_stream error:', err); }
-  if (pendingRestoreSnapshot) scheduleRestoreReplay(520);
+  try {
+    await invoke('start_session_stream', { id: sessionId });
+  } catch (err) { console.error('[wmux] start_session_stream failed', err); }
+  if (isWslTarget) {
+    setTimeout(() => {
+      void invoke('write_to_session', { id: sessionId, data: '\r' }).catch(() => {});
+    }, 80);
+  }
 
   term.onTitleChange((title) => {
     const tab = tabs.get(tabId);
@@ -1123,9 +1207,14 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     contextBadgeEl,
     imageAddon,
     serializeAddon,
+    // Seed with the initial ConPTY dimensions so fitAndResizePane skips a
+    // same-size resize_session call that would trigger a PSReadLine redraw.
+    lastSentCols: initialCols,
+    lastSentRows: initialRows,
   };
   panes.set(sessionId, paneState);
   renderPaneContextBadge(sessionId);
+  if (pendingRestoreSnapshot) scheduleRestoreReplay();
 
   const tabState = tabs.get(tabId);
   if (tabState) tabState.paneIds.add(sessionId);
@@ -2061,6 +2150,54 @@ function showUrlBanner(sessionId, url, isOauth) {
   return panelsRuntime?.showUrlBanner(sessionId, url, isOauth);
 }
 
+async function copyTextToClipboard(text) {
+  return panelsRuntime?.copyTextToClipboard(text);
+}
+
+function isEditableTarget(target) {
+  if (!(target instanceof Element)) return false;
+  if (target.classList?.contains('xterm-helper-textarea') || target.closest('.xterm-helper-textarea')) {
+    return false;
+  }
+  if (target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"]')) {
+    return true;
+  }
+  const tagName = target.tagName?.toUpperCase();
+  return tagName === 'INPUT' || tagName === 'TEXTAREA' || target.isContentEditable;
+}
+
+async function pasteTextIntoPane(paneId, text) {
+  const value = String(text ?? '');
+  if (!value) return false;
+  const pane = panes.get(paneId);
+  if (!pane) return false;
+  await invoke('write_to_session', { id: pane.sessionId, data: value });
+  return true;
+}
+
+async function readClipboardText() {
+  try {
+    return await invoke('read_clipboard_text');
+  } catch {
+    // Fall through to browser clipboard access when native read is unavailable.
+  }
+  try {
+    if (navigator.clipboard?.readText) {
+      return await navigator.clipboard.readText();
+    }
+  } catch {
+    // Surface the original clipboard failure below if neither path works.
+  }
+  throw new Error('clipboard read unavailable');
+}
+
+async function pasteClipboardIntoActivePane() {
+  const pane = panes.get(activePaneId);
+  if (!pane) return false;
+  const text = await readClipboardText();
+  return pasteTextIntoPane(pane.sessionId, text);
+}
+
 function base64Decode(b64) {
   return panelsRuntime?.base64Decode(b64);
 }
@@ -2918,6 +3055,15 @@ document.addEventListener('keydown', (e) => {
   const shift = e.shiftKey;
   const alt   = e.altKey;
   const key   = e.key;
+  const editableTarget = isEditableTarget(e.target);
+
+  if (!editableTarget && activePaneId && ((ctrl && !alt && !shift && key.toLowerCase() === 'v') || (!ctrl && !alt && shift && key === 'Insert'))) {
+    e.preventDefault();
+    void pasteClipboardIntoActivePane().catch((err) => {
+      showError(`Could not paste clipboard: ${err}`);
+    });
+    return;
+  }
 
   if (ctrl && shift && key === 'T') { e.preventDefault(); createTab(getDefaultTarget()); return; }
   if (ctrl && shift && key === 'W') { e.preventDefault(); closeCurrentSurface(); return; }

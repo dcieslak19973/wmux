@@ -51,6 +51,12 @@ export function createPaneAuxRuntime({
     if (!tab || !tab.contentEl.classList.contains('visible')) return;
     pane.fitAddon.fit();
     const { cols, rows } = pane.terminal;
+    // Skip if dimensions haven't changed — ResizePseudoConsole triggers a
+    // WINDOW_BUFFER_SIZE_EVENT even for same-size calls, causing PSReadLine to
+    // clear and redraw the screen unnecessarily.
+    if (cols === pane.lastSentCols && rows === pane.lastSentRows) return;
+    pane.lastSentCols = cols;
+    pane.lastSentRows = rows;
     try { await invoke('resize_session', { id: sessionId, cols, rows }); } catch {}
   }
 

@@ -937,7 +937,7 @@ pub async fn list_session_vault_entries(app: AppHandle) -> Result<Vec<SessionVau
         entries.push(session_vault_summary_from_record(record));
     }
 
-    entries.sort_by(|left, right| right.saved_at.cmp(&left.saved_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.saved_at));
     Ok(entries)
 }
 

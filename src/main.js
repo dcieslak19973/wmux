@@ -88,6 +88,12 @@ let paneAuxRuntime = null;
 const workspaces = new Map();
 let activeWorkspaceId = null;
 
+const DEFAULT_UPDATE_MANIFEST_URL = 'https://github.com/dcieslak19973/wmux/releases/latest/download/latest.json';
+const DEFAULT_UPDATE_PUBKEY = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU3QzBGQzkzRTAyQUI5RkIKUldUN3VTcmdrL3pBVjVjcmE1dDRqNFFQbkZERFJ3MXk2bjhvN0FYNFJmZzZLaitkdFc5NlRCMXAK';
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const AUTO_UPDATE_LAST_CHECK_KEY = 'wmux-auto-update-last-check-at';
+const AUTO_UPDATE_DISMISSED_VERSION_KEY = 'wmux-auto-update-dismissed-version';
+
 const SETTINGS_DEFAULTS = {
   fontSize: 13,
   fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
@@ -95,6 +101,9 @@ const SETTINGS_DEFAULTS = {
   scrollback: 5000,
   cursorStyle: 'bar',
   cursorBlink: true,
+  updateManifestUrl: DEFAULT_UPDATE_MANIFEST_URL,
+  updatePubkey: DEFAULT_UPDATE_PUBKEY,
+  autoCheckUpdates: true,
 };
 
 const SAVED_SSH_TARGETS_KEY = 'wmux-saved-ssh-targets';
@@ -2154,6 +2163,10 @@ async function copyTextToClipboard(text) {
   return panelsRuntime?.copyTextToClipboard(text);
 }
 
+function showUpdatePrompt(updateInfo, actions) {
+  return panelsRuntime?.showUpdatePrompt(updateInfo, actions);
+}
+
 function isEditableTarget(target) {
   if (!(target instanceof Element)) return false;
   if (target.classList?.contains('xterm-helper-textarea') || target.closest('.xterm-helper-textarea')) {
@@ -2239,6 +2252,70 @@ function extractHtmlArtifacts(output) {
 
 async function openArtifactPreview(artifactId) {
   return panelsRuntime?.openArtifactPreview(artifactId);
+}
+
+function getUpdaterConfigFromSettings(settings = loadSettings()) {
+  return {
+    endpoint: String(settings?.updateManifestUrl ?? '').trim(),
+    pubkey: String(settings?.updatePubkey ?? '').trim(),
+  };
+}
+
+function shouldAutoCheckForUpdates(settings = loadSettings()) {
+  if (!settings?.autoCheckUpdates) return false;
+  const { endpoint, pubkey } = getUpdaterConfigFromSettings(settings);
+  return Boolean(endpoint && pubkey);
+}
+
+async function installAvailableUpdate(config = getUpdaterConfigFromSettings()) {
+  await invoke('install_app_update', { config });
+}
+
+async function maybeAutoCheckForUpdates({ force = false } = {}) {
+  const settings = loadSettings();
+  if (!shouldAutoCheckForUpdates(settings)) return null;
+
+  const { endpoint, pubkey } = getUpdaterConfigFromSettings(settings);
+  const lastCheckedAt = Number(localStorage.getItem(AUTO_UPDATE_LAST_CHECK_KEY) ?? '0');
+  const now = Date.now();
+  if (!force && Number.isFinite(lastCheckedAt) && now - lastCheckedAt < AUTO_UPDATE_CHECK_INTERVAL_MS) {
+    return null;
+  }
+
+  localStorage.setItem(AUTO_UPDATE_LAST_CHECK_KEY, String(now));
+
+  let result = null;
+  try {
+    result = await invoke('check_for_app_update', {
+      config: { endpoint, pubkey },
+    });
+  } catch (err) {
+    console.warn('Automatic update check failed:', err);
+    return null;
+  }
+
+  if (!result?.available || !result.version) return result;
+  const dismissedVersion = localStorage.getItem(AUTO_UPDATE_DISMISSED_VERSION_KEY);
+  if (!force && dismissedVersion === result.version) return result;
+
+  showUpdatePrompt(result, {
+    onInstall: async () => {
+      try {
+        await installAvailableUpdate({ endpoint, pubkey });
+      } catch (err) {
+        showError(`Could not install update: ${err}`);
+        throw err;
+      }
+    },
+    onDismiss: () => {
+      localStorage.setItem(AUTO_UPDATE_DISMISSED_VERSION_KEY, result.version);
+    },
+    onOpenSettings: () => {
+      localStorage.removeItem(AUTO_UPDATE_DISMISSED_VERSION_KEY);
+      panelsRuntime?.showSettingsPanel();
+    },
+  });
+  return result;
 }
 
 async function openMarkdownSplitForTab(tabId, initialState = {}) {
@@ -2915,6 +2992,9 @@ panelsRuntime = createUiPanelsRuntime({
   readSessionVaultEntry: (id) => invoke('read_session_vault_entry', { id }),
   captureSessionVaultEntry: (paneId, options) => saveSessionVaultEntryForPane(paneId, options),
   openSessionVaultEntry: (entryId) => openSessionVaultEntryInBrowser(entryId),
+  checkForAppUpdate: (config) => invoke('check_for_app_update', { config }),
+  installAppUpdate: (config) => invoke('install_app_update', { config }),
+  getAppVersion: () => invoke('get_app_version'),
 });
 
 // Layout persistence
@@ -3322,6 +3402,7 @@ getCurrentWindow().onCloseRequested(async (event) => {
   } catch (err) {
     console.warn('Could not snapshot initial layout:', err);
   }
+  void maybeAutoCheckForUpdates();
 })();
 
 function requireTab(tabId = activeTabId) {

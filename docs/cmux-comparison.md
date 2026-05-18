@@ -1,231 +1,321 @@
 # wmux vs cmux
 
-This note is intentionally not part of the main README. It is a product and architecture comparison reference for maintainers.
+This note is intentionally not part of the main README. It is a maintainer-facing product and architecture comparison against the original cmux at cmux.com / `manaflow-ai/cmux`, not against older Windows-local lookalikes.
 
 ## Scope
 
-This document compares wmux against:
+This document compares:
 
-- cmux-windows: the Windows-native WPF + ConPTY project at `mkurman/cmux-windows`
-- cmux, in the broader sense of native local terminal multiplexer apps inspired by tmux workflows
+- `wmux`: the current Windows-first Tauri + Rust + ConPTY project in this repo
+- `cmux`: the current native macOS app built by Manaflow, publicly positioned as a Ghostty-based terminal and browser for coding-agent workflows
 
-It is not meant to be a feature matrix for end users. It is meant to help decide what wmux should copy, what it should ignore, and where it is deliberately trying to be a different product.
+It is not meant to be a marketing page. The goal is to clarify:
+
+- where cmux is currently ahead
+- where wmux is meaningfully differentiated
+- what has changed since earlier comparisons
+- what wmux should copy versus where it should stay intentionally different
+
+## What changed since the last comparison
+
+The old comparison had drifted in two ways:
+
+- it spent too much time on `cmux-windows` instead of the actual cmux product
+- it underrated how much the public cmux product has solidified around agent workflows, browser automation, session restore, and product polish
+
+wmux also moved materially since then. It now has stronger evidence of being a real workspace shell rather than a thin terminal multiplexer clone:
+
+- multiple workspaces with restore
+- browser and markdown surfaces alongside terminals
+- Session Vault and transcript capture
+- explicit local / WSL / SSH / remote tmux targets
+- remote tmux inspection and management
+- tmux compatibility shim for agent harnesses
+- OSC notifications plus OSC 52 clipboard handling
+
+So the updated comparison is less about “which local multiplexer looks nicer?” and more about “what product category each app is actually competing in?”
 
 ## Short version
 
-- cmux-windows currently looks stronger as a focused Windows terminal multiplexer.
-- wmux is broader and more ambitious.
-- wmux has stronger remote-workflow and mixed-surface potential.
-- cmux-windows currently looks tighter on persistence, terminal-first UX, and overall polish.
+- cmux currently looks stronger as a polished, coherent agent-first terminal product.
+- wmux is broader on Windows-specific and hybrid remote workflows.
+- cmux looks far more mature on productization, performance story, and user-facing coherence.
+- wmux is more differentiated where the problem is Windows + WSL + SSH + remote tmux + mixed local surfaces.
 
-## Where cmux-windows currently looks better
+## Current public snapshot of cmux
 
-### 1. Persistence is treated like a core product feature
+Based on the current public repo and site, cmux is now very clearly defined:
 
-cmux-windows is explicitly built around strong session recall, transcript capture, and a Session Vault. Its architecture and product language line up around the idea that a user should be able to close or crash the app and come back to something very close to the previous state.
+- native macOS only, built in Swift + AppKit
+- terminal rendering via `libghostty`
+- vertical tabs with rich sidebar metadata
+- browser panes built into the product, with a scriptable API
+- split panes, workspaces, notification rings, and a notification panel
+- explicit SSH workflow support
+- CLI plus socket API for automation
+- session restore with supported agent resume integrations
+- product language aimed directly at Claude Code / Codex / OpenCode / agent-heavy workflows
 
-That matters because terminal multiplexers get judged less by the number of features they have and more by whether users trust them not to lose working context.
+That is no longer just “a native terminal multiplexer inspired by tmux.” It is a fairly opinionated macOS agent-workspace product with real momentum, real polish, and a large public user base.
 
-### 2. The terminal-first workflow is more cohesive
+## Current wmux snapshot
 
-cmux-windows appears to center the experience around:
+wmux’s current shape is different:
 
-- workspaces
-- surfaces/tabs
-- split panes
-- command logs
-- command history picker
-- transcript capture
-- Session Vault
-- automation via a dedicated CLI
+- Windows-first desktop app using Tauri v2 + WebView2 + Rust + ConPTY
+- local Windows shells, WSL, SSH, and remote tmux targets from one launcher
+- split-pane layouts containing terminal, browser, and markdown surfaces
+- workspace persistence and per-pane state restore
+- Session Vault plus transcript capture
+- named-pipe automation server plus `window.wmux` frontend automation surface
+- `tmux.exe` compatibility shim for practical agent harness interoperability
+- remote tmux hybrid model with inspector / create / rename / kill flows
 
-That is a very coherent product shape. wmux currently has many of those building blocks, but its UX is more distributed across a wider set of capabilities.
+That makes wmux less “native terminal with nice tabs” and more “Windows developer workspace shell with terminal compatibility ambitions.”
 
-### 3. The automation story is easier to explain
+## Feature matrix
 
-cmux-windows has a dedicated `cmux` CLI layered over its local app/daemon model. That makes the automation surface feel packaged and intentional.
+| Area | cmux | wmux |
+|---|---|---|
+| Primary platform | macOS only | Windows only |
+| App shell | Native Swift + AppKit | Tauri v2 + WebView2 |
+| Terminal renderer | `libghostty` | `xterm.js` on top of ConPTY |
+| Core positioning | Native terminal/browser for coding agents | Windows port of cmux with broader Windows + remote workflow focus |
+| Split panes | Yes | Yes |
+| Vertical tab/sidebar model | Yes, heavily productized | Yes, but less polished |
+| Embedded/scriptable browser | Yes | Yes |
+| Markdown surface | Not a public core feature | Yes |
+| Local shells | Yes | Yes |
+| WSL | Not relevant | Yes, explicit first-class target |
+| SSH target modeling | Yes | Yes |
+| Remote tmux hybrid workflows | Not the public focus | Yes, explicit product feature |
+| Session restore | Strongly emphasized publicly | Present, improved, but still less trustworthy overall |
+| Agent resume integrations | Deep, productized | Partial; stronger tmux-shaped compatibility than native agent resume |
+| Notification rings / unread model | Core product feature | Present and useful |
+| CLI / socket automation | Core public story | Present, but less legible as a packaged CLI story |
+| tmux compatibility shim | No | Yes |
+| Browser auth/session import | Public feature | Not currently |
+| Remote browser routing through remote network | Public cmux SSH feature | Not currently a core wmux story |
 
-wmux also has strong automation, but today it is more of a power-user/developer-oriented control plane:
+## Where cmux currently looks better
 
-- named-pipe automation
+### 1. Product coherence is much stronger
+
+cmux has a much clearer product sentence:
+
+- native macOS terminal + browser for coding agents
+- fast
+- polished
+- scriptable
+- cohesive
+
+wmux can explain itself, but the explanation is still more architectural than experiential.
+
+### 2. The terminal performance story is easier to believe
+
+cmux’s public stack is a strong differentiator:
+
+- native Swift + AppKit
+- Ghostty rendering engine
+- explicit anti-Electron positioning
+
+wmux is not Electron either, but it still inherits the WebView/Tauri perception cost, and `xterm.js + WebView2` is a harder stack to sell as premium terminal infrastructure than `libghostty`.
+
+### 3. Session restore is more central to the product promise
+
+cmux explicitly documents:
+
+- what gets restored
+- what does not
+- how supported agent sessions resume
+- where state is stored
+
+wmux has closed some earlier restore gaps with layout persistence, Session Vault, transcript capture, and better terminal replay, but it still does not present restore as a product-defining capability with the same clarity or apparent trust level.
+
+### 4. Automation is simpler to explain
+
+cmux’s public automation story is straightforward:
+
+- CLI
+- socket API
+- browser API
+- hooks setup
+
+wmux has equivalent or stronger low-level pieces in some areas, but they are spread across:
+
+- named-pipe IPC
+- frontend automation bridge
 - tmux compatibility shim
-- frontend control bridge
+- Tauri commands
 
-That is powerful, but less immediately legible than a simple CLI.
+That is powerful, but harder to package into one obvious “do this” story.
 
-### 4. It looks more productized today
+### 5. Community and momentum are materially stronger
 
-cmux-windows reads like a tool with one clear job: be a very good Windows-native terminal multiplexer.
+cmux now has:
 
-wmux is trying to do more than that, which is strategically interesting, but also means there are more edges where the experience can feel less settled.
+- a large public star count
+- a steady release cadence
+- a strong public social loop
+- obvious word-of-mouth momentum in agent-heavy communities
+
+wmux should treat this as signal, not marketing noise. Momentum changes what users assume is “the default serious tool” in a category.
 
 ## Where wmux currently looks better
 
-### 1. wmux is much broader than a terminal multiplexer
+### 1. wmux has the better Windows answer
 
-wmux can combine:
+This is the most obvious and most defensible differentiator.
 
-- terminal panes
-- browser panes
-- markdown panes
-- workspace persistence across those surfaces
+cmux is macOS only. wmux is not just “Windows support”; it is shaped around real Windows-native concerns:
 
-That is a real product difference, not a cosmetic feature gap.
+- ConPTY
+- PowerShell/cmd
+- WSL
+- WebView2
+- Windows packaging and automation constraints
 
-### 2. Remote workflows are a major differentiator
+If the user lives on Windows, cmux is not a direct replacement today.
 
-wmux has explicit support for:
+### 2. WSL and remote tmux are real strategic differentiators
+
+wmux has explicit, productized target modeling for:
 
 - local shells
 - WSL
-- SSH targets
-- remote tmux hybrid workflows
+- SSH
+- remote tmux over SSH
 
-That gives wmux a stronger answer to real remote development than cmux-windows currently appears to have.
+That gives wmux a stronger answer for hybrid Windows-local / Linux-remote development than cmux currently advertises.
 
-### 3. Agent-oriented compatibility is stronger
+### 3. wmux is broader as a workspace shell
+
+cmux is terminal + browser. wmux is terminal + browser + markdown, plus a more obvious multi-surface persistence story inside a single tab/workspace graph.
+
+That is strategically interesting because it opens workflows where the terminal is only one surface among several local developer artifacts.
+
+### 4. Agent-oriented compatibility is stronger in tmux-shaped environments
 
 wmux has invested in:
 
-- OSC notification handling
+- practical `tmux.exe` compatibility
+- minimal tmux-presence env hints
 - named-pipe automation
-- tmux.exe compatibility for agent harnesses
-- remote tmux inspection and management
+- remote tmux inspection / management
+- OSC notifications and clipboard handling
 
-This is strategically important. A lot of the interesting workflows around coding agents are not just “open a terminal”; they depend on being able to detect multiplexer context, emit notifications, and interoperate with tmux-shaped tooling.
+cmux has a cleaner native agent workflow story. wmux has a stronger “make existing tmux-ish harnesses work on Windows” story.
 
-### 4. The architectural ceiling is higher
+That matters for users who are not willing to wait for every agent tool to add first-class wmux support.
 
-wmux is closer to a developer workspace shell than a pure terminal app. If executed well, that gives it more upside than a narrow terminal multiplexer.
+## Where wmux is still weaker
 
-The cost is complexity.
+### 1. It still feels less settled
 
-## Where wmux is currently weaker
+wmux has improved, but it is still easier to imagine edge cases in:
 
-### 1. Restore fidelity has not been consistently closed-loop
+- restore fidelity
+- layout coordination
+- keyboard/input handling
+- browser pane coordination
+- polish across multiple surfaces and targets
 
-This is the most important gap.
+cmux benefits from a narrower product shape and a native app stack that makes the whole thing feel more singular.
 
-If a user expects the app to come back with:
+### 2. The architecture is more complex to keep coherent
 
-- the same working directory
-- the same layout
-- the same browser/markdown surfaces
-- the same terminal context
+wmux currently spans:
 
-then any mismatch feels like a trust failure, not a minor bug.
-
-cmux-windows seems to have treated this as a first-class product problem. wmux has sometimes had the pieces present in the data model without fully wiring them through restore behavior.
-
-### 2. UX consistency is not yet at the same level
-
-wmux is moving quickly, but small regressions matter:
-
-- spacing issues
-- inconsistent menu styling
-- restore edge cases
-- form flow roughness
-
-These individually look minor. Together they change how “solid” the app feels.
-
-### 3. Feature breadth increases integration risk
-
-wmux has more interacting systems than cmux-windows:
-
-- Tauri app shell
-- xterm-based terminal panes
+- Tauri shell
+- Rust backend
+- xterm frontend terminal runtime
 - browser child webviews
-- markdown panes
-- local/WSL/SSH/remote tmux targets
-- automation bridge
-- tmux compatibility shim
+- markdown surface runtime
 - workspace persistence
+- local / WSL / SSH / remote tmux target logic
+- automation bridge
+- tmux shim
 
-That is a harder system to keep coherent than a narrower terminal product.
+That is a lot of interacting seams. The product upside is real, but so is the integration tax.
 
-## Where cmux-windows is weaker
+### 3. Browser and remote workflows are less unified than cmux’s public story
 
-### 1. It appears much more local-machine centric
+cmux publicly claims a smoother “SSH workspace + browser pane + localhost just works through the remote network” workflow.
 
-cmux-windows looks like a strong local Windows terminal multiplexer. It does not appear to have wmux-style explicit remote target modeling or remote tmux workflows.
+wmux is stronger at remote tmux hybrid workflows, but weaker at presenting one seamless remote terminal/browser story.
 
-### 2. It does not appear to compete on mixed-surface workspaces
+### 4. The value proposition is still harder to explain in one sentence
 
-wmux’s browser and markdown surfaces are not just “extra panes”; they change the product category. cmux-windows does not appear to be trying to do that.
+cmux: native macOS terminal and browser for coding agents.
 
-### 3. It is less differentiated if the goal is an agent-oriented remote workspace tool
+wmux today: Windows port of cmux, but also a Windows-native workspace shell, but also a remote tmux hybrid environment, but also a tmux compatibility layer.
 
-If the target is “best local Windows multiplexer,” cmux-windows is easier to evaluate and easier to like.
+That is all real. It is also too many product sentences at once.
 
-If the target is “best environment for remote, agent-assisted development workflows,” wmux has the stronger direction.
+## Direct answer: does cmux roll its own tmux server on remote hosts?
 
-## Direct answer: do cmux or cmux-windows roll their own "tmux server" on remote hosts?
+Short answer: no.
 
-Short answer: no, not in the sense tmux itself does.
+cmux’s public model is not “deploy our own tmux-compatible server to the remote machine.” It is closer to:
 
-### cmux-windows
+- native local app
+- local session/workspace state
+- SSH workflows
+- local browser/automation surfaces
+- CLI/socket control
 
-cmux-windows appears to run a local Windows app plus a local daemon/session manager for its own terminal sessions. That is a local process model, not a remote-host multiplexer server.
+That is not the same thing as implementing a remote tmux-server replacement.
 
-Based on its public architecture and code:
+wmux also does not try to do that. Its current remote answer is:
 
-- it is a local WPF + ConPTY application
-- it has a local daemon/session manager for persistence/reconnect semantics
-- it does not appear to deploy or emulate a tmux server on remote hosts
-
-So the answer for cmux-windows is clearly: no.
-
-### cmux
-
-If by “cmux” you mean the local native terminal-multiplexer family of tools that are inspired by tmux workflows, the answer is also generally no.
-
-They may have:
-
-- a local daemon
-- local session state
-- local pane/surface/workspace persistence
-- local CLI or IPC
-
-But that is not the same as rolling their own tmux server process on remote machines.
-
-In other words:
-
-- local app/daemon/session manager: yes, often
-- remote-host tmux-server replacement: no
-
-### How that compares to wmux
-
-wmux also does not try to deploy its own tmux server process onto remote hosts.
-
-Instead, wmux’s current remote model is:
-
-- SSH to the remote machine
+- SSH to the host
 - optionally attach to or create a real remote tmux session
-- keep wmux-native browser/markdown surfaces local
-- inspect/manage the remote tmux session over SSH when needed
+- keep wmux-native surfaces local
+- inspect and manage remote tmux over SSH
 
-That is a hybrid model, not a custom remote tmux-server implementation.
+That remains the right design. wmux should keep using real remote tmux where true tmux semantics matter.
 
 ## Practical takeaway for wmux
 
-The right comparison is not “should wmux build its own tmux server on remote hosts?”
+wmux should not try to out-cmux cmux on macOS-native polish. That is the wrong fight.
 
-It is:
+The better strategy is:
 
-- should wmux keep using real remote tmux when tmux semantics are needed?
-- should wmux make local restore/persistence as trustworthy as cmux-windows?
-- should wmux keep doubling down on mixed local surfaces plus remote terminal workflows?
+- be the best Windows answer for cmux-like workflows
+- keep leaning into WSL + SSH + remote tmux hybrid workflows
+- keep the mixed-surface workspace model
+- copy cmux’s discipline around restore trust, shortcut clarity, docs, and product coherence
 
-The answer today is probably:
+The most valuable things to borrow from cmux are not “native Swift” or “vertical tabs.” wmux already has its own stack and tab model. The important things to borrow are:
 
-- yes, keep using real remote tmux
-- yes, raise the bar on persistence/restore correctness
-- yes, keep leaning into the broader workspace model rather than becoming a narrower clone
+- sharper product language
+- stronger restore guarantees
+- clearer automation entry points
+- cleaner keyboard and UX contracts
+- less ambiguity about what the app is for
 
 ## Honest verdict
 
-If the goal is to beat cmux-windows specifically as a local Windows terminal multiplexer, wmux still has polish and persistence work to do.
+If the question is “is wmux now closer to current cmux than it was two months ago?” the answer is yes.
 
-If the goal is to build a more capable developer workspace system, wmux is already on a more interesting path.
+wmux now looks less like a rough Windows port and more like a credible Windows-specific branch of the same broader category.
 
-The main thing wmux should borrow from cmux-windows is discipline around product coherence and restore fidelity, not the narrower scope.
+If the question is “does wmux beat current cmux overall?” the honest answer is no.
+
+cmux currently looks ahead on:
+
+- polish
+- coherence
+- performance story
+- public packaging of agent workflows
+- community momentum
+
+wmux is ahead where the problem is specifically:
+
+- Windows
+- WSL
+- remote tmux
+- tmux-shaped compatibility
+- broader mixed-surface local workspaces
+
+That is enough for wmux to be strategically interesting. It is not yet enough for wmux to win a general head-to-head comparison on overall finish.

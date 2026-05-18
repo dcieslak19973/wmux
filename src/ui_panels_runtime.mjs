@@ -27,6 +27,9 @@ export function createUiPanelsRuntime({
   readSessionVaultEntry,
   captureSessionVaultEntry,
   openSessionVaultEntry,
+  checkForAppUpdate,
+  installAppUpdate,
+  getAppVersion,
 }) {
   const artifacts = [];
   let artifactPanelVisible = false;
@@ -37,6 +40,7 @@ export function createUiPanelsRuntime({
   let sessionVaultFilter = '';
   let sessionVaultLoading = false;
   let sessionVaultDetailLoading = false;
+  let updatePromptVisible = false;
 
   function unreadNotificationCount(tabId) {
     return (notifications.get(tabId) ?? []).filter((item) => !item.read).length;
@@ -48,6 +52,59 @@ export function createUiPanelsRuntime({
     el.textContent = msg;
     document.body.appendChild(el);
     setTimeout(() => el.remove(), 5000);
+  }
+
+  function showUpdatePrompt(updateInfo, { onInstall, onDismiss, onOpenSettings } = {}) {
+    document.getElementById('update-prompt')?.remove();
+    updatePromptVisible = true;
+    const prompt = document.createElement('div');
+    prompt.id = 'update-prompt';
+    prompt.className = 'update-prompt';
+    const body = String(updateInfo?.body ?? '').trim();
+    prompt.innerHTML = `
+      <div class="update-prompt-head">
+        <div>
+          <div class="update-prompt-kicker">Update available</div>
+          <div class="update-prompt-title">wmux ${escHtml(updateInfo?.version ?? 'unknown')}</div>
+        </div>
+        <button class="update-prompt-close" title="Dismiss">✕</button>
+      </div>
+      <div class="update-prompt-body">${body ? escHtml(body) : 'A newer signed wmux release is available.'}</div>
+      <div class="update-prompt-actions">
+        <button class="settings-btn-sm" data-action="settings">Settings</button>
+        <button class="settings-btn-sm" data-action="later">Later</button>
+        <button class="settings-btn-sm update-prompt-install" data-action="install">Install update</button>
+      </div>
+    `;
+    const cleanup = () => {
+      prompt.remove();
+      updatePromptVisible = false;
+    };
+    prompt.querySelector('[data-action="settings"]').addEventListener('click', () => {
+      cleanup();
+      onOpenSettings?.();
+    });
+    prompt.querySelector('[data-action="later"]').addEventListener('click', () => {
+      cleanup();
+      onDismiss?.();
+    });
+    prompt.querySelector('.update-prompt-close').addEventListener('click', () => {
+      cleanup();
+      onDismiss?.();
+    });
+    prompt.querySelector('[data-action="install"]').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = 'Installing…';
+      try {
+        await onInstall?.();
+      } catch {
+        button.disabled = false;
+        button.textContent = 'Install update';
+        return;
+      }
+    });
+    document.body.appendChild(prompt);
   }
 
   async function copyTextToClipboard(text) {
@@ -717,6 +774,20 @@ export function createUiPanelsRuntime({
           <label class="settings-row"><span class="settings-label">Cursor style</span><select class="settings-select" id="sp-cursor-style"><option value="bar" ${s.cursorStyle === 'bar' ? 'selected' : ''}>Bar</option><option value="block" ${s.cursorStyle === 'block' ? 'selected' : ''}>Block</option><option value="underline" ${s.cursorStyle === 'underline' ? 'selected' : ''}>Underline</option></select></label>
           <label class="settings-row"><span class="settings-label">Cursor blink</span><input class="settings-checkbox" id="sp-cursor-blink" type="checkbox" ${s.cursorBlink ? 'checked' : ''} /></label>
         </div>
+        <div class="settings-group">
+          <div class="settings-group-label">Updates</div>
+          <label class="settings-row"><span class="settings-label">Current version</span><span class="settings-static" id="sp-update-current">Loading…</span></label>
+          <label class="settings-row"><span class="settings-label">Automatic checks</span><input class="settings-checkbox" id="sp-update-auto" type="checkbox" ${s.autoCheckUpdates ? 'checked' : ''} /></label>
+          <label class="settings-row settings-row-stack"><span class="settings-label">Manifest URL</span><input class="settings-input" id="sp-update-endpoint" type="text" value="${escHtml(s.updateManifestUrl ?? '')}" spellcheck="false" placeholder="https://github.com/OWNER/REPO/releases/latest/download/latest.json" /></label>
+          <label class="settings-row settings-row-stack"><span class="settings-label">Public key</span><textarea class="settings-textarea" id="sp-update-pubkey" spellcheck="false" placeholder="Paste the Tauri updater public key here">${escHtml(s.updatePubkey ?? '')}</textarea></label>
+          <div class="settings-help">wmux checks a signed Tauri release manifest. For GitHub Releases, point this at a published <code>latest.json</code> and paste the matching public key.</div>
+          <div class="settings-update-actions">
+            <button class="settings-btn-sm" id="sp-check-updates">Check now</button>
+            <button class="settings-btn-sm" id="sp-install-update" disabled>Install available update</button>
+          </div>
+          <div class="settings-update-status" id="sp-update-status">No update check has been run in this session.</div>
+          <div class="settings-update-notes" id="sp-update-notes"></div>
+        </div>
         <div class="settings-group"><div class="settings-group-label">Window</div><div class="settings-row"><span class="settings-label">New window</span><button class="settings-btn-sm" id="sp-new-window">Open</button></div></div>
         <div class="settings-footer"><button class="settings-btn-apply" id="sp-apply">Apply</button><button class="settings-btn-reset" id="sp-reset">Reset to defaults</button></div>
       </div>
@@ -724,14 +795,66 @@ export function createUiPanelsRuntime({
     document.body.appendChild(panel);
     const draft = { ...s };
     const fontValEl = panel.querySelector('#sp-font-val');
-    panel.querySelector('#sp-font-dec').addEventListener('click', () => { draft.fontSize = Math.max(8, (draft.fontSize ?? 13) - 1); fontValEl.textContent = draft.fontSize; });
-    panel.querySelector('#sp-font-inc').addEventListener('click', () => { draft.fontSize = Math.min(32, (draft.fontSize ?? 13) + 1); fontValEl.textContent = draft.fontSize; });
-    panel.querySelector('#sp-apply').addEventListener('click', () => {
+    const currentVersionEl = panel.querySelector('#sp-update-current');
+    const endpointEl = panel.querySelector('#sp-update-endpoint');
+    const pubkeyEl = panel.querySelector('#sp-update-pubkey');
+    const autoUpdateEl = panel.querySelector('#sp-update-auto');
+    const checkBtn = panel.querySelector('#sp-check-updates');
+    const installBtn = panel.querySelector('#sp-install-update');
+    const statusEl = panel.querySelector('#sp-update-status');
+    const notesEl = panel.querySelector('#sp-update-notes');
+    let latestUpdateResult = null;
+
+    const setUpdateBusy = (busy) => {
+      checkBtn.disabled = busy;
+      installBtn.disabled = busy || !latestUpdateResult?.available;
+    };
+
+    const syncDraftFromPanel = () => {
       draft.fontFamily = panel.querySelector('#sp-font-family').value.trim() || s.fontFamily;
       draft.lineHeight = parseFloat(panel.querySelector('#sp-line-height').value) || s.lineHeight;
       draft.scrollback = parseInt(panel.querySelector('#sp-scrollback').value, 10) || s.scrollback;
       draft.cursorStyle = panel.querySelector('#sp-cursor-style').value;
       draft.cursorBlink = panel.querySelector('#sp-cursor-blink').checked;
+      draft.updateManifestUrl = endpointEl.value.trim();
+      draft.updatePubkey = pubkeyEl.value.trim();
+      draft.autoCheckUpdates = autoUpdateEl.checked;
+      return draft;
+    };
+
+    const renderUpdateResult = (result) => {
+      latestUpdateResult = result;
+      installBtn.disabled = !result?.available;
+      if (!result) {
+        statusEl.textContent = 'No update check has been run in this session.';
+        notesEl.innerHTML = '';
+        return;
+      }
+      if (!result.available) {
+        statusEl.textContent = `wmux ${result.currentVersion} is already current.`;
+        notesEl.innerHTML = '';
+        return;
+      }
+      const dateBits = result.date ? ` · published ${escHtml(result.date)}` : '';
+      statusEl.innerHTML = `Update available: <strong>${escHtml(result.version ?? 'unknown')}</strong>${dateBits}`;
+      const body = String(result.body ?? '').trim();
+      notesEl.innerHTML = body
+        ? `<div class="settings-update-notes-title">Release notes</div><pre>${escHtml(body)}</pre>`
+        : '';
+    };
+
+    getAppVersion()
+      .then((version) => {
+        currentVersionEl.textContent = version;
+      })
+      .catch(() => {
+        currentVersionEl.textContent = 'Unavailable';
+      });
+
+    panel.querySelector('#sp-font-dec').addEventListener('click', () => { draft.fontSize = Math.max(8, (draft.fontSize ?? 13) - 1); fontValEl.textContent = draft.fontSize; });
+    panel.querySelector('#sp-font-inc').addEventListener('click', () => { draft.fontSize = Math.min(32, (draft.fontSize ?? 13) + 1); fontValEl.textContent = draft.fontSize; });
+    panel.querySelector('#sp-apply').addEventListener('click', () => {
+      syncDraftFromPanel();
       saveSettings(draft);
       applySettingsToAllPanes(draft);
       panel.remove();
@@ -740,6 +863,43 @@ export function createUiPanelsRuntime({
     panel.querySelector('#sp-new-window').addEventListener('click', async () => {
       panel.remove();
       try { await invoke('create_app_window'); } catch (err) { showError(`Could not open window: ${err}`); }
+    });
+    checkBtn.addEventListener('click', async () => {
+      syncDraftFromPanel();
+      saveSettings(draft);
+      renderUpdateResult(null);
+      statusEl.textContent = 'Checking for updates…';
+      setUpdateBusy(true);
+      try {
+        const result = await checkForAppUpdate({
+          endpoint: draft.updateManifestUrl,
+          pubkey: draft.updatePubkey,
+        });
+        renderUpdateResult(result);
+      } catch (err) {
+        latestUpdateResult = null;
+        installBtn.disabled = true;
+        notesEl.innerHTML = '';
+        statusEl.textContent = `Update check failed: ${err}`;
+      } finally {
+        setUpdateBusy(false);
+      }
+    });
+    installBtn.addEventListener('click', async () => {
+      syncDraftFromPanel();
+      saveSettings(draft);
+      statusEl.textContent = 'Installing update… wmux will exit on Windows when the installer takes over.';
+      setUpdateBusy(true);
+      try {
+        await installAppUpdate({
+          endpoint: draft.updateManifestUrl,
+          pubkey: draft.updatePubkey,
+        });
+        statusEl.textContent = 'Update installed. Restart wmux if it does not relaunch automatically.';
+      } catch (err) {
+        statusEl.textContent = `Update install failed: ${err}`;
+        setUpdateBusy(false);
+      }
     });
     panel.querySelector('.settings-close').addEventListener('click', () => panel.remove());
     panel.addEventListener('keydown', (event) => { if (event.key === 'Escape') panel.remove(); });
@@ -781,5 +941,6 @@ export function createUiPanelsRuntime({
     showHistoryPicker,
     showFindBar,
     showSettingsPanel,
+    showUpdatePrompt,
   };
 }

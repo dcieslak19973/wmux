@@ -1,6 +1,6 @@
 [package]
 name = "wmux"
-version = "0.0.5"
+version = "0.0.7"
 edition = "2021"
 default-run = "wmux"
 
@@ -19,6 +19,7 @@ path = "src/bin/tmux.rs"
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-build = { version = "2", optional = true }
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

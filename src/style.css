@@ -2305,3 +2305,18 @@ body.has-tabs #empty-state { display: none; }
 }
 .settings-btn-reset:hover { border-color: var(--close-hover); color: var(--close-hover); }
 
+/* ── Shell integration banner ─────────────────────────────────────────────── */
+
+/* ── Block exit badge (rendered inside xterm.js decoration) ───────────────── */
+.block-exit-badge {
+  position: absolute;
+  right: 6px;
+  top: 1px;
+  font-size: 10px;
+  color: #f87171;
+  font-family: monospace;
+  pointer-events: none;
+  user-select: none;
+}
+
+

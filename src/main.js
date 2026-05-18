@@ -889,6 +889,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       || (!event.ctrlKey && !event.altKey && event.shiftKey && event.key === 'Insert');
     if (!wantsPaste) return true;
     event.preventDefault();
+    event.stopPropagation();
     void readClipboardText()
       .then((text) => pasteTextIntoPane(sessionId, text))
       .catch((err) => showError(`Could not paste clipboard: ${err}`));
@@ -1119,6 +1120,101 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     updateTabMeta(tabId);
   });
 
+  // ── Block tracking (OSC 133 shell integration) ─────────────────────────────
+  let activeBlock = null;
+  let pendingBlockCmd = null;
+
+  function renderBlockDecoration(el, block) {
+    const done = block.exitCode !== null;
+    const failed = done && block.exitCode !== 0;
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#7c6af7';
+    const borderColor = failed ? '#f87171' : done ? '#4ade80' : accent;
+    // Use individual assignments — cssText would wipe the top/height xterm.js sets
+    // before calling onRender, making the element 0px tall and the border invisible.
+    el.style.borderLeft = `3px solid ${borderColor}`;
+    el.style.background = failed ? 'rgba(248,113,113,0.04)' : '';
+    el.style.pointerEvents = 'none';
+    el.style.width = '100%';
+    el.style.boxSizing = 'border-box';
+    if (failed) {
+      let badge = el.querySelector('.block-exit-badge');
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'block-exit-badge';
+        badge.style.position = 'absolute';
+        badge.style.right = '6px';
+        badge.style.top = '1px';
+        badge.style.fontSize = '10px';
+        badge.style.color = '#f87171';
+        badge.style.fontFamily = 'monospace';
+        badge.style.pointerEvents = 'none';
+        el.appendChild(badge);
+      }
+      badge.textContent = `exit ${block.exitCode}`;
+    }
+  }
+
+  const unlistenBlockCmd = await listen(`terminal-block-cmd-${sessionId}`, (event) => {
+    pendingBlockCmd = event.payload?.command ?? null;
+  });
+
+  const unlistenBlockStart = await listen(`terminal-block-start-${sessionId}`, () => {
+    const pane = panes.get(sessionId);
+    if (!pane) return;
+    const marker = term.registerMarker(0);
+    if (!marker) return;
+    const buf = term.buffer.active;
+    const block = {
+      id: crypto.randomUUID(),
+      command: pendingBlockCmd ?? '',
+      marker,
+      startRow: buf.viewportY + buf.cursorY,
+      startTime: Date.now(),
+      exitCode: null,
+      _decorationEl: null,
+      decoration: null,
+    };
+    pendingBlockCmd = null;
+    activeBlock = block;
+    pane.blocks.push(block);
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#7c6af7';
+    const decoration = term.registerDecoration({
+      marker,
+      overviewRulerOptions: { color: accent, position: 'left' },
+    });
+    decoration?.onRender((el) => {
+      block._decorationEl = el;
+      renderBlockDecoration(el, block);
+    });
+    block.decoration = decoration ?? null;
+  });
+
+  const unlistenBlockEnd = await listen(`terminal-block-end-${sessionId}`, (event) => {
+    const block = activeBlock;
+    if (!block) return;
+    block.exitCode = event.payload?.exit_code ?? 0;
+    block.endTime = Date.now();
+    activeBlock = null;
+
+    // Reissue the decoration with the correct row span now that we know the end row.
+    const buf = term.buffer.active;
+    const endRow = buf.viewportY + buf.cursorY;
+    const spanHeight = Math.max(1, endRow - block.startRow);
+    const color = block.exitCode !== 0 ? '#f87171' : '#4ade80';
+    block.decoration?.dispose();
+    const dec = term.registerDecoration({
+      marker: block.marker,
+      height: spanHeight,
+      overviewRulerOptions: { color, position: 'left' },
+    });
+    dec?.onRender((el) => {
+      block._decorationEl = el;
+      renderBlockDecoration(el, block);
+    });
+    block.decoration = dec ?? null;
+  });
+  // ── End block tracking ─────────────────────────────────────────────────────
+
   const unlistenAll = () => {
     terminalHostEl.removeEventListener('paste', handleTerminalPaste);
     if (restoreReplayFrame) {
@@ -1135,6 +1231,9 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     unlistenClipboard();
     unlistenNotify();
     unlistenCwd();
+    unlistenBlockCmd();
+    unlistenBlockStart();
+    unlistenBlockEnd();
     unlistenExit();
   };
 
@@ -1162,6 +1261,9 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   leafEl.addEventListener('mousedown', () => activatePane(sessionId));
 
   // Pane action toolbar (shown on hover)
+  const targetKind = getTargetKind(target);
+  const isBlocksCapable = targetKind === 'local' || targetKind === 'wsl';
+  const isWsl = targetKind === 'wsl';
   const toolbarEl = document.createElement('div');
   toolbarEl.className = 'pane-toolbar';
   toolbarEl.innerHTML = `
@@ -1171,6 +1273,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn" data-action="markdown" title="Open markdown pane">MD</button>
     <button class="pane-tb-btn" data-action="artifact" title="Preview HTML artifact from output">HTML</button>
     <button class="pane-tb-btn" data-action="zoom" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
+    ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up block view">&#x26a1;</button>' : ''}
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
   toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); splitPane(sessionId, 'h'); });
@@ -1180,6 +1283,28 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.querySelector('[data-action="artifact"]').addEventListener('click', (e) => { e.stopPropagation(); previewArtifactFromPane(sessionId); });
   toolbarEl.querySelector('[data-action="zoom"]').addEventListener('click', (e) => { e.stopPropagation(); toggleSurfaceZoom(leafEl); });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
+  if (isBlocksCapable) {
+    const blocksBtn = toolbarEl.querySelector('[data-action="blocks"]');
+    const checkCmd = isWsl ? 'check_shell_integration_wsl' : 'check_shell_integration';
+    const installCmd = isWsl ? 'install_shell_integration_wsl' : 'install_shell_integration';
+    const shellArgs = isWsl ? { distro: target.distro ?? null } : {};
+
+    invoke(checkCmd, shellArgs).then((installed) => {
+      if (installed) blocksBtn.remove();
+    }).catch(() => {});
+
+    blocksBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      blocksBtn.disabled = true;
+      try {
+        await invoke(installCmd, shellArgs);
+        blocksBtn.remove();
+      } catch (err) {
+        blocksBtn.title = `Setup failed: ${err}`;
+        blocksBtn.disabled = false;
+      }
+    });
+  }
   leafEl.appendChild(toolbarEl);
 
   if (isRemoteTmuxTarget(target)) {
@@ -1220,6 +1345,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     // same-size resize_session call that would trigger a PSReadLine redraw.
     lastSentCols: initialCols,
     lastSentRows: initialRows,
+    blocks: [],
   };
   panes.set(sessionId, paneState);
   renderPaneContextBadge(sessionId);
@@ -2158,6 +2284,7 @@ function showError(msg) {
 function showUrlBanner(sessionId, url, isOauth) {
   return panelsRuntime?.showUrlBanner(sessionId, url, isOauth);
 }
+
 
 async function copyTextToClipboard(text) {
   return panelsRuntime?.copyTextToClipboard(text);
@@ -3147,6 +3274,9 @@ document.addEventListener('keydown', (e) => {
 
   if (ctrl && shift && key === 'T') { e.preventDefault(); createTab(getDefaultTarget()); return; }
   if (ctrl && shift && key === 'W') { e.preventDefault(); closeCurrentSurface(); return; }
+  // Ctrl+W without shift: close active pane/surface. Intercepted here so WebView2's
+  // built-in "close window" shortcut doesn't fire and take down the whole app.
+  if (ctrl && !shift && !alt && key === 'w') { e.preventDefault(); if (!closeCurrentSurface() && activePaneId) closePane(activePaneId); return; }
 
   if (ctrl && shift && (key === '\\' || key === '|')) { e.preventDefault(); if (activePaneId) splitPane(activePaneId, 'h'); return; }
   if (ctrl && shift && (key === '_' || key === '-')) { e.preventDefault(); if (activePaneId) splitPane(activePaneId, 'v'); return; }

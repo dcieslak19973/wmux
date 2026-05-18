@@ -75,9 +75,19 @@ impl ShellTarget {
                     args.push("-d".to_string());
                     args.push(quote_windows_cmd_arg(d));
                 }
+                // Use `script` to allocate a fresh Linux PTY for bash. Without
+                // this, bash writes readline echo and the PS1 prompt to
+                // /dev/tty, which wsl.exe routes through the Windows console
+                // API rather than through ConPTY — so they appear in the dev
+                // terminal instead of wmux.  `script` relays all PTY output
+                // through its own stdout, which wsl.exe does route through
+                // ConPTY, so prompt and echo reach wmux correctly.
                 args.push("--".to_string());
+                args.push("script".to_string());
+                args.push("-q".to_string());
+                args.push("-c".to_string());
                 args.push("bash".to_string());
-                args.push("-i".to_string());
+                args.push("/dev/null".to_string());
                 Ok(if args.is_empty() {
                     wsl
                 } else {

@@ -58,6 +58,10 @@ pub fn run() {
             commands::install_app_update,
             commands::complete_control_request,
             commands::exit_app,
+            commands::install_shell_integration,
+            commands::check_shell_integration,
+            commands::install_shell_integration_wsl,
+            commands::check_shell_integration_wsl,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

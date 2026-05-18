@@ -58,8 +58,6 @@ pub fn run() {
             commands::install_app_update,
             commands::complete_control_request,
             commands::exit_app,
-            commands::install_shell_integration,
-            commands::check_shell_integration,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

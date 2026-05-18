@@ -28,6 +28,19 @@ pub struct ClipboardPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BlockStartPayload {}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockEndPayload {
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockCommandLinePayload {
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CreateSessionResult {
     pub id: String,
     pub label: String,
@@ -757,9 +770,12 @@ pub async fn start_session_stream(
                         }
                     }
 
-                    // OSC 7 cwd + OSC 9/99/777 notifications.
-                    let notify_ev = format!("terminal-notify-{id_clone}");
-                    let cwd_ev    = format!("terminal-cwd-{id_clone}");
+                    // OSC 7 cwd + OSC 9/99/777 notifications + OSC 133 blocks.
+                    let notify_ev       = format!("terminal-notify-{id_clone}");
+                    let cwd_ev          = format!("terminal-cwd-{id_clone}");
+                    let block_start_ev  = format!("terminal-block-start-{id_clone}");
+                    let block_end_ev    = format!("terminal-block-end-{id_clone}");
+                    let block_cmd_ev    = format!("terminal-block-cmd-{id_clone}");
                     for event in osc_parser::extract_osc_events(&chunk) {
                         match event {
                             OscEvent::Notification(n) => {
@@ -771,6 +787,16 @@ pub async fn start_session_stream(
                             }
                             OscEvent::Clipboard(text) => {
                                 let _ = app.emit(&clipboard_event_id, ClipboardPayload { text });
+                            }
+                            OscEvent::BlockPromptStart => {}
+                            OscEvent::BlockCommandStart => {
+                                let _ = app.emit(&block_start_ev, BlockStartPayload {});
+                            }
+                            OscEvent::BlockCommandFinished { exit_code } => {
+                                let _ = app.emit(&block_end_ev, BlockEndPayload { exit_code });
+                            }
+                            OscEvent::BlockCommandLine(command) => {
+                                let _ = app.emit(&block_cmd_ev, BlockCommandLinePayload { command });
                             }
                         }
                     }
@@ -1367,6 +1393,74 @@ pub async fn complete_control_request(
 pub async fn exit_app(app: AppHandle) -> Result<(), String> {
     app.exit(0);
     Ok(())
+}
+
+const SHELL_INTEGRATION_PS1: &str = include_str!("shell-integration.ps1");
+const SHELL_INTEGRATION_MARKER: &str = "# wmux shell integration";
+
+/// Write the wmux shell integration snippet into the user's PowerShell CurrentUserCurrentHost profile.
+/// Returns `"installed"` if newly written, `"already_installed"` if the marker is already present.
+#[tauri::command]
+pub async fn install_shell_integration() -> Result<String, String> {
+    use std::io::Write as _;
+
+    let profile_path = get_powershell_profile_path().map_err(|e| e.to_string())?;
+
+    // Create parent directories if they don't exist.
+    if let Some(parent) = profile_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    // Check if already installed.
+    if profile_path.exists() {
+        let existing = std::fs::read_to_string(&profile_path).map_err(|e| e.to_string())?;
+        if existing.contains(SHELL_INTEGRATION_MARKER) {
+            return Ok("already_installed".to_string());
+        }
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&profile_path)
+        .map_err(|e| e.to_string())?;
+
+    write!(file, "\n\n{SHELL_INTEGRATION_PS1}").map_err(|e| e.to_string())?;
+    Ok("installed".to_string())
+}
+
+/// Return the path to the PowerShell CurrentUserCurrentHost profile by running `pwsh -NoProfile -Command $PROFILE`.
+fn get_powershell_profile_path() -> std::io::Result<PathBuf> {
+    let pwsh = crate::session_manager::find_exe("pwsh.exe")
+        .or_else(|| crate::session_manager::find_exe("powershell.exe"))
+        .unwrap_or_else(|| "pwsh.exe".to_string());
+
+    let output = Command::new(&pwsh)
+        .args(["-NoProfile", "-NonInteractive", "-Command", "$PROFILE.CurrentUserCurrentHost"])
+        .output()?;
+
+    let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path_str.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not determine PowerShell profile path",
+        ));
+    }
+    Ok(PathBuf::from(path_str))
+}
+
+/// Return whether the wmux shell integration is already present in $PROFILE.
+#[tauri::command]
+pub async fn check_shell_integration() -> Result<bool, String> {
+    let profile_path = match get_powershell_profile_path() {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
+    if !profile_path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&profile_path).map_err(|e| e.to_string())?;
+    Ok(content.contains(SHELL_INTEGRATION_MARKER))
 }
 
 fn build_runtime_updater(

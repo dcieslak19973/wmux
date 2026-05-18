@@ -1404,7 +1404,10 @@ const SHELL_INTEGRATION_MARKER: &str = "# wmux shell integration";
 pub async fn install_shell_integration() -> Result<String, String> {
     use std::io::Write as _;
 
-    let profile_path = get_powershell_profile_path().map_err(|e| e.to_string())?;
+    let profile_path = tokio::task::spawn_blocking(get_powershell_profile_path)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
 
     // Create parent directories if they don't exist.
     if let Some(parent) = profile_path.parent() {
@@ -1452,7 +1455,10 @@ fn get_powershell_profile_path() -> std::io::Result<PathBuf> {
 /// Return whether the wmux shell integration is already present in $PROFILE.
 #[tauri::command]
 pub async fn check_shell_integration() -> Result<bool, String> {
-    let profile_path = match get_powershell_profile_path() {
+    let profile_path = match tokio::task::spawn_blocking(get_powershell_profile_path)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         Ok(p) => p,
         Err(_) => return Ok(false),
     };

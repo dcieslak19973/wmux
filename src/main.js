@@ -1329,9 +1329,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
   // Show shell integration setup banner once for local sessions.
   if (getTargetKind(target) === 'local' && !localStorage.getItem('wmux-block-integration-dismissed')) {
-    void invoke('check_shell_integration').then((installed) => {
-      if (!installed) showShellIntegrationBanner(sessionId);
-    }).catch(() => {});
+    showShellIntegrationBanner(sessionId);
   }
 
   return sessionId;

@@ -1109,88 +1109,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     }
   });
 
-  // ── Block tracking (OSC 133 shell integration) ─────────────────────────────
-  let activeBlock = null;
-  let pendingBlockCmd = null;
-
-  function renderBlockDecoration(el, block) {
-    const done = block.exitCode !== null;
-    const failed = done && block.exitCode !== 0;
-    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#7c6af7';
-    const borderColor = failed ? '#f87171' : done ? '#4ade80' : accent;
-    el.style.cssText = [
-      `border-left: 3px solid ${borderColor}`,
-      failed ? 'background: rgba(248,113,113,0.04)' : 'background: rgba(0,0,0,0)',
-      'pointer-events: none',
-      'position: absolute',
-      'width: 100%',
-      'box-sizing: border-box',
-    ].join(';');
-    if (failed) {
-      let badge = el.querySelector('.block-exit-badge');
-      if (!badge) {
-        badge = document.createElement('span');
-        badge.className = 'block-exit-badge';
-        badge.style.cssText = 'position:absolute;right:6px;top:1px;font-size:10px;color:#f87171;font-family:monospace;pointer-events:none;';
-        el.appendChild(badge);
-      }
-      badge.textContent = `exit ${block.exitCode}`;
-    }
-  }
-
-  const unlistenBlockCmd = await listen(`terminal-block-cmd-${sessionId}`, (event) => {
-    pendingBlockCmd = event.payload?.command ?? null;
-  });
-
-  const unlistenBlockStart = await listen(`terminal-block-start-${sessionId}`, () => {
-    const pane = panes.get(sessionId);
-    if (!pane) return;
-    const marker = term.registerMarker(0);
-    if (!marker) return;
-    const block = {
-      id: crypto.randomUUID(),
-      command: pendingBlockCmd ?? '',
-      marker,
-      startTime: Date.now(),
-      exitCode: null,
-      _decorationEl: null,
-    };
-    pendingBlockCmd = null;
-    activeBlock = block;
-    pane.blocks.push(block);
-    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#7c6af7';
-    const decoration = term.registerDecoration({
-      marker,
-      overviewRulerOptions: { color: accent, position: 'left' },
-    });
-    decoration?.onRender((el) => {
-      block._decorationEl = el;
-      renderBlockDecoration(el, block);
-    });
-    block.decoration = decoration ?? null;
-  });
-
-  const unlistenBlockEnd = await listen(`terminal-block-end-${sessionId}`, (event) => {
-    const block = activeBlock;
-    if (!block) return;
-    block.exitCode = event.payload?.exit_code ?? 0;
-    block.endTime = Date.now();
-    activeBlock = null;
-    if (block._decorationEl) renderBlockDecoration(block._decorationEl, block);
-    // Update overview ruler color for failed commands.
-    if (block.exitCode !== 0 && block.decoration) {
-      // Re-register with red overview ruler; the old one stays but the new one is on top.
-      const failMarker = term.registerMarker(0);
-      if (failMarker) {
-        term.registerDecoration({
-          marker: block.marker,
-          overviewRulerOptions: { color: '#f87171', position: 'left' },
-        });
-      }
-    }
-  });
-  // ── End block tracking ─────────────────────────────────────────────────────
-
   const unlistenExit = await listen(`terminal-exit-${sessionId}`, () => {
     const pane = panes.get(sessionId);
     const tab = tabs.get(tabId);
@@ -1217,9 +1135,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     unlistenClipboard();
     unlistenNotify();
     unlistenCwd();
-    unlistenBlockCmd();
-    unlistenBlockStart();
-    unlistenBlockEnd();
     unlistenExit();
   };
 
@@ -1305,7 +1220,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     // same-size resize_session call that would trigger a PSReadLine redraw.
     lastSentCols: initialCols,
     lastSentRows: initialRows,
-    blocks: [],
   };
   panes.set(sessionId, paneState);
   renderPaneContextBadge(sessionId);
@@ -1325,11 +1239,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
   if (isRemoteTmuxTarget(target)) {
     void probeRemoteTmuxMetadata(tabId, sessionId, target);
-  }
-
-  // Show shell integration setup banner once for local sessions.
-  if (getTargetKind(target) === 'local' && !localStorage.getItem('wmux-block-integration-dismissed')) {
-    showShellIntegrationBanner(sessionId);
   }
 
   return sessionId;
@@ -2244,40 +2153,6 @@ function updateTabNumbers() {
 
 function showError(msg) {
   return panelsRuntime?.showError(msg);
-}
-
-function showShellIntegrationBanner(sessionId) {
-  const pane = panes.get(sessionId);
-  if (!pane) return;
-  if (pane.domEl.querySelector('.shell-integration-banner')) return;
-
-  const banner = document.createElement('div');
-  banner.className = 'shell-integration-banner';
-  banner.innerHTML = `
-    <span>Enable block view? Shell integration adds command boundaries and exit codes.</span>
-    <button class="sib-btn sib-setup">Set Up</button>
-    <button class="sib-btn sib-dismiss">Dismiss</button>
-  `;
-
-  banner.querySelector('.sib-setup').addEventListener('click', async () => {
-    try {
-      const result = await invoke('install_shell_integration');
-      banner.innerHTML = result === 'already_installed'
-        ? '<span>Shell integration was already installed. Restart your shell to activate blocks.</span>'
-        : '<span>Shell integration installed. Restart your shell to activate blocks.</span>';
-      localStorage.setItem('wmux-block-integration-dismissed', '1');
-      setTimeout(() => banner.remove(), 3000);
-    } catch (err) {
-      banner.querySelector('span').textContent = `Setup failed: ${err}`;
-    }
-  });
-
-  banner.querySelector('.sib-dismiss').addEventListener('click', () => {
-    localStorage.setItem('wmux-block-integration-dismissed', '1');
-    banner.remove();
-  });
-
-  pane.domEl.appendChild(banner);
 }
 
 function showUrlBanner(sessionId, url, isOauth) {

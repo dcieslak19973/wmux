@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
+use url::Url;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OscNotificationPayload {
@@ -182,6 +184,25 @@ pub struct RemoteTmuxActionResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionExitPayload {
     pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConfigRequest {
+    pub endpoint: String,
+    pub pubkey: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    pub current_version: String,
+    pub available: bool,
+    pub version: Option<String>,
+    pub date: Option<String>,
+    pub body: Option<String>,
+    pub download_url: Option<String>,
+    pub target: Option<String>,
 }
 
 /// Create a new terminal session for the given `target`.
@@ -1265,6 +1286,68 @@ pub async fn close_browser_window(app: AppHandle, label: String) -> Result<(), S
 }
 
 #[tauri::command]
+pub async fn get_app_version(app: AppHandle) -> Result<String, String> {
+    Ok(app.package_info().version.to_string())
+}
+
+#[tauri::command]
+pub async fn check_for_app_update(
+    app: AppHandle,
+    config: UpdateConfigRequest,
+) -> Result<UpdateCheckResult, String> {
+    let current_version = app.package_info().version.to_string();
+    let update = build_runtime_updater(&app, &config)?
+        .build()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(match update {
+        Some(update) => UpdateCheckResult {
+            current_version,
+            available: true,
+            version: Some(update.version.clone()),
+            date: update.date.map(|value| value.to_string()),
+            body: update.body.clone(),
+            download_url: Some(update.download_url.to_string()),
+            target: Some(update.target.clone()),
+        },
+        None => UpdateCheckResult {
+            current_version,
+            available: false,
+            version: None,
+            date: None,
+            body: None,
+            download_url: None,
+            target: None,
+        },
+    })
+}
+
+#[tauri::command]
+pub async fn install_app_update(
+    app: AppHandle,
+    config: UpdateConfigRequest,
+) -> Result<(), String> {
+    let update = build_runtime_updater(&app, &config)?
+        .on_before_exit(|| {
+            log::info!("wmux updater is handing off to the installer");
+        })
+        .build()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update is currently available".to_string())?;
+
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn complete_control_request(
     bridge: State<'_, FrontendControlBridge>,
     request_id: String,
@@ -1284,6 +1367,28 @@ pub async fn complete_control_request(
 pub async fn exit_app(app: AppHandle) -> Result<(), String> {
     app.exit(0);
     Ok(())
+}
+
+fn build_runtime_updater(
+    app: &AppHandle,
+    config: &UpdateConfigRequest,
+) -> Result<tauri_plugin_updater::UpdaterBuilder, String> {
+    let endpoint = config.endpoint.trim();
+    let pubkey = config.pubkey.trim();
+    if endpoint.is_empty() {
+        return Err("Update manifest URL is required".to_string());
+    }
+    if pubkey.is_empty() {
+        return Err("Updater public key is required".to_string());
+    }
+
+    let endpoint = Url::parse(endpoint).map_err(|err| format!("Invalid update manifest URL: {err}"))?;
+
+    app
+        .updater_builder()
+        .endpoints(vec![endpoint])
+        .map_err(|e| e.to_string())
+        .map(|builder| builder.pubkey(pubkey.to_string()))
 }
 
 /// Minimal base64 encoder (avoids pulling in a full crate).

@@ -2035,10 +2035,20 @@ body.has-tabs #empty-state { display: none; }
   cursor: default;
 }
 
+.settings-row-stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
 .settings-label {
   color: var(--text-primary);
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.settings-static {
+  color: var(--text-primary);
+  font-size: 12px;
 }
 
 .settings-input {
@@ -2056,6 +2066,25 @@ body.has-tabs #empty-state { display: none; }
 }
 .settings-input:focus { border-color: var(--accent); }
 .settings-input-sm { flex: 0 0 80px; }
+
+.settings-textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 8px;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  outline: none;
+  transition: border-color 0.12s;
+}
+
+.settings-textarea:focus {
+  border-color: var(--accent);
+}
 
 .settings-select {
   flex: 0 0 110px;
@@ -2119,6 +2148,130 @@ body.has-tabs #empty-state { display: none; }
   transition: border-color 0.12s;
 }
 .settings-btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+
+.settings-help {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 6px 0 0;
+}
+
+.settings-help code {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  color: #ddd6fe;
+}
+
+.settings-update-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.settings-update-status,
+.settings-update-notes {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 10px 12px;
+}
+
+.settings-update-notes:empty {
+  display: none;
+}
+
+.settings-update-notes-title {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
+.settings-update-notes pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+}
+
+.update-prompt {
+  position: fixed;
+  right: 16px;
+  top: 16px;
+  width: min(420px, calc(100vw - 32px));
+  border: 1px solid rgba(124,106,247,0.35);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(124,106,247,0.14), rgba(30,31,38,0.96) 80%);
+  box-shadow: 0 18px 42px rgba(0,0,0,0.45);
+  z-index: 8200;
+  padding: 14px 14px 12px;
+  backdrop-filter: blur(10px);
+}
+
+.update-prompt-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-prompt-kicker {
+  color: #c4b5fd;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.update-prompt-title {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 700;
+  margin-top: 3px;
+}
+
+.update-prompt-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 6px;
+}
+
+.update-prompt-close:hover {
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.08);
+}
+
+.update-prompt-body {
+  margin-top: 10px;
+  color: #d4d4d8;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.update-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.update-prompt-install {
+  border-color: rgba(124,106,247,0.45);
+  background: rgba(124,106,247,0.16);
+}
 
 .settings-footer {
   display: flex;

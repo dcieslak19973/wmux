@@ -92,6 +92,41 @@ cargo tauri build      # compile Rust, sign, produce MSI
 # Output: target/release/bundle/msi/wmux_*.msi
 ```
 
+## Auto-updater bootstrap
+
+This branch includes a Tauri v2 updater integration for Windows.
+
+What is wired in the app:
+
+- updater plugin registration in the Rust app shell
+- updater artifact generation during release builds
+- built-in defaults for wmux GitHub Releases plus the generated updater public key
+- startup auto-checks with an in-app update prompt
+- a Settings panel section for override/debugging plus manual `Check now` and `Install available update` actions
+
+What you still need operationally before this works in production:
+
+1. Generate and safely store a Tauri updater signing keypair.
+2. Add `TAURI_SIGNING_PRIVATE_KEY` as a GitHub Actions repository secret.
+3. Add `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` too if that key is password-protected.
+4. Push a version tag so the release workflow can publish the signed installer and generated `latest.json`.
+
+Recommended GitHub Releases flow:
+
+1. Generate a signing key once with `npm run tauri signer generate -- -w ~/.tauri/wmux.key`.
+2. Save the public key content somewhere durable; wmux needs that exact value to verify updates.
+3. Add the private key content to the repo secret `TAURI_SIGNING_PRIVATE_KEY`.
+4. If the key has a password, add it to `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; otherwise leave that secret unset.
+5. Push a semver tag such as `v0.0.7`; `.github/workflows/release.yml` will build the app, sign the updater artifacts, and upload the MSI, `.sig`, and `latest.json` to the GitHub release automatically.
+6. Keep using the stable updater endpoint `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`.
+
+Notes:
+
+- Tauri updater signature verification is mandatory; there is no unsigned production mode.
+- This repo currently bundles MSI artifacts for updates. That keeps the first pass simple on Windows.
+- The release workflow now fails fast if `TAURI_SIGNING_PRIVATE_KEY` is missing, which prevents publishing a tag without updater metadata.
+- On Windows the app exits when the installer takes over, so the install flow is expected to close wmux.
+
 ## Project layout
 
 ```

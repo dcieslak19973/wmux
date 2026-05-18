@@ -10,6 +10,7 @@ pub use control_bridge::FrontendControlBridge;
 pub use session_manager::{SessionManager, ShellTarget};
 
 use tauri::Manager;
+use tauri_plugin_updater::Builder as UpdaterPluginBuilder;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,6 +20,7 @@ pub fn run() {
     let control_bridge = FrontendControlBridge::new();
 
     tauri::Builder::default()
+        .plugin(UpdaterPluginBuilder::new().build())
         .manage(session_manager)
         .manage(control_bridge)
         .invoke_handler(tauri::generate_handler![
@@ -51,6 +53,9 @@ pub fn run() {
             commands::set_browser_visible,
             commands::set_browser_geometry,
             commands::close_browser_window,
+            commands::get_app_version,
+            commands::check_for_app_update,
+            commands::install_app_update,
             commands::complete_control_request,
             commands::exit_app,
         ])

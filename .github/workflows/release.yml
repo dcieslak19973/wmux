@@ -4,11 +4,13 @@
 #
 # Steps:
 #   1. Build the Tauri app for Windows (x86-64)
-#   2. Create a draft GitHub Release with the MSI and NSIS installers attached
+#   2. Create a published GitHub Release with the MSI installer attached
+#   3. Upload updater metadata for in-app update checks
 #
-# Secrets required: none (uses the automatic GITHUB_TOKEN)
-# Optional:  TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-#   → set these repo secrets to enable update-signature files in the release
+# Secrets required:
+#   - TAURI_SIGNING_PRIVATE_KEY
+# Optional:
+#   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
 name: Release
 
@@ -53,6 +55,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Verify updater signing secrets
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "Missing repo secret TAURI_SIGNING_PRIVATE_KEY. Generate a Tauri updater keypair once, then add the private key as a GitHub Actions secret before pushing a release tag."
+          }
+
       # ── Build + Release ───────────────────────────────────────────────────
       # tauri-action runs `beforeBuildCommand` (npm run build) automatically,
       # then `cargo tauri build`, then uploads artifacts to a GitHub Release.
@@ -60,9 +71,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Remove the lines below if you don't want update signatures:
-          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'wmux ${{ github.ref_name }}'
@@ -78,7 +88,7 @@ jobs:
             > Windows 11; the installer will prompt to install it on older systems).
           releaseDraft: false     # publish automatically when the tag workflow succeeds
           prerelease: ${{ contains(github.ref_name, '-') }}  # e.g. v1.0.0-beta.1
-          includeUpdaterJson: false
+          includeUpdaterJson: true
 
       - name: Package portable build
         shell: pwsh

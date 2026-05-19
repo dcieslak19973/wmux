@@ -767,7 +767,10 @@ html, body, #app {
   position: absolute;
   top: 6px;
   right: 8px;
-  display: none;
+  display: flex;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
   gap: 3px;
   z-index: 10;
   background: rgba(26,27,30,0.88);
@@ -775,7 +778,20 @@ html, body, #app {
   border-radius: 5px;
   padding: 2px 3px;
 }
-.pane-leaf:hover .pane-toolbar { display: flex; }
+.pane-toolbar.toolbar-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* Invisible hotspot in the top-right corner that triggers the toolbar */
+.toolbar-hotspot {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 48px;
+  height: 48px;
+  z-index: 9;
+  pointer-events: auto;
+}
 .pane-tb-btn {
   background: none;
   border: none;
@@ -792,6 +808,8 @@ html, body, #app {
 .pane-tb-blocks.is-installed:hover { opacity: 1; }
 .pane-tb-mcp { font-size: 10px; letter-spacing: 0.02em; color: #c678dd; }
 .pane-tb-mcp:hover { color: #e0aaff; }
+.pane-tb-agent { font-size: 10px; letter-spacing: 0.02em; color: #94a3b8; }
+.pane-tb-agent:hover { color: #e2e8f0; }
 
 /* xterm.js overrides */
 .pane-terminal-host .xterm { height: 100%; }
@@ -1139,6 +1157,17 @@ body.has-tabs #empty-state { display: none; }
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 150px;
+}
+
+.agent-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+  border: 1px solid;
 }
 
 /* ── Notification panel (Ctrl+I) ───────────────────────────────── */
@@ -2687,6 +2716,13 @@ body.has-tabs #empty-state { display: none; }
 .pr-review-ask-input:focus { outline: none; border-color: #7c3aed; }
 .pr-review-ask-input::placeholder { color: #475569; }
 
+.pr-review-agent-btn {
+  flex-shrink: 0;
+  align-self: flex-end;
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 48px;
+}
 .pr-review-ask-btn {
   flex-shrink: 0;
   align-self: flex-end;

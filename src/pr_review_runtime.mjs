@@ -13,6 +13,10 @@ export function createPrReviewRuntime({
   setActivePrReviewLabel,
   clearActiveSurface,
   escHtml,
+  getActivePaneId,
+  fixAgents,
+  showContextMenu,
+  getTargetKind,
 }) {
   const prReviewPanes = new Map();
 
@@ -47,6 +51,18 @@ export function createPrReviewRuntime({
       }
     }
     return html;
+  }
+
+  // ── Agent ask command builder ─────────────────────────────────────────────
+
+  function buildAgentAskCmd(agent, body, shell) {
+    if (shell === 'bash') {
+      const escaped = body.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+      return agent.bash(escaped);
+    } else {
+      const escaped = body.replace(/`/g, '``').replace(/"/g, '`"').replace(/\n/g, '`n');
+      return agent.ps(escaped);
+    }
   }
 
   // ── Markdown renderer for AI responses ───────────────────────────────────
@@ -116,8 +132,9 @@ export function createPrReviewRuntime({
           <div class="pr-review-ask-response" style="display:none"></div>
           <div class="pr-review-ask-bar">
             <span class="pr-review-sel-badge" style="display:none" title="Click to clear selection"></span>
-            <textarea class="pr-review-ask-input" placeholder="Ask Claude about this file… (Ctrl+Enter)" rows="2" spellcheck="false"></textarea>
-            <button class="pr-review-ask-btn pr-review-btn" title="Ask Claude (Ctrl+Enter)">Ask</button>
+            <textarea class="pr-review-ask-input" placeholder="Ask AI about this file… (Ctrl+Enter)" rows="2" spellcheck="false"></textarea>
+            <button class="pr-review-agent-btn pr-review-btn" title="Select AI agent">Claude</button>
+            <button class="pr-review-ask-btn pr-review-btn" title="Ask (Ctrl+Enter)">Ask</button>
           </div>
         </div>
       </div>
@@ -132,6 +149,7 @@ export function createPrReviewRuntime({
     const askResponseEl = prEl.querySelector('.pr-review-ask-response');
     const askInput = prEl.querySelector('.pr-review-ask-input');
     const askBtn = prEl.querySelector('.pr-review-ask-btn');
+    const agentBtn = prEl.querySelector('.pr-review-agent-btn');
     const selBadge = prEl.querySelector('.pr-review-sel-badge');
 
     const state = {
@@ -144,6 +162,7 @@ export function createPrReviewRuntime({
       selectedPath: null,
       rawDiff: '',
       selectedContext: null,
+      askAgent: null, // null = Claude (API); key string = terminal agent
     };
     if (state.cwd) cwdInput.value = state.cwd;
     prReviewPanes.set(label, state);
@@ -168,17 +187,64 @@ export function createPrReviewRuntime({
       selBadge.style.display = 'none';
     });
 
-    // ── Ask Claude ────────────────────────────────────────────────────────
-    const askClaude = async () => {
+    // ── Agent picker ──────────────────────────────────────────────────────
+    if (agentBtn && fixAgents && showContextMenu) {
+      agentBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const r = agentBtn.getBoundingClientRect();
+        const items = [
+          {
+            label: 'Claude (inline)',
+            action: () => {
+              state.askAgent = null;
+              agentBtn.textContent = 'Claude';
+              agentBtn.style.color = '';
+            },
+          },
+          { type: 'separator' },
+          ...fixAgents.map((agent) => ({
+            label: `${agent.label} (terminal)`,
+            action: () => {
+              state.askAgent = agent.key;
+              agentBtn.textContent = agent.label;
+              agentBtn.style.color = agent.color ?? '';
+            },
+          })),
+        ];
+        showContextMenu(items, r.left, r.bottom + 4);
+      });
+    }
+
+    // ── Ask AI ────────────────────────────────────────────────────────────
+    const askAi = async () => {
       const question = askInput.value.trim();
       if (!question) return;
       const context = state.selectedContext || state.rawDiff;
+
+      // Non-Claude agents: write command to active terminal pane
+      if (state.askAgent && fixAgents) {
+        const agent = fixAgents.find((a) => a.key === state.askAgent);
+        if (!agent) return;
+        const filePart = state.selectedPath ? ` [${state.selectedPath}]` : '';
+        const body = `${question}${filePart}`;
+        const activePaneId = getActivePaneId?.();
+        const pane = activePaneId ? panes.get(activePaneId) : null;
+        const kind = pane ? getTargetKind?.(pane.target) : null;
+        const shell = (kind === 'wsl' || kind === 'ssh') ? 'bash' : 'powershell';
+        const cmd = buildAgentAskCmd(agent, body, shell);
+        const targetId = activePaneId ?? '';
+        if (targetId) invoke('write_to_session', { id: targetId, data: cmd }).catch(() => {});
+        return;
+      }
+
+      // Claude: use API
       if (!context) {
         askResponseEl.innerHTML = '<p class="pr-review-empty">Select a file first.</p>';
         askResponseEl.style.display = '';
         return;
       }
-      askResponseEl.innerHTML = '<p class="pr-review-empty">Asking Claude…</p>';
+      const agentLabel = state.askAgent ? (fixAgents?.find((a) => a.key === state.askAgent)?.label ?? 'AI') : 'Claude';
+      askResponseEl.innerHTML = `<p class="pr-review-empty">Asking ${escHtml(agentLabel)}…</p>`;
       askResponseEl.style.display = '';
       askBtn.disabled = true;
       try {
@@ -195,9 +261,9 @@ export function createPrReviewRuntime({
       }
     };
 
-    askBtn.addEventListener('click', askClaude);
+    askBtn.addEventListener('click', askAi);
     askInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); askClaude(); }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); askAi(); }
     });
 
     const loadFile = async (filePath) => {

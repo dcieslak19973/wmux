@@ -3630,6 +3630,7 @@ document.addEventListener('keydown', (e) => {
 btnNewTab.addEventListener('click', () => createTab(getDefaultTarget()));
 btnNewTabMore.addEventListener('click', showNewTabPopover);
 updateNewTabTooltip();
+document.getElementById('btn-agent-sidebar')?.addEventListener('click', () => agentSidebarRuntime?.toggle());
 document.getElementById('btn-session-vault')?.addEventListener('click', () => { void toggleSessionVaultPanel(); });
 document.getElementById('btn-settings')?.addEventListener('click', showSettingsPanel);
 

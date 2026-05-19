@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn local_target_ignores_startup_cwd_in_cmdline() {
-        let cmdline = ShellTarget::Local.cmdline(Some("C:\\repo")).unwrap_or_default();
+        let cmdline = ShellTarget::Local.cmdline(Some("C:\\repo"), None).unwrap_or_default();
         assert!(!cmdline.is_empty());
         assert!(!cmdline.contains("C:\\repo"));
     }
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn wsl_target_uses_cd_when_restoring_linux_cwd() {
         let cmdline = ShellTarget::Wsl { distro: Some("Ubuntu".to_string()) }
-            .cmdline(Some("/home/dan/my project"))
+            .cmdline(Some("/home/dan/my project"), None)
             .unwrap_or_default();
         assert!(cmdline.contains("--cd \"/home/dan/my project\""));
         assert!(cmdline.contains("-d Ubuntu"));

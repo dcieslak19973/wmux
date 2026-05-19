@@ -1353,8 +1353,8 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
-  toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); splitPane(sessionId, 'h'); });
-  toolbarEl.querySelector('[data-action="split-v"]').addEventListener('click', (e) => { e.stopPropagation(); splitPane(sessionId, 'v'); });
+  toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); showSplitTypePicker(sessionId, 'h', r.left, r.bottom + 4); });
+  toolbarEl.querySelector('[data-action="split-v"]').addEventListener('click', (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); showSplitTypePicker(sessionId, 'v', r.left, r.bottom + 4); });
   toolbarEl.querySelector('[data-action="browser"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithBrowser(sessionId, 'h'); });
   toolbarEl.querySelector('[data-action="markdown"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithMarkdown(sessionId, 'h'); });
   toolbarEl.querySelector('[data-action="artifact"]').addEventListener('click', (e) => { e.stopPropagation(); previewArtifactFromPane(sessionId); });
@@ -1476,6 +1476,20 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   }
 
   return sessionId;
+}
+
+// Split type picker
+
+function showSplitTypePicker(paneId, dir, x, y) {
+  const pane = panes.get(paneId);
+  if (!pane) return;
+  const cwd = pane.cwd || tabs.get(pane.tabId)?.cwd || '';
+  showContextMenu([
+    { label: 'Terminal', action: () => splitPane(paneId, dir) },
+    { label: 'Browser', action: () => splitPaneWithBrowser(paneId, dir) },
+    { label: 'Markdown', action: () => splitPaneWithMarkdown(paneId, dir) },
+    { label: 'PR Review', action: () => splitPaneWithPrReview(paneId, dir, { cwd }) },
+  ], x, y);
 }
 
 // Split the active pane
@@ -3415,8 +3429,8 @@ document.addEventListener('keydown', (e) => {
   // built-in "close window" shortcut doesn't fire and take down the whole app.
   if (ctrl && !shift && !alt && key === 'w') { e.preventDefault(); if (!closeCurrentSurface() && activePaneId) closePane(activePaneId); return; }
 
-  if (ctrl && shift && (key === '\\' || key === '|')) { e.preventDefault(); if (activePaneId) splitPane(activePaneId, 'h'); return; }
-  if (ctrl && shift && (key === '_' || key === '-')) { e.preventDefault(); if (activePaneId) splitPane(activePaneId, 'v'); return; }
+  if (ctrl && shift && (key === '\\' || key === '|')) { e.preventDefault(); if (activePaneId) { const r = panes.get(activePaneId)?.domEl?.getBoundingClientRect(); if (r) showSplitTypePicker(activePaneId, 'h', r.left + r.width / 2 - 70, r.top + r.height / 2 - 40); } return; }
+  if (ctrl && shift && (key === '_' || key === '-')) { e.preventDefault(); if (activePaneId) { const r = panes.get(activePaneId)?.domEl?.getBoundingClientRect(); if (r) showSplitTypePicker(activePaneId, 'v', r.left + r.width / 2 - 70, r.top + r.height / 2 - 40); } return; }
 
   if (ctrl && key === 'Tab') {
     e.preventDefault();

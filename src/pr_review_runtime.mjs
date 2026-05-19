@@ -122,16 +122,21 @@ export function createPrReviewRuntime({
       state.selectedPath = filePath;
       renderFileList(filesEl, state.files, filePath, loadFile);
       diffEl.innerHTML = '<div class="pr-review-empty">Loading…</div>';
+      console.log('[pr-review] loadFile cwd:', state.cwd, 'base:', state.baseRef, 'path:', filePath);
       try {
         const raw = await invoke('get_pr_file_diff', { cwd: state.cwd, base: state.baseRef, path: filePath });
-        diffEl.innerHTML = renderDiffHtml(parseDiff(raw));
+        console.log('[pr-review] raw diff length:', raw.length, 'preview:', raw.slice(0, 200));
+        const hunks = parseDiff(raw);
+        console.log('[pr-review] parsed hunks:', hunks.length);
+        diffEl.innerHTML = renderDiffHtml(hunks);
       } catch (err) {
+        console.error('[pr-review] loadFile error:', err);
         diffEl.innerHTML = `<div class="pr-review-empty">Error: ${escHtml(String(err))}</div>`;
       }
     };
 
     const loadSummary = async () => {
-      const cwd = cwdInput.value.trim();
+      let cwd = cwdInput.value.trim();
       if (!cwd) {
         filesEl.innerHTML = '<div class="pr-review-empty">Enter a repo path above and press Enter.</div>';
         diffEl.innerHTML = '';
@@ -142,16 +147,20 @@ export function createPrReviewRuntime({
       filesEl.innerHTML = '<div class="pr-review-empty">Loading…</div>';
       diffEl.innerHTML = '<div class="pr-review-empty">Select a file to view its diff.</div>';
       state.selectedPath = null;
+      console.log('[pr-review] loadSummary cwd:', cwd);
       try {
         const summary = await invoke('get_pr_diff_summary', { cwd, base: null });
+        console.log('[pr-review] summary:', summary);
         state.baseRef = summary.base_ref;
         state.files = summary.files;
+        cwdInput.value = summary.resolved_cwd || cwd;
         baseBadge.textContent = `vs ${summary.base_ref}  +${summary.total_additions} -${summary.total_deletions}`;
         renderFileList(filesEl, summary.files, null, loadFile);
         if (!summary.files.length) {
           filesEl.innerHTML = '<div class="pr-review-empty">No changes vs base.</div>';
         }
       } catch (err) {
+        console.error('[pr-review] loadSummary error:', err);
         filesEl.innerHTML = `<div class="pr-review-empty">Error: ${escHtml(String(err))}</div>`;
       }
     };

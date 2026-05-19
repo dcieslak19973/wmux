@@ -82,6 +82,7 @@ pub struct PrDiffFile {
 #[derive(Debug, Clone, Serialize)]
 pub struct PrDiffSummary {
     pub base_ref: String,
+    pub resolved_cwd: String,
     pub files: Vec<PrDiffFile>,
     pub total_additions: usize,
     pub total_deletions: usize,
@@ -1217,6 +1218,13 @@ fn detect_base_ref(cwd: &str) -> String {
 /// Return the list of files changed between base and HEAD, with +/- stats.
 #[tauri::command]
 pub async fn get_pr_diff_summary(cwd: String, base: Option<String>) -> Result<PrDiffSummary, String> {
+    let cwd = if cwd.is_empty() {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        cwd
+    };
     let base_ref = base.filter(|s| !s.is_empty()).unwrap_or_else(|| detect_base_ref(&cwd));
 
     let numstat = git_stdout(&cwd, &["diff", "--numstat", &base_ref])?
@@ -1262,12 +1270,19 @@ pub async fn get_pr_diff_summary(cwd: String, base: Option<String>) -> Result<Pr
         files.push(PrDiffFile { path, additions, deletions, status });
     }
 
-    Ok(PrDiffSummary { base_ref, files, total_additions, total_deletions })
+    Ok(PrDiffSummary { base_ref, resolved_cwd: cwd, files, total_additions, total_deletions })
 }
 
 /// Return the raw unified diff for a single file between base and HEAD.
 #[tauri::command]
 pub async fn get_pr_file_diff(cwd: String, base: String, path: String) -> Result<String, String> {
+    let cwd = if cwd.is_empty() {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        cwd
+    };
     git_stdout(&cwd, &["diff", &base, "--", &path])
         .map(|opt| opt.unwrap_or_default())
 }

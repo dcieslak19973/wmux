@@ -15,6 +15,14 @@ pub enum OscEvent {
     Cwd(String),
     /// Clipboard text emitted by OSC 52.
     Clipboard(String),
+    /// OSC 133;A — shell is displaying a prompt.
+    BlockPromptStart,
+    /// OSC 133;C — user submitted a command; execution is starting.
+    BlockCommandStart,
+    /// OSC 133;D or OSC 133;D;<n> — command finished, optional exit code.
+    BlockCommandFinished { exit_code: Option<i32> },
+    /// OSC 133;P=k=<command> — the command text about to be executed.
+    BlockCommandLine(String),
 }
 
 /// A notification parsed from OSC 9/99/777 terminal output.
@@ -43,6 +51,8 @@ pub fn extract_osc_events(data: &[u8]) -> Vec<OscEvent> {
                     result.push(OscEvent::Cwd(extract_path_from_file_uri(uri)));
                 } else if let Some(text) = parse_osc_52(s) {
                     result.push(OscEvent::Clipboard(text));
+                } else if let Some(ev) = parse_osc_133(s) {
+                    result.push(ev);
                 } else if let Some(n) = parse_osc(s) {
                     result.push(OscEvent::Notification(n));
                 }
@@ -90,6 +100,27 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     out
+}
+
+fn parse_osc_133(s: &str) -> Option<OscEvent> {
+    let rest = s.strip_prefix("133;")?;
+    if rest == "A" {
+        return Some(OscEvent::BlockPromptStart);
+    }
+    if rest == "C" {
+        return Some(OscEvent::BlockCommandStart);
+    }
+    if rest == "D" {
+        return Some(OscEvent::BlockCommandFinished { exit_code: None });
+    }
+    if let Some(code_str) = rest.strip_prefix("D;") {
+        let exit_code = code_str.trim().parse::<i32>().ok();
+        return Some(OscEvent::BlockCommandFinished { exit_code });
+    }
+    if let Some(params) = rest.strip_prefix("P=k=") {
+        return Some(OscEvent::BlockCommandLine(params.to_string()));
+    }
+    None
 }
 
 fn parse_osc(s: &str) -> Option<OscNotification> {
@@ -169,5 +200,40 @@ mod tests {
         let input = b"\x1b]52;c;aHR0cHM6Ly9jbGF1ZGUuYWkvbG9naW4=\x07";
         let events = extract_osc_events(input);
         assert!(matches!(events.first(), Some(OscEvent::Clipboard(value)) if value == "https://claude.ai/login"));
+    }
+
+    #[test]
+    fn parses_osc133_prompt_start() {
+        let input = b"\x1b]133;A\x07";
+        let events = extract_osc_events(input);
+        assert!(matches!(events.first(), Some(OscEvent::BlockPromptStart)));
+    }
+
+    #[test]
+    fn parses_osc133_command_start() {
+        let input = b"\x1b]133;C\x07";
+        let events = extract_osc_events(input);
+        assert!(matches!(events.first(), Some(OscEvent::BlockCommandStart)));
+    }
+
+    #[test]
+    fn parses_osc133_command_finished_no_code() {
+        let input = b"\x1b]133;D\x07";
+        let events = extract_osc_events(input);
+        assert!(matches!(events.first(), Some(OscEvent::BlockCommandFinished { exit_code: None })));
+    }
+
+    #[test]
+    fn parses_osc133_command_finished_with_code() {
+        let input = b"\x1b]133;D;42\x07";
+        let events = extract_osc_events(input);
+        assert!(matches!(events.first(), Some(OscEvent::BlockCommandFinished { exit_code: Some(42) })));
+    }
+
+    #[test]
+    fn parses_osc133_command_line() {
+        let input = b"\x1b]133;P=k=git status\x07";
+        let events = extract_osc_events(input);
+        assert!(matches!(events.first(), Some(OscEvent::BlockCommandLine(cmd)) if cmd == "git status"));
     }
 }

@@ -165,6 +165,14 @@ enum IpcCmd {
     },
     #[serde(rename = "get-layout")]
     GetLayout,
+    /// Return the most-recent completed command blocks for a pane/session.
+    /// `session_id` is the wmux pane ID (WMUX_PANE_ID env var inside the shell).
+    #[serde(rename = "get-blocks")]
+    GetBlocks {
+        session_id: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
 }
 
 fn default_cols() -> u16 { 220 }
@@ -647,6 +655,17 @@ async fn dispatch(
             frontend(control, app, "publish-notification", json!({ "tabId": tab_id, "title": title, "body": body })).await
         }
         IpcCmd::GetLayout => frontend(control, app, "get-layout", json!({})).await,
+        IpcCmd::GetBlocks { session_id, limit } => {
+            use crate::session_manager::BlockStore;
+            let limit = limit.unwrap_or(20).min(BlockStore::MAX_BLOCKS);
+            match manager.get_block_store(&session_id).await {
+                None => IpcResp::err("session not found"),
+                Some(store) => {
+                    let blocks = store.lock().await.recent(limit);
+                    IpcResp { ok: true, payload: serde_json::to_value(blocks).ok(), ..IpcResp::ok() }
+                }
+            }
+        }
     }
 }
 

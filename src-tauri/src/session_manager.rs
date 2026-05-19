@@ -8,10 +8,119 @@
 use crate::conpty::ConPtySession;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+// ── Block store ───────────────────────────────────────────────────────────────
+
+/// A completed terminal command block captured via OSC 133 shell integration.
+#[derive(Debug, Clone, Serialize)]
+pub struct TermBlock {
+    /// Monotonic sequence number within this session (starts at 0).
+    pub id: u32,
+    /// Command text from OSC 133;P=k= marker (empty if shell didn't send it).
+    pub command: String,
+    /// Plain-text output produced between OSC 133;C and OSC 133;D, ANSI-stripped.
+    pub output: String,
+    /// Process exit code from OSC 133;D;N (None if not reported).
+    pub exit_code: Option<i32>,
+    /// Unix epoch milliseconds when the command started (OSC 133;C received).
+    pub started_ms: u64,
+    /// Unix epoch milliseconds when the command finished (OSC 133;D received).
+    pub ended_ms: u64,
+}
+
+pub struct BlockStore {
+    next_id: u32,
+    in_block: bool,
+    pending_command: String,
+    pending_output_raw: Vec<u8>,
+    pending_started_ms: u64,
+    blocks: VecDeque<TermBlock>,
+}
+
+impl BlockStore {
+    pub const MAX_BLOCKS: usize = 200;
+    const MAX_OUTPUT_BYTES: usize = 512 * 1024;
+
+    pub fn new() -> Self {
+        Self {
+            next_id: 0,
+            in_block: false,
+            pending_command: String::new(),
+            pending_output_raw: Vec::new(),
+            pending_started_ms: 0,
+            blocks: VecDeque::new(),
+        }
+    }
+
+    pub fn on_command_line(&mut self, cmd: &str) {
+        // P=k= marker arrives before C in the stream; update even if already in block.
+        self.pending_command = cmd.to_string();
+    }
+
+    pub fn on_command_start(&mut self) {
+        self.in_block = true;
+        self.pending_output_raw.clear();
+        self.pending_started_ms = now_ms();
+        // command text may have been set by a preceding P=k= marker; keep it.
+    }
+
+    /// Feed a raw PTY chunk while a block is active. Chunks arriving outside a
+    /// block are silently ignored.
+    pub fn feed(&mut self, chunk: &[u8]) {
+        if !self.in_block {
+            return;
+        }
+        self.pending_output_raw.extend_from_slice(chunk);
+        if self.pending_output_raw.len() > Self::MAX_OUTPUT_BYTES {
+            let excess = self.pending_output_raw.len() - Self::MAX_OUTPUT_BYTES;
+            self.pending_output_raw.drain(..excess);
+        }
+    }
+
+    /// Finalise the current block and push it to the ring buffer.
+    /// Returns the completed block (or None if no block was in progress).
+    pub fn on_command_finished(&mut self, exit_code: Option<i32>) -> Option<TermBlock> {
+        if !self.in_block {
+            return None;
+        }
+        self.in_block = false;
+        let stripped = crate::url_detector::strip_ansi(&self.pending_output_raw);
+        let output = String::from_utf8_lossy(&stripped).into_owned();
+        let block = TermBlock {
+            id: self.next_id,
+            command: std::mem::take(&mut self.pending_command),
+            output,
+            exit_code,
+            started_ms: self.pending_started_ms,
+            ended_ms: now_ms(),
+        };
+        self.next_id += 1;
+        if self.blocks.len() >= Self::MAX_BLOCKS {
+            self.blocks.pop_front();
+        }
+        self.blocks.push_back(block.clone());
+        self.pending_output_raw.clear();
+        Some(block)
+    }
+
+    /// Most-recent `limit` completed blocks, oldest first.
+    pub fn recent(&self, limit: usize) -> Vec<TermBlock> {
+        let skip = self.blocks.len().saturating_sub(limit);
+        self.blocks.iter().skip(skip).cloned().collect()
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 // ── Shell target ─────────────────────────────────────────────────────────────
 
@@ -61,7 +170,8 @@ pub enum ShellTarget {
 
 impl ShellTarget {
     /// Build the command-line string to pass to `CreateProcessW`.
-    fn cmdline(&self, startup_cwd: Option<&str>) -> Result<String> {
+    /// `ssh_extras` is only used by SSH/RemoteTmux variants; Local and Wsl ignore it.
+    fn cmdline(&self, startup_cwd: Option<&str>, ssh_extras: Option<&SshExtras<'_>>) -> Result<String> {
         match self {
             ShellTarget::Local => Ok(default_shell()),
             ShellTarget::Wsl { distro } => {
@@ -75,9 +185,19 @@ impl ShellTarget {
                     args.push("-d".to_string());
                     args.push(quote_windows_cmd_arg(d));
                 }
+                // Use `script` to allocate a fresh Linux PTY for bash. Without
+                // this, bash writes readline echo and the PS1 prompt to
+                // /dev/tty, which wsl.exe routes through the Windows console
+                // API rather than through ConPTY — so they appear in the dev
+                // terminal instead of wmux.  `script` relays all PTY output
+                // through its own stdout, which wsl.exe does route through
+                // ConPTY, so prompt and echo reach wmux correctly.
                 args.push("--".to_string());
+                args.push("script".to_string());
+                args.push("-q".to_string());
+                args.push("-c".to_string());
                 args.push("bash".to_string());
-                args.push("-i".to_string());
+                args.push("/dev/null".to_string());
                 Ok(if args.is_empty() {
                     wsl
                 } else {
@@ -85,7 +205,7 @@ impl ShellTarget {
                 })
             }
             ShellTarget::Ssh { host, user, port, identity_file } => {
-                Ok(build_ssh_cmdline(host, user.as_deref(), *port, identity_file.as_deref(), None))
+                Ok(build_ssh_cmdline(host, user.as_deref(), *port, identity_file.as_deref(), None, ssh_extras))
             }
             ShellTarget::RemoteTmux { host, user, port, identity_file, session_name, session_mode } => {
                 let remote_cmd = match session_mode {
@@ -108,6 +228,7 @@ impl ShellTarget {
                     *port,
                     identity_file.as_deref(),
                     Some(&remote_cmd),
+                    ssh_extras,
                 ))
             }
         }
@@ -139,12 +260,29 @@ impl ShellTarget {
     }
 }
 
+/// Per-session data injected into SSH connections.
+pub struct SshExtras<'a> {
+    /// wmux pane ID forwarded as WMUX_PANE_ID on the remote.
+    pub pane_id: &'a str,
+    /// Port for the reverse tunnel on the remote (random per session, 49152-65534).
+    pub tunnel_port: u16,
+}
+
+/// Derive a stable per-session tunnel port from the UUID pane ID.
+/// Uses the dynamic/private port range (49152-65534) to avoid well-known port conflicts.
+pub fn pane_id_to_tunnel_port(pane_id: &str) -> u16 {
+    let hex: String = pane_id.chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
+    let n = u32::from_str_radix(&hex, 16).unwrap_or(0);
+    49152 + (n % 16383) as u16
+}
+
 pub(crate) fn build_ssh_cmdline(
     host: &str,
     user: Option<&str>,
     port: Option<u16>,
     identity_file: Option<&str>,
     remote_command: Option<&str>,
+    extras: Option<&SshExtras<'_>>,
 ) -> String {
     let ssh = find_exe("ssh.exe").unwrap_or_else(|| "ssh.exe".to_string());
     let mut cmd = ssh;
@@ -155,6 +293,21 @@ pub(crate) fn build_ssh_cmdline(
     if let Some(id) = identity_file {
         let win_path = ssh_identity_path(id);
         cmd.push_str(&format!(" -i \"{win_path}\""));
+    }
+
+    if let Some(e) = extras {
+        // Reverse tunnel: remote:tunnel_port → Windows:7766 (our HTTP API).
+        // Binds loopback-only on the remote by default (GatewayPorts no).
+        cmd.push_str(&format!(" -R {}:127.0.0.1:{}", e.tunnel_port, crate::http_server::PORT));
+
+        // Forward wmux identity vars to the remote shell via SetEnv (OpenSSH 7.8+).
+        // One option per variable — some SSH servers/clients misparse multiple pairs,
+        // and the WMUX_API_BASE value contains a colon which can trip up parsers.
+        // Servers that don't honour SetEnv silently drop these — connection still works.
+        cmd.push_str(" -o \"SetEnv WMUX=1\"");
+        cmd.push_str(&format!(" -o \"SetEnv WMUX_PANE_ID={}\"", e.pane_id));
+        cmd.push_str(&format!(" -o \"SetEnv WMUX_API_PORT={}\"", e.tunnel_port));
+        cmd.push_str(&format!(" -o \"SetEnv WMUX_API_BASE=http://localhost:{}\"", e.tunnel_port));
     }
 
     cmd.push_str(" -o RequestTTY=force");
@@ -251,6 +404,8 @@ struct SessionEntry {
     label: String,
     /// Rolling raw-byte output buffer (last 256 KB) for `capture-pane` support.
     output_buf: Arc<Mutex<Vec<u8>>>,
+    /// OSC 133 block history for agent queries.
+    block_store: Arc<Mutex<BlockStore>>,
 }
 
 impl Clone for SessionEntry {
@@ -259,6 +414,7 @@ impl Clone for SessionEntry {
             session: self.session.clone(),
             label: self.label.clone(),
             output_buf: self.output_buf.clone(),
+            block_store: self.block_store.clone(),
         }
     }
 }
@@ -288,9 +444,12 @@ impl SessionManager {
         previous_cwd: Option<&str>,
     ) -> Result<(String, String)> {
         let startup_cwd = cwd.map(str::trim).filter(|value| !value.is_empty());
-        let cmdline = target.cmdline(startup_cwd)?;
-        let label = target.label();
         let id = Uuid::new_v4().to_string();
+        let tunnel_port = pane_id_to_tunnel_port(&id);
+        let ssh_extras = matches!(target, ShellTarget::Ssh { .. } | ShellTarget::RemoteTmux { .. })
+            .then(|| SshExtras { pane_id: &id, tunnel_port });
+        let cmdline = target.cmdline(startup_cwd, ssh_extras.as_ref())?;
+        let label = target.label();
         let tmux_pane = format!("%{}", &id[..8]);
         let tmux_session = format!("wmux,{},0", &id[..8]);
 
@@ -305,6 +464,19 @@ impl SessionManager {
         // For SSH: OpenSSH reads TERM from the local env and sends it in the
         // PTY-request to the server, so the remote $TERM is set automatically.
         // COLORTERM is forwarded via SendEnv=COLORTERM (when server permits it).
+        // SSH sessions point at the per-session reverse-tunnel port (loopback on the remote).
+        // WSL sessions use the Windows host IP (the WSL2 gateway) because WSL2's localhost
+        // forwarding proxy is unreliable for 127.0.0.1 binds; the gateway IP always works.
+        // Local sessions use plain localhost.
+        let api_base = if let Some(ref e) = ssh_extras {
+            format!("http://localhost:{}", e.tunnel_port)
+        } else if matches!(target, ShellTarget::Wsl { .. }) {
+            let host_ip = wsl_windows_host_ip().unwrap_or_else(|| "localhost".to_string());
+            format!("http://{}:{}", host_ip, crate::http_server::PORT)
+        } else {
+            format!("http://localhost:{}", crate::http_server::PORT)
+        };
+
         let mut env_overrides = vec![
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -312,24 +484,28 @@ impl SessionManager {
             ("TMUX_PANE".to_string(), tmux_pane.clone()),
             ("WMUX".to_string(), "1".to_string()),
             ("WMUX_PANE_ID".to_string(), id.clone()),
+            ("WMUX_API_BASE".to_string(), api_base),
         ];
         if matches!(target, ShellTarget::Wsl { .. }) {
+            // WSLENV tells wsl.exe which Windows env vars to forward into Linux.
+            // WMUX must be listed so the shell-integration script sees WMUX=1.
+            let mut wslenv_keys = vec!["WMUX", "WMUX_PANE_ID", "WMUX_API_BASE"];
             if let Some(previous_cwd) = previous_cwd.map(str::trim).filter(|value| !value.is_empty()) {
                 env_overrides.push(("OLDPWD".to_string(), previous_cwd.to_string()));
-                env_overrides.push((
-                    "WSLENV".to_string(),
-                    append_wslenv_value(std::env::var("WSLENV").ok(), "OLDPWD"),
-                ));
+                wslenv_keys.push("OLDPWD");
             }
-        }
-        let env_override_refs: Vec<(&str, &str)> = if matches!(target, ShellTarget::Wsl { .. }) {
-            Vec::new()
-        } else {
-            env_overrides
+            let wslenv_base = std::env::var("WSLENV").ok();
+            let wslenv = wslenv_keys
                 .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect()
-        };
+                .fold(wslenv_base.unwrap_or_default(), |acc, key| {
+                    append_wslenv_value(if acc.is_empty() { None } else { Some(acc) }, key)
+                });
+            env_overrides.push(("WSLENV".to_string(), wslenv));
+        }
+        let env_override_refs: Vec<(&str, &str)> = env_overrides
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
 
         let create_process_cwd = match &target {
             ShellTarget::Local => startup_cwd,
@@ -338,7 +514,7 @@ impl SessionManager {
 
         let session = ConPtySession::spawn(&cmdline, cols, rows, &env_override_refs, create_process_cwd)?;
 
-        // Start a background task that feeds raw output into the capture buffer.
+        // Background task: feed raw output into the rolling capture buffer.
         let output_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let buf_feed = output_buf.clone();
         let mut rx_buf = session.output_tx.subscribe();
@@ -346,7 +522,6 @@ impl SessionManager {
             while let Ok(chunk) = rx_buf.recv().await {
                 let mut b = buf_feed.lock().await;
                 b.extend_from_slice(&chunk);
-                // Keep last 256 KB to bound memory use.
                 const MAX: usize = 256 * 1024;
                 if b.len() > MAX {
                     let excess = b.len() - MAX;
@@ -355,9 +530,11 @@ impl SessionManager {
             }
         });
 
+        let block_store: Arc<Mutex<BlockStore>> = Arc::new(Mutex::new(BlockStore::new()));
+
         self.sessions.lock().await.insert(
             id.clone(),
-            SessionEntry { session: Arc::new(session), label: label.clone(), output_buf },
+            SessionEntry { session: Arc::new(session), label: label.clone(), output_buf, block_store },
         );
         Ok((id, label))
     }
@@ -384,6 +561,10 @@ impl SessionManager {
 
     pub async fn get(&self, id: &str) -> Option<Arc<ConPtySession>> {
         self.sessions.lock().await.get(id).map(|e| e.session.clone())
+    }
+
+    pub async fn get_block_store(&self, id: &str) -> Option<Arc<Mutex<BlockStore>>> {
+        self.sessions.lock().await.get(id).map(|e| e.block_store.clone())
     }
 
     /// Resolve a human name to its `ConPtySession` (for IPC send-keys).
@@ -439,7 +620,7 @@ mod tests {
 
     #[test]
     fn local_target_ignores_startup_cwd_in_cmdline() {
-        let cmdline = ShellTarget::Local.cmdline(Some("C:\\repo")).unwrap_or_default();
+        let cmdline = ShellTarget::Local.cmdline(Some("C:\\repo"), None).unwrap_or_default();
         assert!(!cmdline.is_empty());
         assert!(!cmdline.contains("C:\\repo"));
     }
@@ -447,7 +628,7 @@ mod tests {
     #[test]
     fn wsl_target_uses_cd_when_restoring_linux_cwd() {
         let cmdline = ShellTarget::Wsl { distro: Some("Ubuntu".to_string()) }
-            .cmdline(Some("/home/dan/my project"))
+            .cmdline(Some("/home/dan/my project"), None)
             .unwrap_or_default();
         assert!(cmdline.contains("--cd \"/home/dan/my project\""));
         assert!(cmdline.contains("-d Ubuntu"));
@@ -466,6 +647,111 @@ mod tests {
         assert_eq!(append_wslenv_value(Some("FOO:BAR".to_string()), "OLDPWD"), "FOO:BAR:OLDPWD");
         assert_eq!(append_wslenv_value(Some("FOO:OLDPWD".to_string()), "OLDPWD"), "FOO:OLDPWD");
     }
+
+    // ── BlockStore ────────────────────────────────────────────────────────────
+
+    use super::BlockStore;
+
+    #[test]
+    fn block_store_captures_command_and_output() {
+        let mut s = BlockStore::new();
+        s.on_command_line("echo hello");
+        s.on_command_start();
+        s.feed(b"hello\r\n");
+        let block = s.on_command_finished(Some(0)).unwrap();
+        assert_eq!(block.id, 0);
+        assert_eq!(block.command, "echo hello");
+        assert!(block.output.contains("hello"), "output: {:?}", block.output);
+        assert_eq!(block.exit_code, Some(0));
+        assert_eq!(s.recent(10).len(), 1);
+    }
+
+    #[test]
+    fn block_store_strips_ansi_from_output() {
+        let mut s = BlockStore::new();
+        s.on_command_start();
+        s.feed(b"\x1b[32mgreen text\x1b[0m\r\nline2\r\n");
+        let block = s.on_command_finished(Some(0)).unwrap();
+        assert!(!block.output.contains('\x1b'), "ANSI not stripped: {:?}", block.output);
+        assert!(block.output.contains("green text"));
+        assert!(block.output.contains("line2"));
+    }
+
+    #[test]
+    fn block_store_ignores_feed_outside_block() {
+        let mut s = BlockStore::new();
+        s.feed(b"noise before any block");
+        s.on_command_start();
+        s.feed(b"real output\r\n");
+        let block = s.on_command_finished(Some(0)).unwrap();
+        assert!(!block.output.contains("noise"));
+        assert!(block.output.contains("real output"));
+    }
+
+    #[test]
+    fn block_store_command_line_before_start_is_kept() {
+        let mut s = BlockStore::new();
+        s.on_command_line("git status");   // P=k= arrives before C in stream
+        s.on_command_start();
+        s.feed(b"nothing to commit\r\n");
+        let block = s.on_command_finished(Some(0)).unwrap();
+        assert_eq!(block.command, "git status");
+    }
+
+    #[test]
+    fn block_store_no_block_in_progress_returns_none_on_finish() {
+        let mut s = BlockStore::new();
+        assert!(s.on_command_finished(Some(0)).is_none());
+    }
+
+    #[test]
+    fn block_store_recent_returns_oldest_first_up_to_limit() {
+        let mut s = BlockStore::new();
+        for i in 0u8..5 {
+            s.on_command_start();
+            s.feed(&[b'0' + i, b'\n']);
+            s.on_command_finished(Some(i as i32));
+        }
+        let r = s.recent(3);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].id, 2);
+        assert_eq!(r[2].id, 4);
+        assert_eq!(r[2].exit_code, Some(4));
+    }
+
+    #[test]
+    fn block_store_ring_buffer_evicts_oldest() {
+        let mut s = BlockStore::new();
+        for _ in 0..(BlockStore::MAX_BLOCKS + 5) {
+            s.on_command_start();
+            s.feed(b"x");
+            s.on_command_finished(Some(0));
+        }
+        let r = s.recent(BlockStore::MAX_BLOCKS + 100);
+        assert_eq!(r.len(), BlockStore::MAX_BLOCKS);
+        // The oldest visible block should have id = 5 (first 5 were evicted).
+        assert_eq!(r[0].id as usize, 5);
+    }
+}
+
+// ── WSL host IP ──────────────────────────────────────────────────────────────
+
+/// Return the Windows host IP as seen from inside WSL2 (the default-route gateway).
+/// WSL2's localhost forwarding is unreliable for 127.0.0.1 binds, so callers that
+/// need to reach a Windows service from within WSL should use this IP instead.
+pub fn wsl_windows_host_ip() -> Option<String> {
+    // `wsl -- ip route show default` prints e.g. "default via 172.30.32.1 dev eth0"
+    let output = std::process::Command::new("wsl.exe")
+        .args(["--", "ip", "route", "show", "default"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Extract the IP after "via "
+    stdout
+        .lines()
+        .find(|l| l.contains("default"))
+        .and_then(|l| l.split_whitespace().nth(2))
+        .map(str::to_string)
 }
 
 // ── WSL distro enumeration ────────────────────────────────────────────────────

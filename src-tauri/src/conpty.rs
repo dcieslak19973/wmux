@@ -139,8 +139,6 @@ impl ConPtySession {
                 .as_ref()
                 .map(|v| v.as_ptr() as *const std::ffi::c_void);
 
-            // CREATE_UNICODE_ENVIRONMENT (0x400) must be set when passing a
-            // UTF-16 env block.
             use windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
             let creation_flags = EXTENDED_STARTUPINFO_PRESENT
                 | if lp_env.is_some() { CREATE_UNICODE_ENVIRONMENT } else {

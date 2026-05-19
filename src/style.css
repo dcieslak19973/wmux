@@ -2011,6 +2011,17 @@ body.has-tabs #empty-state { display: none; }
   background: rgba(255,255,255,0.08);
   margin: 6px 2px;
 }
+
+.context-menu-label {
+  padding: 5px 12px 2px;
+  font-size: 10px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  cursor: default;
+  user-select: none;
+}
 .settings-close:hover { color: var(--close-hover); }
 
 .settings-body {

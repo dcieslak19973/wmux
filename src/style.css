@@ -2039,6 +2039,7 @@ body.has-tabs #empty-state { display: none; }
   border-top: 1px solid var(--border);
   margin-top: auto;
 }
+#btn-agent-sidebar,
 #btn-session-vault,
 #btn-settings {
   background: none;
@@ -2051,11 +2052,13 @@ body.has-tabs #empty-state { display: none; }
   transition: color 0.12s, background 0.12s;
   flex-shrink: 0;
 }
+#btn-agent-sidebar,
 #btn-session-vault {
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.08em;
 }
+#btn-agent-sidebar:hover,
 #btn-session-vault:hover,
 #btn-settings:hover { color: var(--accent); background: var(--bg-tab-hover); }
 

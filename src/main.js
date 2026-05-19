@@ -114,12 +114,12 @@ const SETTINGS_DEFAULTS = {
 const SAVED_SSH_TARGETS_KEY = 'wmux-saved-ssh-targets';
 
 const FIX_AGENTS = [
-  { key: 'claude',   label: 'Claude',   bash: (b) => `claude $'${b}'`,           ps: (b) => `claude "${b}"` },
-  { key: 'codex',    label: 'Codex',    bash: (b) => `codex $'${b}'`,            ps: (b) => `codex "${b}"` },
-  { key: 'gemini',   label: 'Gemini',   bash: (b) => `gemini $'${b}'`,           ps: (b) => `gemini "${b}"` },
-  { key: 'opencode', label: 'OpenCode', bash: (b) => `opencode $'${b}'`,         ps: (b) => `opencode "${b}"` },
-  { key: 'aider',    label: 'Aider',    bash: (b) => `aider --message $'${b}'`,  ps: (b) => `aider --message "${b}"` },
-  { key: 'amp',      label: 'Amp',      bash: (b) => `amp $'${b}'`,              ps: (b) => `amp "${b}"` },
+  { key: 'claude',   label: 'Claude',   color: '#d97706', bash: (b) => `claude $'${b}'`,           ps: (b) => `claude "${b}"` },
+  { key: 'codex',    label: 'Codex',    color: '#10b981', bash: (b) => `codex $'${b}'`,            ps: (b) => `codex "${b}"` },
+  { key: 'gemini',   label: 'Gemini',   color: '#4285f4', bash: (b) => `gemini $'${b}'`,           ps: (b) => `gemini "${b}"` },
+  { key: 'opencode', label: 'OpenCode', color: '#a78bfa', bash: (b) => `opencode $'${b}'`,         ps: (b) => `opencode "${b}"` },
+  { key: 'aider',    label: 'Aider',    color: '#ec4899', bash: (b) => `aider --message $'${b}'`,  ps: (b) => `aider --message "${b}"` },
+  { key: 'amp',      label: 'Amp',      color: '#f59e0b', bash: (b) => `amp $'${b}'`,              ps: (b) => `amp "${b}"` },
 ];
 
 function loadSettings() {
@@ -1186,6 +1186,12 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
           e.stopPropagation();
           const shell = isWsl || isSsh ? 'bash' : 'powershell';
           const body = buildFixBody(block.rustBlock);
+          const preferred = panes.get(sessionId)?.preferredAgent;
+          const fixAgent = preferred ? FIX_AGENTS.find((a) => a.key === preferred) : null;
+          if (fixAgent) {
+            invoke('write_to_session', { id: sessionId, data: buildFixCmd(fixAgent, body, shell) }).catch(() => {});
+            return;
+          }
           const r = btn.getBoundingClientRect();
           showContextMenu(
             FIX_AGENTS.map((agent) => ({
@@ -1379,6 +1385,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn" data-action="zoom" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up shell integration">&#x26a1;</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code MCP setup command">MCP</button>' : ''}
+    <button class="pane-tb-btn pane-tb-agent" data-action="agent" title="Set preferred AI agent for this pane">AI</button>
     <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
@@ -1434,6 +1441,22 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
   }
 
+  const agentBtn = toolbarEl.querySelector('[data-action="agent"]');
+  agentBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const r = agentBtn.getBoundingClientRect();
+    const pane = panes.get(sessionId);
+    const items = [
+      { label: 'Auto-detect', action: () => { pane.preferredAgent = null; agentBtn.textContent = 'AI'; agentBtn.style.color = ''; } },
+      { type: 'separator' },
+      ...FIX_AGENTS.map((agent) => ({
+        label: agent.label,
+        action: () => { pane.preferredAgent = agent.key; agentBtn.textContent = agent.label; agentBtn.style.color = agent.color ?? ''; },
+      })),
+    ];
+    showContextMenu(items, r.left, r.bottom + 4);
+  });
+
   const prBtn = toolbarEl.querySelector('[data-action="pr-review"]');
   prBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1443,6 +1466,56 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
 
   leafEl.appendChild(toolbarEl);
+
+  // ── Toolbar auto-hide ─────────────────────────────────────────────────────
+  const hotspotEl = document.createElement('div');
+  hotspotEl.className = 'toolbar-hotspot';
+  leafEl.appendChild(hotspotEl);
+
+  let tbHideTimer = null;
+  let tbDwellTimer = null;
+
+  function tbShow() {
+    clearTimeout(tbHideTimer);
+    tbHideTimer = null;
+    toolbarEl.classList.add('toolbar-visible');
+  }
+  function tbHide() {
+    toolbarEl.classList.remove('toolbar-visible');
+    tbHideTimer = null;
+  }
+  function tbScheduleHide(delay) {
+    clearTimeout(tbHideTimer);
+    tbHideTimer = setTimeout(tbHide, delay);
+  }
+
+  function tbFlash() {
+    tbShow();
+    tbScheduleHide(2000);
+  }
+
+  // Show briefly on creation
+  tbFlash();
+
+  hotspotEl.addEventListener('mouseenter', () => {
+    clearTimeout(tbHideTimer);
+    tbHideTimer = null;
+    tbDwellTimer = setTimeout(tbShow, 320);
+  });
+  hotspotEl.addEventListener('mouseleave', () => {
+    clearTimeout(tbDwellTimer);
+    tbDwellTimer = null;
+    if (!toolbarEl.matches(':hover')) tbScheduleHide(500);
+  });
+
+  toolbarEl.addEventListener('mouseenter', () => {
+    clearTimeout(tbHideTimer);
+    tbHideTimer = null;
+  });
+  toolbarEl.addEventListener('mouseleave', () => {
+    tbScheduleHide(700);
+  });
+  // ─────────────────────────────────────────────────────────────────────────
 
   if (isRemoteTmuxTarget(target)) {
     leafEl.classList.add('pane-remote-tmux');
@@ -1473,6 +1546,8 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     outputSnapshot,
     gitContext: null,
     labelOverride: initialState?.labelOverride ?? null,
+    preferredAgent: null,
+    tbFlash,
     lastSessionVaultEntryId: typeof initialState?.vaultEntryId === 'string' ? initialState.vaultEntryId : null,
     lastSessionVaultSignature: null,
     contextBadgeEl,
@@ -1635,6 +1710,7 @@ function activatePane(paneId) {
   clearActiveSurface();
   activePaneId = paneId;
   pane.domEl.classList.add('active-pane');
+  pane.tbFlash?.();
   const tab = tabs.get(pane.tabId);
   if (tab) tab.lastActiveSurfaceEl = pane.domEl;
   setPaneRing(paneId, false);
@@ -3328,6 +3404,10 @@ prReviewRuntime = createPrReviewRuntime({
   setActivePrReviewLabel: (label) => { activePrReviewLabel = label; },
   clearActiveSurface,
   escHtml,
+  getActivePaneId: () => activePaneId,
+  fixAgents: FIX_AGENTS,
+  showContextMenu,
+  getTargetKind,
 });
 
 agentSidebarRuntime = createAgentSidebarRuntime({

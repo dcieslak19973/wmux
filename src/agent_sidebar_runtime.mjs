@@ -24,6 +24,7 @@ export function createAgentSidebarRuntime({
   };
 
   function detectAgent(pane) {
+    if (pane.preferredAgent && AGENTS[pane.preferredAgent]) return AGENTS[pane.preferredAgent];
     if (!pane.blocks?.length) return null;
     for (let i = pane.blocks.length - 1; i >= 0; i--) {
       const cmd = pane.blocks[i].command;

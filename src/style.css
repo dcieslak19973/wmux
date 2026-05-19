@@ -990,6 +990,157 @@ body.has-tabs #empty-state { display: none; }
   background: rgba(255,255,255,0.02);
 }
 
+/* ── Agent sidebar (Ctrl+Shift+A) ───────────────────────────────── */
+
+@keyframes agent-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(74,222,128,0.5); }
+  50%       { opacity: 0.7; box-shadow: 0 0 0 4px rgba(74,222,128,0); }
+}
+
+.agent-sidebar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 300px;
+  max-height: calc(100% - 16px);
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+}
+
+.agent-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.agent-sidebar-title { flex: 1; }
+
+.agent-sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-sidebar-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px;
+}
+
+.agent-sidebar-empty {
+  padding: 16px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.agent-sidebar-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background: rgba(255,255,255,0.04);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.agent-sidebar-item:hover { background: rgba(255,255,255,0.08); }
+.agent-sidebar-item.active { background: rgba(124,106,247,0.15); border: 1px solid rgba(124,106,247,0.3); }
+.agent-sidebar-item.running { background: rgba(74,222,128,0.06); }
+
+.agent-item-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.agent-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.agent-status-dot.running {
+  background: #4ade80;
+  animation: agent-pulse 1.4s ease-in-out infinite;
+}
+.agent-status-dot.idle { background: #475569; }
+
+.agent-item-name {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-kill-btn {
+  opacity: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  transition: opacity 0.1s;
+}
+.agent-sidebar-item:hover .agent-kill-btn { opacity: 1; }
+.agent-kill-btn:hover { color: #f87171; }
+
+.agent-item-cmd {
+  font-family: monospace;
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+.agent-item-cmd-empty { color: #334155; font-style: italic; }
+
+.agent-item-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.agent-item-ws {
+  font-size: 10px;
+  color: #64748b;
+}
+
+.agent-item-branch {
+  font-size: 10px;
+  color: #7dd3fc;
+  background: rgba(125,211,252,0.1);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.agent-item-cwd {
+  font-size: 10px;
+  color: #64748b;
+  font-family: monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
 /* ── Notification panel (Ctrl+I) ───────────────────────────────── */
 .notif-panel {
   position: absolute;
@@ -1888,6 +2039,7 @@ body.has-tabs #empty-state { display: none; }
   border-top: 1px solid var(--border);
   margin-top: auto;
 }
+#btn-agent-sidebar,
 #btn-session-vault,
 #btn-settings {
   background: none;
@@ -1900,11 +2052,13 @@ body.has-tabs #empty-state { display: none; }
   transition: color 0.12s, background 0.12s;
   flex-shrink: 0;
 }
+#btn-agent-sidebar,
 #btn-session-vault {
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.08em;
 }
+#btn-agent-sidebar:hover,
 #btn-session-vault:hover,
 #btn-settings:hover { color: var(--accent); background: var(--bg-tab-hover); }
 

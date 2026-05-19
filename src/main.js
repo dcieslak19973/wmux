@@ -34,6 +34,7 @@ import { createPaneAuxRuntime } from './pane_aux_runtime.mjs';
 import { createUiPanelsRuntime } from './ui_panels_runtime.mjs';
 import { createSurfaceRuntime } from './surfaces_runtime.mjs';
 import { createPrReviewRuntime } from './pr_review_runtime.mjs';
+import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
 import {
   createWorkspaceManager,
   DEFAULT_WORKSPACE_THEME_ID,
@@ -86,6 +87,7 @@ let browserPanes = new Map();
 let surfaceRuntime = null;
 let panelsRuntime = null;
 let prReviewRuntime = null;
+let agentSidebarRuntime = null;
 let paneAuxRuntime = null;
 
 const workspaces = new Map();
@@ -3308,6 +3310,18 @@ prReviewRuntime = createPrReviewRuntime({
   escHtml,
 });
 
+agentSidebarRuntime = createAgentSidebarRuntime({
+  document,
+  panes,
+  listPaneSummaries,
+  activateTab,
+  activatePane,
+  closePane,
+  createTab,
+  getDefaultTarget,
+  escHtml,
+});
+
 // Layout persistence
 
 const layoutPersistence = createLayoutPersistence({
@@ -3410,6 +3424,7 @@ function scheduleLayoutSave(delay = 300) {
 
 function markLayoutDirty({ immediate = false } = {}) {
   lastSavedLayoutJson = null;
+  agentSidebarRuntime?.refresh();
   if (immediate) return persistLayoutNow({ reason: 'immediate' });
   scheduleLayoutSave();
   return Promise.resolve(false);
@@ -3457,6 +3472,7 @@ document.addEventListener('keydown', (e) => {
   }
 
   if (ctrl && shift && key === 'T') { e.preventDefault(); createTab(getDefaultTarget()); return; }
+  if (ctrl && shift && !alt && key.toUpperCase() === 'A') { e.preventDefault(); agentSidebarRuntime?.toggle(); return; }
   if (ctrl && shift && key === 'W') { e.preventDefault(); closeCurrentSurface(); return; }
   // Ctrl+W without shift: close active pane/surface. Intercepted here so WebView2's
   // built-in "close window" shortcut doesn't fire and take down the whole app.
@@ -3614,6 +3630,7 @@ document.addEventListener('keydown', (e) => {
 btnNewTab.addEventListener('click', () => createTab(getDefaultTarget()));
 btnNewTabMore.addEventListener('click', showNewTabPopover);
 updateNewTabTooltip();
+document.getElementById('btn-agent-sidebar')?.addEventListener('click', () => agentSidebarRuntime?.toggle());
 document.getElementById('btn-session-vault')?.addEventListener('click', () => { void toggleSessionVaultPanel(); });
 document.getElementById('btn-settings')?.addEventListener('click', showSettingsPanel);
 

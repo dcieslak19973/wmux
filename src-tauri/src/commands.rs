@@ -71,6 +71,22 @@ pub struct GitContextResult {
     pub is_worktree: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PrDiffFile {
+    pub path: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrDiffSummary {
+    pub base_ref: String,
+    pub files: Vec<PrDiffFile>,
+    pub total_additions: usize,
+    pub total_deletions: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionVaultEntrySummary {
     pub id: String,
@@ -1178,6 +1194,82 @@ fn git_stdout(cwd: &str, args: &[&str]) -> Result<Option<String>, String> {
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(if value.is_empty() { None } else { Some(value) })
+}
+
+fn detect_base_ref(cwd: &str) -> String {
+    let candidates = [
+        &["rev-parse", "--abbrev-ref", "@{upstream}"][..],
+        &["rev-parse", "--verify", "origin/HEAD"],
+        &["rev-parse", "--verify", "origin/main"],
+        &["rev-parse", "--verify", "origin/master"],
+        &["rev-parse", "--verify", "main"],
+        &["rev-parse", "--verify", "master"],
+    ];
+    for args in &candidates {
+        if let Ok(Some(val)) = git_stdout(cwd, args) {
+            // For upstream like "origin/main", keep as-is; for a SHA (verify), keep as-is.
+            return val;
+        }
+    }
+    "HEAD~1".to_string()
+}
+
+/// Return the list of files changed between base and HEAD, with +/- stats.
+#[tauri::command]
+pub async fn get_pr_diff_summary(cwd: String, base: Option<String>) -> Result<PrDiffSummary, String> {
+    let base_ref = base.filter(|s| !s.is_empty()).unwrap_or_else(|| detect_base_ref(&cwd));
+
+    let numstat = git_stdout(&cwd, &["diff", "--numstat", &base_ref])?
+        .unwrap_or_default();
+
+    let mut files = Vec::new();
+    let mut total_additions = 0usize;
+    let mut total_deletions = 0usize;
+
+    for line in numstat.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let additions: usize = parts[0].parse().unwrap_or(0);
+        let deletions: usize = parts[1].parse().unwrap_or(0);
+        let raw_path = parts[2];
+
+        // Detect rename: "old/path => new/path" or "{old => new}/tail"
+        let (path, status) = if raw_path.contains(" => ") {
+            // Extract the destination path.
+            let dest = if let (Some(open), Some(close)) = (raw_path.find('{'), raw_path.find('}')) {
+                let prefix = &raw_path[..open];
+                let suffix = &raw_path[close + 1..];
+                let alternatives = &raw_path[open + 1..close];
+                let new_part = alternatives.split(" => ").nth(1).unwrap_or("").trim();
+                format!("{prefix}{new_part}{suffix}")
+            } else {
+                raw_path.split(" => ").nth(1).unwrap_or(raw_path).trim().to_string()
+            };
+            (dest, "renamed".to_string())
+        } else {
+            (raw_path.to_string(), "modified".to_string())
+        };
+
+        // Refine status from additions/deletions: all adds = new file, all dels = deleted.
+        let status = if additions > 0 && deletions == 0 { "added".to_string() }
+                     else if additions == 0 && deletions > 0 { "deleted".to_string() }
+                     else { status };
+
+        total_additions += additions;
+        total_deletions += deletions;
+        files.push(PrDiffFile { path, additions, deletions, status });
+    }
+
+    Ok(PrDiffSummary { base_ref, files, total_additions, total_deletions })
+}
+
+/// Return the raw unified diff for a single file between base and HEAD.
+#[tauri::command]
+pub async fn get_pr_file_diff(cwd: String, base: String, path: String) -> Result<String, String> {
+    git_stdout(&cwd, &["diff", &base, "--", &path])
+        .map(|opt| opt.unwrap_or_default())
 }
 
 fn resolve_git_path(cwd: &Path, raw: &str) -> PathBuf {

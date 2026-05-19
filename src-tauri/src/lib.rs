@@ -66,6 +66,8 @@ pub fn run() {
             commands::check_shell_integration_ssh,
             commands::install_shell_integration_ssh,
             commands::get_blocks,
+            commands::get_pr_diff_summary,
+            commands::get_pr_file_diff,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

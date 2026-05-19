@@ -2343,4 +2343,123 @@ body.has-tabs #empty-state { display: none; }
   color: #fff;
 }
 
+/* ── PR Review panel ───────────────────────────────────────────────────── */
+
+.pr-review-pane-leaf {
+  display: flex;
+  flex-direction: column;
+  background: #0f172a;
+  color: #e2e8f0;
+  overflow: hidden;
+}
+
+.pr-review-bar {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-bottom: 1px solid #1e293b;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pr-review-title { color: #e2e8f0; }
+
+.pr-review-base-badge {
+  font-size: 10px;
+  font-weight: 400;
+  color: #94a3b8;
+  background: #1e293b;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.pr-review-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 13px;
+  line-height: 1;
+}
+.pr-review-btn:hover { background: #1e293b; color: #e2e8f0; }
+
+.pr-review-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.pr-review-files {
+  width: 220px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid #1e293b;
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.pr-review-file-item {
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.pr-review-file-item:hover { background: #1e293b; }
+.pr-review-file-item.selected { background: #1e3a5f; }
+
+.pr-review-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #cbd5e1;
+}
+
+.pr-review-file-stats {
+  font-size: 10px;
+  flex-shrink: 0;
+  font-family: monospace;
+}
+.pr-review-file-stats .adds { color: #4ade80; }
+.pr-review-file-stats .dels { color: #f87171; }
+
+.pr-review-diff {
+  flex: 1;
+  overflow: auto;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.diff-hunk-header {
+  background: #1e3a5f;
+  color: #7dd3fc;
+  padding: 2px 8px;
+  white-space: pre;
+}
+
+.diff-line {
+  padding: 0 8px;
+  white-space: pre;
+}
+.diff-add { background: rgba(74,222,128,0.12); color: #86efac; }
+.diff-del { background: rgba(248,113,113,0.12); color: #fca5a5; }
+.diff-ctx { color: #94a3b8; }
+
+.pr-review-empty {
+  padding: 16px;
+  color: #64748b;
+  font-size: 13px;
+}
+
 

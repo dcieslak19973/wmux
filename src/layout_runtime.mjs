@@ -71,6 +71,9 @@ export function createLayoutPersistence({
         source: markdown.path ? null : markdown.source,
       } : null;
     }
+    // Ephemeral panes (PR review, etc.) are not persisted — serialize as null
+    // so the split collapses to just the terminal on restore.
+    if (el.classList.contains('pr-review-pane-leaf')) return null;
     if (el.classList.contains('pane-leaf')) {
       const pane = panes.get(el.dataset.sessionId);
       return buildTerminalPaneSnapshot(pane);
@@ -79,14 +82,16 @@ export function createLayoutPersistence({
       const dir = el.classList.contains('pane-split-h') ? 'h' : 'v';
       const children = [...el.children].filter((child) => !child.classList.contains('pane-divider'));
       const [childA, sideBEl] = children;
+      const a = serializePaneTree(childA);
+      const b = serializePaneTree(sideBEl.firstElementChild);
+      // Collapse splits where one side is ephemeral (serialized as null).
+      if (!a && !b) return null;
+      if (!b) return a;
+      if (!a) return b;
       const flexA = parseFloat(childA.style.flex) || 1;
       const flexB = parseFloat(sideBEl.style.flex) || 1;
       const ratio = flexA / (flexA + flexB);
-      return {
-        kind: 'split', dir, ratio,
-        a: serializePaneTree(childA),
-        b: serializePaneTree(sideBEl.firstElementChild),
-      };
+      return { kind: 'split', dir, ratio, a, b };
     }
     return el.firstElementChild ? serializePaneTree(el.firstElementChild) : null;
   }

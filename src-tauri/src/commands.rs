@@ -71,6 +71,23 @@ pub struct GitContextResult {
     pub is_worktree: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PrDiffFile {
+    pub path: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrDiffSummary {
+    pub base_ref: String,
+    pub resolved_cwd: String,
+    pub files: Vec<PrDiffFile>,
+    pub total_additions: usize,
+    pub total_deletions: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionVaultEntrySummary {
     pub id: String,
@@ -1178,6 +1195,149 @@ fn git_stdout(cwd: &str, args: &[&str]) -> Result<Option<String>, String> {
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(if value.is_empty() { None } else { Some(value) })
+}
+
+fn detect_base_ref(cwd: &str) -> String {
+    // For PR review we want the main branch, NOT the upstream tracking branch
+    // (@{upstream} points to origin/<current-branch> which is at HEAD — empty diff).
+    let candidates = ["origin/main", "origin/master", "main", "master"];
+    for candidate in &candidates {
+        if git_stdout(cwd, &["rev-parse", "--verify", candidate])
+            .unwrap_or(None)
+            .is_some()
+        {
+            return candidate.to_string();
+        }
+    }
+    "HEAD~1".to_string()
+}
+
+/// Return the list of files changed between base and HEAD, with +/- stats.
+#[tauri::command]
+pub async fn get_pr_diff_summary(cwd: String, base: Option<String>) -> Result<PrDiffSummary, String> {
+    let cwd = if cwd.is_empty() {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        cwd
+    };
+    let base_ref = base.filter(|s| !s.is_empty()).unwrap_or_else(|| detect_base_ref(&cwd));
+
+    let numstat = git_stdout(&cwd, &["diff", "--numstat", &base_ref])?
+        .unwrap_or_default();
+
+    let mut files = Vec::new();
+    let mut total_additions = 0usize;
+    let mut total_deletions = 0usize;
+
+    for line in numstat.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let additions: usize = parts[0].parse().unwrap_or(0);
+        let deletions: usize = parts[1].parse().unwrap_or(0);
+        let raw_path = parts[2];
+
+        // Detect rename: "old/path => new/path" or "{old => new}/tail"
+        let (path, status) = if raw_path.contains(" => ") {
+            // Extract the destination path.
+            let dest = if let (Some(open), Some(close)) = (raw_path.find('{'), raw_path.find('}')) {
+                let prefix = &raw_path[..open];
+                let suffix = &raw_path[close + 1..];
+                let alternatives = &raw_path[open + 1..close];
+                let new_part = alternatives.split(" => ").nth(1).unwrap_or("").trim();
+                format!("{prefix}{new_part}{suffix}")
+            } else {
+                raw_path.split(" => ").nth(1).unwrap_or(raw_path).trim().to_string()
+            };
+            (dest, "renamed".to_string())
+        } else {
+            (raw_path.to_string(), "modified".to_string())
+        };
+
+        // Refine status from additions/deletions: all adds = new file, all dels = deleted.
+        let status = if additions > 0 && deletions == 0 { "added".to_string() }
+                     else if additions == 0 && deletions > 0 { "deleted".to_string() }
+                     else { status };
+
+        total_additions += additions;
+        total_deletions += deletions;
+        files.push(PrDiffFile { path, additions, deletions, status });
+    }
+
+    Ok(PrDiffSummary { base_ref, resolved_cwd: cwd, files, total_additions, total_deletions })
+}
+
+/// Return the raw unified diff for a single file between base and HEAD.
+#[tauri::command]
+pub async fn get_pr_file_diff(cwd: String, base: String, path: String) -> Result<String, String> {
+    let cwd = if cwd.is_empty() {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        cwd
+    };
+    git_stdout(&cwd, &["diff", &base, "--", &path])
+        .map(|opt| opt.unwrap_or_default())
+}
+
+/// Ask Claude about a diff context from the PR review panel.
+#[tauri::command]
+pub async fn ask_claude_about_diff(
+    question: String,
+    diff_context: String,
+    file_path: String,
+) -> Result<String, String> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable is not set".to_string())?;
+
+    let context = if diff_context.len() > 8000 {
+        format!("{}\n… (truncated)", &diff_context[..8000])
+    } else {
+        diff_context
+    };
+
+    let user_content = if file_path.is_empty() {
+        format!("Diff:\n```diff\n{context}\n```\n\nQuestion: {question}")
+    } else {
+        format!("File: {file_path}\n\nDiff:\n```diff\n{context}\n```\n\nQuestion: {question}")
+    };
+
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 1024,
+        "system": "You are a code reviewer. The user will show you a git diff and ask questions about it. Be concise and precise.",
+        "messages": [{"role": "user", "content": user_content}]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    if !status.is_success() {
+        let msg = json["error"]["message"].as_str().unwrap_or("Unknown API error");
+        return Err(format!("API error {status}: {msg}"));
+    }
+
+    json["content"][0]["text"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| format!("Unexpected response format: {json}"))
 }
 
 fn resolve_git_path(cwd: &Path, raw: &str) -> PathBuf {

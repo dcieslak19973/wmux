@@ -33,6 +33,7 @@ import { createAutomationBridge } from './automation_bridge.mjs';
 import { createPaneAuxRuntime } from './pane_aux_runtime.mjs';
 import { createUiPanelsRuntime } from './ui_panels_runtime.mjs';
 import { createSurfaceRuntime } from './surfaces_runtime.mjs';
+import { createPrReviewRuntime } from './pr_review_runtime.mjs';
 import {
   createWorkspaceManager,
   DEFAULT_WORKSPACE_THEME_ID,
@@ -68,6 +69,7 @@ let activeTabId = null;
 let activePaneId = null;
 let activeBrowserLabel = null;
 let activeMarkdownLabel = null;
+let activePrReviewLabel = null;
 let zoomedSurfaceEl = null;
 let contextMenuCleanup = null;
 let remoteTmuxInspectorCleanup = null;
@@ -83,6 +85,7 @@ const markdownPanes = new Map();
 let browserPanes = new Map();
 let surfaceRuntime = null;
 let panelsRuntime = null;
+let prReviewRuntime = null;
 let paneAuxRuntime = null;
 
 const workspaces = new Map();
@@ -445,6 +448,7 @@ function getCurrentSurfaceElement() {
   if (activePaneId) return panes.get(activePaneId)?.domEl ?? null;
   if (activeBrowserLabel) return browserPanes.get(activeBrowserLabel)?.browserEl ?? null;
   if (activeMarkdownLabel) return markdownPanes.get(activeMarkdownLabel)?.markdownEl ?? null;
+  if (activePrReviewLabel) return prReviewRuntime?.prReviewPanes.get(activePrReviewLabel)?.prEl ?? null;
   return null;
 }
 
@@ -590,9 +594,11 @@ function clearActiveSurface() {
   if (activePaneId) panes.get(activePaneId)?.domEl.classList.remove('active-pane');
   if (activeBrowserLabel) browserPanes.get(activeBrowserLabel)?.browserEl.classList.remove('active-pane');
   if (activeMarkdownLabel) markdownPanes.get(activeMarkdownLabel)?.markdownEl.classList.remove('active-pane');
+  if (activePrReviewLabel) prReviewRuntime?.prReviewPanes.get(activePrReviewLabel)?.prEl.classList.remove('active-pane');
   activePaneId = null;
   activeBrowserLabel = null;
   activeMarkdownLabel = null;
+  activePrReviewLabel = null;
 }
 
 function requirePane(paneId = activePaneId) {
@@ -1344,6 +1350,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn" data-action="zoom" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up shell integration">&#x26a1;</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code MCP setup command">MCP</button>' : ''}
+    <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
   toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); splitPane(sessionId, 'h'); });
@@ -1395,7 +1402,17 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       e.stopPropagation();
       invoke('write_to_session', { id: sessionId, data: mcpCmd }).catch(() => {});
     });
+
   }
+
+  const prBtn = toolbarEl.querySelector('[data-action="pr-review"]');
+  prBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const pane = panes.get(sessionId);
+    const cwd = pane?.cwd || tabs.get(pane?.tabId)?.cwd || '';
+    splitPaneWithPrReview(sessionId, 'h', { cwd });
+  });
+
   leafEl.appendChild(toolbarEl);
 
   if (isRemoteTmuxTarget(target)) {
@@ -1573,6 +1590,10 @@ function activateBrowser(label) {
 
 function activateMarkdown(label) {
   return surfaceRuntime?.activateMarkdown(label);
+}
+
+function activatePrReview(label) {
+  return prReviewRuntime?.activatePrReview(label);
 }
 
 // Activate a tab
@@ -2307,6 +2328,14 @@ async function closeBrowserSurface(label, { collapse = true } = {}) {
 
 function closeMarkdownSurface(label, { collapse = true } = {}) {
   return surfaceRuntime?.closeMarkdownSurface(label, { collapse });
+}
+
+function closePrReviewSurface(label, { collapse = true } = {}) {
+  return prReviewRuntime?.closePrReviewSurface(label, { collapse });
+}
+
+async function splitPaneWithPrReview(paneId, dir = 'h', initialState = {}) {
+  return prReviewRuntime?.splitPaneWithPrReview(paneId, dir, initialState);
 }
 
 // Tab rename (double-click title)
@@ -3213,6 +3242,23 @@ panelsRuntime = createUiPanelsRuntime({
   checkForAppUpdate: (config) => invoke('check_for_app_update', { config }),
   installAppUpdate: (config) => invoke('install_app_update', { config }),
   getAppVersion: () => invoke('get_app_version'),
+});
+
+prReviewRuntime = createPrReviewRuntime({
+  invoke,
+  document,
+  panes,
+  tabs,
+  collapsePaneBranch,
+  makeDividerDrag,
+  fitAndResizePane,
+  toggleSurfaceZoom,
+  onLayoutChanged: () => markLayoutDirty(),
+  getActiveTabId: () => activeTabId,
+  getActivePrReviewLabel: () => activePrReviewLabel,
+  setActivePrReviewLabel: (label) => { activePrReviewLabel = label; },
+  clearActiveSurface,
+  escHtml,
 });
 
 // Layout persistence

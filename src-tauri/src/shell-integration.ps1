@@ -24,6 +24,9 @@ function prompt {
     # Reset baseline so the next command starts clean.
     $global:__wmux_pre_error_count = $global:Error.Count
     [Console]::Write("${esc}]133;A`a")
+    # OSC 7: announce current working directory so wmux can track it.
+    $cwdPath = $PWD.Path.Replace('\', '/')
+    [Console]::Write("${esc}]7;file:///${cwdPath}`a")
 
     # Default prompt — preserved if user has already customised theirs via $PROFILE
     # (this file should be sourced AFTER $PROFILE).

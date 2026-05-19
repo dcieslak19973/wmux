@@ -20,6 +20,8 @@ __wmux_precmd() {
     fi
     unset __wmux_first_prompt
     printf '\033]133;A\007'
+    # OSC 7: announce current working directory so wmux can track it.
+    printf '\033]7;file://localhost%s\007' "$(pwd | sed 's/ /%20/g')"
 }
 
 # __wmux_save_code must be first so it captures the user command's $?.

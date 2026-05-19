@@ -113,6 +113,15 @@ const SETTINGS_DEFAULTS = {
 
 const SAVED_SSH_TARGETS_KEY = 'wmux-saved-ssh-targets';
 
+const FIX_AGENTS = [
+  { key: 'claude',   label: 'Claude',   bash: (b) => `claude $'${b}'`,           ps: (b) => `claude "${b}"` },
+  { key: 'codex',    label: 'Codex',    bash: (b) => `codex $'${b}'`,            ps: (b) => `codex "${b}"` },
+  { key: 'gemini',   label: 'Gemini',   bash: (b) => `gemini $'${b}'`,           ps: (b) => `gemini "${b}"` },
+  { key: 'opencode', label: 'OpenCode', bash: (b) => `opencode $'${b}'`,         ps: (b) => `opencode "${b}"` },
+  { key: 'aider',    label: 'Aider',    bash: (b) => `aider --message $'${b}'`,  ps: (b) => `aider --message "${b}"` },
+  { key: 'amp',      label: 'Amp',      bash: (b) => `amp $'${b}'`,              ps: (b) => `amp "${b}"` },
+];
+
 function loadSettings() {
   try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(localStorage.getItem('wmux-settings') ?? '{}') }; }
   catch { return { ...SETTINGS_DEFAULTS }; }
@@ -1170,29 +1179,38 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
         const btn = document.createElement('button');
         btn.className = 'block-fix-btn';
         btn.textContent = 'Fix';
-        btn.title = 'Ask Claude to fix this (pastes command, press Enter to run)';
+        btn.title = 'Ask an agent to fix this (pastes command, press Enter to run)';
         // Keep container pointer-events:none; only the button itself is clickable.
         btn.style.pointerEvents = 'auto';
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           const shell = isWsl || isSsh ? 'bash' : 'powershell';
-          const cmd = buildFixPrompt(block.rustBlock, shell);
-          invoke('write_to_session', { id: sessionId, data: cmd }).catch(() => {});
+          const body = buildFixBody(block.rustBlock);
+          const r = btn.getBoundingClientRect();
+          showContextMenu(
+            FIX_AGENTS.map((agent) => ({
+              label: agent.label,
+              action: () => {
+                const cmd = buildFixCmd(agent, body, shell);
+                invoke('write_to_session', { id: sessionId, data: cmd }).catch(() => {});
+              },
+            })),
+            r.left, r.bottom + 4,
+          );
         });
         el.appendChild(btn);
       }
     }
   }
 
-  function buildFixPrompt(rustBlock, shell) {
+  function buildFixBody(rustBlock) {
     const cmd = (rustBlock.command || '(unknown)').trim();
     const code = rustBlock.exit_code ?? 1;
     const rawOutput = (rustBlock.output ?? '').trim();
     const output = rawOutput.length > 600
       ? rawOutput.slice(0, 600) + '\n... (truncated)'
       : rawOutput || '(no output)';
-
-    const body = [
+    return [
       'Fix this failed command:',
       `$ ${cmd}`,
       `Exit code: ${code}`,
@@ -1202,21 +1220,23 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       '',
       'What went wrong and how do I fix it?',
     ].join('\n');
+  }
 
+  function buildFixCmd(agent, body, shell) {
     if (shell === 'bash') {
       // $'...' ANSI-C quoting: handles \n, \', \\ inside single quotes.
       const escaped = body
         .replace(/\\/g, '\\\\')
         .replace(/'/g, "\\'")
         .replace(/\n/g, '\\n');
-      return `claude $'${escaped}'`;
+      return agent.bash(escaped);
     } else {
       // PowerShell double-quoted string: backtick is the escape character.
       const escaped = body
         .replace(/`/g, '``')
         .replace(/"/g, '`"')
         .replace(/\n/g, '`n');
-      return `claude "${escaped}"`;
+      return agent.ps(escaped);
     }
   }
 

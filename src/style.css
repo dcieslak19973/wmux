@@ -1141,6 +1141,17 @@ body.has-tabs #empty-state { display: none; }
   max-width: 150px;
 }
 
+.agent-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+  border: 1px solid;
+}
+
 /* ── Notification panel (Ctrl+I) ───────────────────────────────── */
 .notif-panel {
   position: absolute;

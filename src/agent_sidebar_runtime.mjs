@@ -12,6 +12,28 @@ export function createAgentSidebarRuntime({
   let sidebarEl = null;
   let refreshTimer = null;
 
+  // ── Agent registry ──────────────────────────────────────────────────────
+
+  const AGENTS = {
+    'claude':   { label: 'Claude',   color: '#d97706', bg: 'rgba(217,119,6,0.15)',   border: 'rgba(217,119,6,0.35)' },
+    'codex':    { label: 'Codex',    color: '#10b981', bg: 'rgba(16,185,129,0.15)',  border: 'rgba(16,185,129,0.35)' },
+    'gemini':   { label: 'Gemini',   color: '#4285f4', bg: 'rgba(66,133,244,0.15)',  border: 'rgba(66,133,244,0.35)' },
+    'opencode': { label: 'OpenCode', color: '#a78bfa', bg: 'rgba(167,139,250,0.15)', border: 'rgba(167,139,250,0.35)' },
+    'aider':    { label: 'Aider',    color: '#ec4899', bg: 'rgba(236,72,153,0.15)',  border: 'rgba(236,72,153,0.35)' },
+    'amp':      { label: 'Amp',      color: '#f59e0b', bg: 'rgba(245,158,11,0.15)',  border: 'rgba(245,158,11,0.35)' },
+  };
+
+  function detectAgent(pane) {
+    if (!pane.blocks?.length) return null;
+    for (let i = pane.blocks.length - 1; i >= 0; i--) {
+      const cmd = pane.blocks[i].command;
+      if (!cmd) continue;
+      const bin = cmd.trim().split(/\s+/)[0].replace(/^.*[\\/]/, '').toLowerCase();
+      if (AGENTS[bin]) return AGENTS[bin];
+    }
+    return null;
+  }
+
   // ── Status helpers ──────────────────────────────────────────────────────
 
   function isRunning(pane) {
@@ -30,14 +52,22 @@ export function createAgentSidebarRuntime({
 
   // ── Item creation ───────────────────────────────────────────────────────
 
+  function agentBadgeHtml(agent) {
+    if (!agent) return '';
+    return `<span class="agent-badge" style="color:${agent.color};background:${agent.bg};border-color:${agent.border}">${escHtml(agent.label)}</span>`;
+  }
+
   function createPaneItem(summary, pane, running, lastCmd) {
+    const agent = detectAgent(pane);
     const el = document.createElement('div');
     el.className = `agent-sidebar-item${running ? ' running' : ''}${summary.active ? ' active' : ''}`;
     el.dataset.paneId = summary.paneId;
+    el.dataset.agent = agent?.label ?? '';
     el.innerHTML = `
       <div class="agent-item-top">
         <span class="agent-status-dot ${running ? 'running' : 'idle'}"></span>
         <span class="agent-item-name">${escHtml(summary.paneTitle || summary.targetLabel)}</span>
+        ${agentBadgeHtml(agent)}
         <button class="agent-kill-btn" title="Close pane">&#x2715;</button>
       </div>
       ${lastCmd ? `<div class="agent-item-cmd">${escHtml(lastCmd)}</div>` : '<div class="agent-item-cmd agent-item-cmd-empty">no commands yet</div>'}
@@ -108,6 +138,24 @@ export function createAgentSidebarRuntime({
         if (cmdEl && lastCmd) {
           cmdEl.textContent = lastCmd;
           cmdEl.classList.remove('agent-item-cmd-empty');
+        }
+        // Update agent badge if detection changed
+        const agent = detectAgent(pane);
+        const agentLabel = agent?.label ?? '';
+        if (el.dataset.agent !== agentLabel) {
+          el.dataset.agent = agentLabel;
+          const existing = el.querySelector('.agent-badge');
+          const killBtn = el.querySelector('.agent-kill-btn');
+          if (existing) existing.remove();
+          if (agent) {
+            const badge = document.createElement('span');
+            badge.className = 'agent-badge';
+            badge.style.color = agent.color;
+            badge.style.background = agent.bg;
+            badge.style.borderColor = agent.border;
+            badge.textContent = agent.label;
+            killBtn?.insertAdjacentElement('beforebegin', badge);
+          }
         }
       }
     }

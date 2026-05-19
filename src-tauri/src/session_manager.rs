@@ -295,20 +295,19 @@ pub(crate) fn build_ssh_cmdline(
         cmd.push_str(&format!(" -i \"{win_path}\""));
     }
 
-    if let Some(e) = extras {
-        // Reverse tunnel: remote:tunnel_port → Windows:7766 (our HTTP API).
-        // Binds loopback-only on the remote by default (GatewayPorts no).
+    // When wmux extras are present, inject identity vars via `env VAR=VALUE …` as
+    // the remote command rather than SetEnv/-o, which requires AcceptEnv in the
+    // server's sshd_config and is silently dropped when absent.
+    let effective_remote_cmd: Option<String> = if let Some(e) = extras {
         cmd.push_str(&format!(" -R {}:127.0.0.1:{}", e.tunnel_port, crate::http_server::PORT));
-
-        // Forward wmux identity vars to the remote shell via SetEnv (OpenSSH 7.8+).
-        // One option per variable — some SSH servers/clients misparse multiple pairs,
-        // and the WMUX_API_BASE value contains a colon which can trip up parsers.
-        // Servers that don't honour SetEnv silently drop these — connection still works.
-        cmd.push_str(" -o \"SetEnv WMUX=1\"");
-        cmd.push_str(&format!(" -o \"SetEnv WMUX_PANE_ID={}\"", e.pane_id));
-        cmd.push_str(&format!(" -o \"SetEnv WMUX_API_PORT={}\"", e.tunnel_port));
-        cmd.push_str(&format!(" -o \"SetEnv WMUX_API_BASE=http://localhost:{}\"", e.tunnel_port));
-    }
+        let env_prefix = format!(
+            "WMUX=1 WMUX_PANE_ID={} WMUX_API_PORT={} WMUX_API_BASE=http://localhost:{}",
+            e.pane_id, e.tunnel_port, e.tunnel_port
+        );
+        Some(format!("env {} {}", env_prefix, remote_command.unwrap_or("bash")))
+    } else {
+        None
+    };
 
     cmd.push_str(" -o RequestTTY=force");
     cmd.push_str(" -o SendEnv=COLORTERM");
@@ -318,8 +317,8 @@ pub(crate) fn build_ssh_cmdline(
         None => cmd.push_str(&format!(" {host}")),
     }
 
-    if let Some(remote_command) = remote_command {
-        cmd.push_str(&format!(" \"{remote_command}\""));
+    if let Some(rc) = effective_remote_cmd.as_deref().or(remote_command) {
+        cmd.push_str(&format!(" \"{rc}\""));
     }
 
     cmd

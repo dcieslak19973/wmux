@@ -1545,6 +1545,12 @@ mod tests {
 
 // ── Shell integration ─────────────────────────────────────────────────────────
 
+/// Hex-encode bytes so the result contains only [0-9a-f] — safe to embed in any
+/// shell argument without quoting concerns.
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 const SHELL_INTEGRATION_PS1: &str = include_str!("shell-integration.ps1");
 const SHELL_INTEGRATION_MARKER: &str = "# wmux shell integration";
 
@@ -1649,17 +1655,24 @@ pub async fn check_shell_integration_wsl(distro: Option<String>) -> Result<bool,
 pub async fn install_shell_integration_wsl(distro: Option<String>) -> Result<String, String> {
     // Normalise to LF so bash on Linux doesn't see stray \r characters.
     let script = SHELL_INTEGRATION_SH.replace("\r\n", "\n").replace('\r', "\n");
+    // Hex-encode the script so the Python argument contains no $ or quotes —
+    // wsl.exe passes arguments through a shell that double-quote-expands everything,
+    // so any $VAR or $? in a heredoc body gets clobbered. Hex is [0-9a-f] only.
+    let script_hex = hex_encode(script.as_bytes());
 
-    // Use Python to strip all existing wmux blocks (sed was silently failing on some WSL configs).
-    // Finds the FIRST occurrence of the marker line and truncates the file there, removing all copies.
-    let py_strip = format!(
-        "import os; p=os.path.expanduser('~/.bashrc'); c=open(p).read() if os.path.exists(p) else ''; m='{}\\n'; i=c.find(m); s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); c2=c[:s].rstrip('\\n'); open(p,'w').write(c2+'\\n' if c2 else '')",
-        SHELL_INTEGRATION_BASH_MARKER
-    );
-
-    // Heredoc with a quoted delimiter suppresses variable expansion in the appended script.
+    // Single Python invocation: strip old block + append new one.
     let install_cmd = format!(
-        "python3 -c \"{py_strip}\"\ncat >> ~/.bashrc << 'WMUX_INTEGRATION_EOF'\n\n{script}\nWMUX_INTEGRATION_EOF"
+        "python3 -c \"import os,binascii; \
+         p=os.path.expanduser('~/.bashrc'); \
+         c=open(p).read() if os.path.exists(p) else ''; \
+         m='{}\\n'; \
+         i=c.find(m); \
+         s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); \
+         c2=c[:s].rstrip('\\n'); \
+         script=binascii.unhexlify('{}').decode('utf-8'); \
+         open(p,'w').write((c2+'\\n' if c2 else '')+'\\n'+script+'\\n')\"",
+        SHELL_INTEGRATION_BASH_MARKER,
+        script_hex
     );
 
     let mut cmd = Command::new("wsl.exe");
@@ -1708,13 +1721,20 @@ pub async fn install_shell_integration_ssh(
     identity_file: Option<String>,
 ) -> Result<String, String> {
     let script = SHELL_INTEGRATION_SH.replace("\r\n", "\n").replace('\r', "\n");
+    let script_hex = hex_encode(script.as_bytes());
 
-    let py_strip = format!(
-        "import os; p=os.path.expanduser('~/.bashrc'); c=open(p).read() if os.path.exists(p) else ''; m='{}\\n'; i=c.find(m); s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); c2=c[:s].rstrip('\\n'); open(p,'w').write(c2+'\\n' if c2 else '')",
-        SHELL_INTEGRATION_BASH_MARKER
-    );
     let install_cmd = format!(
-        "python3 -c \"{py_strip}\"\ncat >> ~/.bashrc << 'WMUX_INTEGRATION_EOF'\n\n{script}\nWMUX_INTEGRATION_EOF"
+        "python3 -c \"import os,binascii; \
+         p=os.path.expanduser('~/.bashrc'); \
+         c=open(p).read() if os.path.exists(p) else ''; \
+         m='{}\\n'; \
+         i=c.find(m); \
+         s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); \
+         c2=c[:s].rstrip('\\n'); \
+         script=binascii.unhexlify('{}').decode('utf-8'); \
+         open(p,'w').write((c2+'\\n' if c2 else '')+'\\n'+script+'\\n')\"",
+        SHELL_INTEGRATION_BASH_MARKER,
+        script_hex
     );
 
     let result = tokio::task::spawn_blocking(move || {

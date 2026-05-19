@@ -2322,5 +2322,25 @@ body.has-tabs #empty-state { display: none; }
   pointer-events: none;
   user-select: none;
 }
+.block-fix-btn {
+  position: absolute;
+  right: 58px;
+  top: 1px;
+  font-size: 10px;
+  padding: 0px 5px;
+  background: rgba(248,113,113,0.12);
+  border: 1px solid rgba(248,113,113,0.35);
+  border-radius: 3px;
+  color: #f87171;
+  cursor: pointer;
+  font-family: monospace;
+  line-height: 1.6;
+  user-select: none;
+}
+.block-fix-btn:hover {
+  background: rgba(248,113,113,0.28);
+  border-color: rgba(248,113,113,0.7);
+  color: #fff;
+}
 
 

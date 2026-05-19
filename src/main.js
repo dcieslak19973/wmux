@@ -1146,16 +1146,62 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       if (!badge) {
         badge = document.createElement('span');
         badge.className = 'block-exit-badge';
-        badge.style.position = 'absolute';
-        badge.style.right = '6px';
-        badge.style.top = '1px';
-        badge.style.fontSize = '10px';
-        badge.style.color = '#f87171';
-        badge.style.fontFamily = 'monospace';
-        badge.style.pointerEvents = 'none';
         el.appendChild(badge);
       }
       badge.textContent = `exit ${block.exitCode}`;
+
+      // Fix button — only once block output is available from block-done event.
+      if (block.rustBlock && !el.querySelector('.block-fix-btn')) {
+        const btn = document.createElement('button');
+        btn.className = 'block-fix-btn';
+        btn.textContent = 'Fix';
+        btn.title = 'Ask Claude to fix this (pastes command, press Enter to run)';
+        // Keep container pointer-events:none; only the button itself is clickable.
+        btn.style.pointerEvents = 'auto';
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const shell = isWsl || isSsh ? 'bash' : 'powershell';
+          const cmd = buildFixPrompt(block.rustBlock, shell);
+          invoke('write_to_session', { id: sessionId, data: cmd }).catch(() => {});
+        });
+        el.appendChild(btn);
+      }
+    }
+  }
+
+  function buildFixPrompt(rustBlock, shell) {
+    const cmd = (rustBlock.command || '(unknown)').trim();
+    const code = rustBlock.exit_code ?? 1;
+    const rawOutput = (rustBlock.output ?? '').trim();
+    const output = rawOutput.length > 600
+      ? rawOutput.slice(0, 600) + '\n... (truncated)'
+      : rawOutput || '(no output)';
+
+    const body = [
+      'Fix this failed command:',
+      `$ ${cmd}`,
+      `Exit code: ${code}`,
+      '',
+      'Output:',
+      output,
+      '',
+      'What went wrong and how do I fix it?',
+    ].join('\n');
+
+    if (shell === 'bash') {
+      // $'...' ANSI-C quoting: handles \n, \', \\ inside single quotes.
+      const escaped = body
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\n/g, '\\n');
+      return `claude $'${escaped}'`;
+    } else {
+      // PowerShell double-quoted string: backtick is the escape character.
+      const escaped = body
+        .replace(/`/g, '``')
+        .replace(/"/g, '`"')
+        .replace(/\n/g, '`n');
+      return `claude "${escaped}"`;
     }
   }
 
@@ -1201,22 +1247,39 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     block.endTime = Date.now();
     activeBlock = null;
 
-    // Reissue the decoration with the correct row span now that we know the end row.
-    const buf = term.buffer.active;
-    const endRow = buf.viewportY + buf.cursorY;
-    const spanHeight = Math.max(1, endRow - block.startRow);
-    const color = block.exitCode !== 0 ? '#f87171' : '#4ade80';
-    block.decoration?.dispose();
-    const dec = term.registerDecoration({
-      marker: block.marker,
-      height: spanHeight,
-      overviewRulerOptions: { color, position: 'left' },
+    // Defer span calculation until xterm.js has flushed pending writes.
+    // term.write() is async (flushes before the next paint), so the cursor
+    // position isn't reliable until rAF fires.
+    requestAnimationFrame(() => {
+      const buf = term.buffer.active;
+      const endRow = buf.viewportY + buf.cursorY;
+      const spanHeight = Math.max(1, endRow - block.startRow);
+      const color = block.exitCode !== 0 ? '#f87171' : '#4ade80';
+      block.decoration?.dispose();
+      const dec = term.registerDecoration({
+        marker: block.marker,
+        height: spanHeight,
+        overviewRulerOptions: { color, position: 'left' },
+      });
+      dec?.onRender((el) => {
+        block._decorationEl = el;
+        renderBlockDecoration(el, block);
+      });
+      block.decoration = dec ?? null;
+
+      // For failed blocks, fetch the full TermBlock output so the Fix button can
+      // include it. Fire-and-forget .then() — no new await in the init chain.
+      if (block.exitCode !== 0) {
+        invoke('get_blocks', { sessionId, limit: 1 }).then((blocks) => {
+          const rustBlock = blocks?.[blocks.length - 1];
+          if (!rustBlock) return;
+          block.rustBlock = rustBlock;
+          // _decorationEl is set by onRender; re-render if it's already available,
+          // otherwise onRender will fire later and pick up rustBlock itself.
+          if (block._decorationEl) renderBlockDecoration(block._decorationEl, block);
+        }).catch(() => {});
+      }
     });
-    dec?.onRender((el) => {
-      block._decorationEl = el;
-      renderBlockDecoration(el, block);
-    });
-    block.decoration = dec ?? null;
   });
   // ── End block tracking ─────────────────────────────────────────────────────
 

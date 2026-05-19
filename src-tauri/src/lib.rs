@@ -68,6 +68,7 @@ pub fn run() {
             commands::get_blocks,
             commands::get_pr_diff_summary,
             commands::get_pr_file_diff,
+            commands::ask_claude_about_diff,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

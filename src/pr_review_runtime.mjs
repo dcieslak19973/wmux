@@ -21,7 +21,7 @@ export function createPrReviewRuntime({
   function parseDiff(raw) {
     const hunks = [];
     let current = null;
-    for (const line of raw.split('\n')) {
+    for (const line of raw.split(/\r?\n/)) {
       if (line.startsWith('@@')) {
         if (current) hunks.push(current);
         current = { header: line, lines: [] };
@@ -47,6 +47,22 @@ export function createPrReviewRuntime({
       }
     }
     return html;
+  }
+
+  // ── Markdown renderer for AI responses ───────────────────────────────────
+
+  function renderAiMarkdown(text) {
+    const segments = text.split(/(```(?:[^\n]*)?\n[\s\S]*?```)/);
+    return segments.map((seg, i) => {
+      if (i % 2 === 1) {
+        const inner = seg.replace(/^```[^\n]*\n/, '').replace(/```$/, '');
+        return `<pre class="pr-ai-code">${escHtml(inner)}</pre>`;
+      }
+      let html = escHtml(seg);
+      html = html.replace(/`([^`\n]+)`/g, '<code class="pr-ai-inline-code">$1</code>');
+      html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      return html.split(/\n\n+/).map((p) => p.trim() ? `<p>${p.replace(/\n/g, '<br>')}</p>` : '').join('');
+    }).join('');
   }
 
   // ── File tree rendering ───────────────────────────────────────────────────
@@ -95,7 +111,15 @@ export function createPrReviewRuntime({
       </div>
       <div class="pr-review-body">
         <div class="pr-review-files"></div>
-        <div class="pr-review-diff"><div class="pr-review-empty">Select a file to view its diff.</div></div>
+        <div class="pr-review-right">
+          <div class="pr-review-diff"><div class="pr-review-empty">Select a file to view its diff.</div></div>
+          <div class="pr-review-ask-response" style="display:none"></div>
+          <div class="pr-review-ask-bar">
+            <span class="pr-review-sel-badge" style="display:none" title="Click to clear selection"></span>
+            <textarea class="pr-review-ask-input" placeholder="Ask Claude about this file… (Ctrl+Enter)" rows="2" spellcheck="false"></textarea>
+            <button class="pr-review-ask-btn pr-review-btn" title="Ask Claude (Ctrl+Enter)">Ask</button>
+          </div>
+        </div>
       </div>
     `;
 
@@ -105,6 +129,10 @@ export function createPrReviewRuntime({
     const baseInput = prEl.querySelector('.pr-review-base-input');
     const filesEl = prEl.querySelector('.pr-review-files');
     const diffEl = prEl.querySelector('.pr-review-diff');
+    const askResponseEl = prEl.querySelector('.pr-review-ask-response');
+    const askInput = prEl.querySelector('.pr-review-ask-input');
+    const askBtn = prEl.querySelector('.pr-review-ask-btn');
+    const selBadge = prEl.querySelector('.pr-review-sel-badge');
 
     const state = {
       label,
@@ -114,24 +142,77 @@ export function createPrReviewRuntime({
       baseRef: '',
       files: [],
       selectedPath: null,
+      rawDiff: '',
+      selectedContext: null,
     };
     if (state.cwd) cwdInput.value = state.cwd;
     prReviewPanes.set(label, state);
     tabs.get(tabId)?.prReviewLabels?.add(label);
 
+    // ── Selection tracking ────────────────────────────────────────────────
+    diffEl.addEventListener('mouseup', () => {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) {
+        const range = sel.getRangeAt(0);
+        if (diffEl.contains(range.commonAncestorContainer)) {
+          state.selectedContext = sel.toString();
+          const lineCount = state.selectedContext.split('\n').filter(Boolean).length;
+          selBadge.textContent = `${lineCount} line${lineCount !== 1 ? 's' : ''} selected ×`;
+          selBadge.style.display = '';
+          return;
+        }
+      }
+    });
+    selBadge.addEventListener('click', () => {
+      state.selectedContext = null;
+      selBadge.style.display = 'none';
+    });
+
+    // ── Ask Claude ────────────────────────────────────────────────────────
+    const askClaude = async () => {
+      const question = askInput.value.trim();
+      if (!question) return;
+      const context = state.selectedContext || state.rawDiff;
+      if (!context) {
+        askResponseEl.innerHTML = '<p class="pr-review-empty">Select a file first.</p>';
+        askResponseEl.style.display = '';
+        return;
+      }
+      askResponseEl.innerHTML = '<p class="pr-review-empty">Asking Claude…</p>';
+      askResponseEl.style.display = '';
+      askBtn.disabled = true;
+      try {
+        const response = await invoke('ask_claude_about_diff', {
+          question,
+          diffContext: context,
+          filePath: state.selectedPath ?? '',
+        });
+        askResponseEl.innerHTML = renderAiMarkdown(response);
+      } catch (err) {
+        askResponseEl.innerHTML = `<p class="pr-review-empty">Error: ${escHtml(String(err))}</p>`;
+      } finally {
+        askBtn.disabled = false;
+      }
+    };
+
+    askBtn.addEventListener('click', askClaude);
+    askInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); askClaude(); }
+    });
+
     const loadFile = async (filePath) => {
       state.selectedPath = filePath;
+      state.rawDiff = '';
+      state.selectedContext = null;
+      selBadge.style.display = 'none';
       renderFileList(filesEl, state.files, filePath, loadFile);
       diffEl.innerHTML = '<div class="pr-review-empty">Loading…</div>';
-      console.log('[pr-review] loadFile cwd:', state.cwd, 'base:', state.baseRef, 'path:', filePath);
       try {
         const raw = await invoke('get_pr_file_diff', { cwd: state.cwd, base: state.baseRef, path: filePath });
-        console.log('[pr-review] raw diff length:', raw.length, 'preview:', raw.slice(0, 200));
+        state.rawDiff = raw;
         const hunks = parseDiff(raw);
-        console.log('[pr-review] parsed hunks:', hunks.length);
         diffEl.innerHTML = renderDiffHtml(hunks);
       } catch (err) {
-        console.error('[pr-review] loadFile error:', err);
         diffEl.innerHTML = `<div class="pr-review-empty">Error: ${escHtml(String(err))}</div>`;
       }
     };
@@ -141,18 +222,18 @@ export function createPrReviewRuntime({
       if (!cwd) {
         filesEl.innerHTML = '<div class="pr-review-empty">Enter a repo path above and press Enter.</div>';
         diffEl.innerHTML = '';
-        baseBadge.textContent = '';
         return;
       }
       state.cwd = cwd;
       filesEl.innerHTML = '<div class="pr-review-empty">Loading…</div>';
       diffEl.innerHTML = '<div class="pr-review-empty">Select a file to view its diff.</div>';
       state.selectedPath = null;
-      console.log('[pr-review] loadSummary cwd:', cwd);
+      state.rawDiff = '';
+      state.selectedContext = null;
+      selBadge.style.display = 'none';
       const explicitBase = baseInput.value.trim() || null;
       try {
         const summary = await invoke('get_pr_diff_summary', { cwd, base: explicitBase });
-        console.log('[pr-review] summary:', summary);
         state.baseRef = summary.base_ref;
         state.files = summary.files;
         cwdInput.value = summary.resolved_cwd || cwd;
@@ -162,7 +243,6 @@ export function createPrReviewRuntime({
           filesEl.innerHTML = `<div class="pr-review-empty">No changes vs <code>${escHtml(summary.base_ref)}</code>.</div>`;
         }
       } catch (err) {
-        console.error('[pr-review] loadSummary error:', err);
         filesEl.innerHTML = `<div class="pr-review-empty">Error: ${escHtml(String(err))}</div>`;
       }
     };

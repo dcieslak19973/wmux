@@ -1284,6 +1284,62 @@ pub async fn get_pr_file_diff(cwd: String, base: String, path: String) -> Result
         .map(|opt| opt.unwrap_or_default())
 }
 
+/// Ask Claude about a diff context from the PR review panel.
+#[tauri::command]
+pub async fn ask_claude_about_diff(
+    question: String,
+    diff_context: String,
+    file_path: String,
+) -> Result<String, String> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable is not set".to_string())?;
+
+    let context = if diff_context.len() > 8000 {
+        format!("{}\n… (truncated)", &diff_context[..8000])
+    } else {
+        diff_context
+    };
+
+    let user_content = if file_path.is_empty() {
+        format!("Diff:\n```diff\n{context}\n```\n\nQuestion: {question}")
+    } else {
+        format!("File: {file_path}\n\nDiff:\n```diff\n{context}\n```\n\nQuestion: {question}")
+    };
+
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 1024,
+        "system": "You are a code reviewer. The user will show you a git diff and ask questions about it. Be concise and precise.",
+        "messages": [{"role": "user", "content": user_content}]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    if !status.is_success() {
+        let msg = json["error"]["message"].as_str().unwrap_or("Unknown API error");
+        return Err(format!("API error {status}: {msg}"));
+    }
+
+    json["content"][0]["text"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| format!("Unexpected response format: {json}"))
+}
+
 fn resolve_git_path(cwd: &Path, raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {

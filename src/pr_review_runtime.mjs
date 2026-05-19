@@ -87,7 +87,8 @@ export function createPrReviewRuntime({
       <div class="pr-review-bar">
         <span class="pr-review-title">PR</span>
         <input class="pr-review-cwd-input" placeholder="Repo path…" spellcheck="false" />
-        <span class="pr-review-base-badge"></span>
+        <span class="pr-review-bar-sep">vs</span>
+        <input class="pr-review-base-input" placeholder="auto" spellcheck="false" />
         <button class="pr-review-btn" data-action="refresh" title="Refresh diff">&#x21bb;</button>
         <button class="pr-review-btn" data-action="zoom" title="Toggle zoom">&#x2922;</button>
         <button class="pr-review-btn pane-tb-close" data-action="close" title="Close">&#x2715;</button>
@@ -101,7 +102,7 @@ export function createPrReviewRuntime({
     mountEl.appendChild(prEl);
 
     const cwdInput = prEl.querySelector('.pr-review-cwd-input');
-    const baseBadge = prEl.querySelector('.pr-review-base-badge');
+    const baseInput = prEl.querySelector('.pr-review-base-input');
     const filesEl = prEl.querySelector('.pr-review-files');
     const diffEl = prEl.querySelector('.pr-review-diff');
 
@@ -148,16 +149,17 @@ export function createPrReviewRuntime({
       diffEl.innerHTML = '<div class="pr-review-empty">Select a file to view its diff.</div>';
       state.selectedPath = null;
       console.log('[pr-review] loadSummary cwd:', cwd);
+      const explicitBase = baseInput.value.trim() || null;
       try {
-        const summary = await invoke('get_pr_diff_summary', { cwd, base: null });
+        const summary = await invoke('get_pr_diff_summary', { cwd, base: explicitBase });
         console.log('[pr-review] summary:', summary);
         state.baseRef = summary.base_ref;
         state.files = summary.files;
         cwdInput.value = summary.resolved_cwd || cwd;
-        baseBadge.textContent = `vs ${summary.base_ref}  +${summary.total_additions} -${summary.total_deletions}`;
+        if (!explicitBase) baseInput.value = summary.base_ref;
         renderFileList(filesEl, summary.files, null, loadFile);
         if (!summary.files.length) {
-          filesEl.innerHTML = '<div class="pr-review-empty">No changes vs base.</div>';
+          filesEl.innerHTML = `<div class="pr-review-empty">No changes vs <code>${escHtml(summary.base_ref)}</code>.</div>`;
         }
       } catch (err) {
         console.error('[pr-review] loadSummary error:', err);
@@ -166,6 +168,9 @@ export function createPrReviewRuntime({
     };
 
     cwdInput.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); await loadSummary(); }
+    });
+    baseInput.addEventListener('keydown', async (e) => {
       if (e.key === 'Enter') { e.preventDefault(); await loadSummary(); }
     });
 

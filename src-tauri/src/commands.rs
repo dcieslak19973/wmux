@@ -1198,18 +1198,15 @@ fn git_stdout(cwd: &str, args: &[&str]) -> Result<Option<String>, String> {
 }
 
 fn detect_base_ref(cwd: &str) -> String {
-    let candidates = [
-        &["rev-parse", "--abbrev-ref", "@{upstream}"][..],
-        &["rev-parse", "--verify", "origin/HEAD"],
-        &["rev-parse", "--verify", "origin/main"],
-        &["rev-parse", "--verify", "origin/master"],
-        &["rev-parse", "--verify", "main"],
-        &["rev-parse", "--verify", "master"],
-    ];
-    for args in &candidates {
-        if let Ok(Some(val)) = git_stdout(cwd, args) {
-            // For upstream like "origin/main", keep as-is; for a SHA (verify), keep as-is.
-            return val;
+    // For PR review we want the main branch, NOT the upstream tracking branch
+    // (@{upstream} points to origin/<current-branch> which is at HEAD — empty diff).
+    let candidates = ["origin/main", "origin/master", "main", "master"];
+    for candidate in &candidates {
+        if git_stdout(cwd, &["rev-parse", "--verify", candidate])
+            .unwrap_or(None)
+            .is_some()
+        {
+            return candidate.to_string();
         }
     }
     "HEAD~1".to_string()

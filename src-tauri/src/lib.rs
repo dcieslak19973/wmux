@@ -1,6 +1,7 @@
 mod control_bridge;
 mod commands;
 mod conpty;
+mod http_server;
 mod ipc_server;
 mod osc_parser;
 mod session_manager;
@@ -62,6 +63,9 @@ pub fn run() {
             commands::check_shell_integration,
             commands::install_shell_integration_wsl,
             commands::check_shell_integration_wsl,
+            commands::check_shell_integration_ssh,
+            commands::install_shell_integration_ssh,
+            commands::get_blocks,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
@@ -75,6 +79,7 @@ pub fn run() {
             let mgr: tauri::State<SessionManager> = app.state();
             let bridge: tauri::State<FrontendControlBridge> = app.state();
             ipc_server::start(app.handle().clone(), mgr.inner().clone(), bridge.inner().clone());
+            http_server::start(mgr.inner().clone());
 
             Ok(())
         })

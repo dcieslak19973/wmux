@@ -1,6 +1,6 @@
 /// Tauri IPC command handlers — the bridge between the WebView frontend
 /// and the Rust ConPTY session manager.
-use crate::{osc_parser::{self, OscEvent}, session_manager::{ShellTarget, WslDistro}, url_detector, FrontendControlBridge, SessionManager};
+use crate::{osc_parser::{self, OscEvent}, session_manager::{BlockStore, ShellTarget, TermBlock, WslDistro}, url_detector, FrontendControlBridge, SessionManager};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -736,6 +736,7 @@ pub async fn start_session_stream(
     id: String,
 ) -> Result<(), String> {
     let session = manager.get(&id).await.ok_or("session not found")?;
+    let block_store = manager.get_block_store(&id).await.ok_or("session not found")?;
 
     // Take the initial receiver — created at spawn time, so it has all output
     // buffered since the session started.
@@ -746,14 +747,20 @@ pub async fn start_session_stream(
         .take()
         .ok_or("session stream already started")?;
 
-    let event_id = format!("terminal-output-{id}");
+    let event_id         = format!("terminal-output-{id}");
+    let url_event_id     = format!("terminal-url-{id}");
+    let exit_event_id    = format!("terminal-exit-{id}");
+    let clipboard_ev     = format!("terminal-clipboard-{id}");
+    let notify_ev        = format!("terminal-notify-{id}");
+    let cwd_ev           = format!("terminal-cwd-{id}");
+    let block_start_ev   = format!("terminal-block-start-{id}");
+    let block_end_ev     = format!("terminal-block-end-{id}");
+    let block_cmd_ev     = format!("terminal-block-cmd-{id}");
+    let block_done_ev    = format!("terminal-block-done-{id}");
     let id_clone = id.clone();
 
     tokio::spawn(async move {
         let mut seen_urls: HashSet<String> = HashSet::new();
-        let url_event_id = format!("terminal-url-{id_clone}");
-        let exit_event_id = format!("terminal-exit-{id_clone}");
-        let clipboard_event_id = format!("terminal-clipboard-{id_clone}");
 
         loop {
             match rx.recv().await {
@@ -770,12 +777,10 @@ pub async fn start_session_stream(
                         }
                     }
 
+                    // Feed raw bytes into the block accumulator while a command is running.
+                    block_store.lock().await.feed(&chunk);
+
                     // OSC 7 cwd + OSC 9/99/777 notifications + OSC 133 blocks.
-                    let notify_ev       = format!("terminal-notify-{id_clone}");
-                    let cwd_ev          = format!("terminal-cwd-{id_clone}");
-                    let block_start_ev  = format!("terminal-block-start-{id_clone}");
-                    let block_end_ev    = format!("terminal-block-end-{id_clone}");
-                    let block_cmd_ev    = format!("terminal-block-cmd-{id_clone}");
                     for event in osc_parser::extract_osc_events(&chunk) {
                         match event {
                             OscEvent::Notification(n) => {
@@ -786,16 +791,21 @@ pub async fn start_session_stream(
                                 let _ = app.emit(&cwd_ev, path);
                             }
                             OscEvent::Clipboard(text) => {
-                                let _ = app.emit(&clipboard_event_id, ClipboardPayload { text });
+                                let _ = app.emit(&clipboard_ev, ClipboardPayload { text });
                             }
                             OscEvent::BlockPromptStart => {}
                             OscEvent::BlockCommandStart => {
+                                block_store.lock().await.on_command_start();
                                 let _ = app.emit(&block_start_ev, BlockStartPayload {});
                             }
                             OscEvent::BlockCommandFinished { exit_code } => {
                                 let _ = app.emit(&block_end_ev, BlockEndPayload { exit_code });
+                                if let Some(block) = block_store.lock().await.on_command_finished(exit_code) {
+                                    let _ = app.emit(&block_done_ev, block);
+                                }
                             }
                             OscEvent::BlockCommandLine(command) => {
+                                block_store.lock().await.on_command_line(&command);
                                 let _ = app.emit(&block_cmd_ev, BlockCommandLinePayload { command });
                             }
                         }
@@ -805,21 +815,36 @@ pub async fn start_session_stream(
                         break;
                     }
                 }
-                // Lagged: some messages were dropped (channel full); keep going.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => break,
             }
         }
-        let _ = app.emit(
-            &exit_event_id,
-            SessionExitPayload {
-                id: id_clone.clone(),
-            },
-        );
+        let _ = app.emit(&exit_event_id, SessionExitPayload { id: id_clone.clone() });
         log::debug!("Output forwarder for session {id_clone} terminated.");
     });
 
     Ok(())
+}
+
+/// Return the most-recent completed command blocks for a session.
+///
+/// Each block contains the command text, plain-text output (ANSI stripped),
+/// exit code, and timestamps — ready for agent consumption.
+///
+/// `limit` defaults to 20; maximum is 200.
+#[tauri::command]
+pub async fn get_blocks(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<TermBlock>, String> {
+    let limit = limit.unwrap_or(20).min(BlockStore::MAX_BLOCKS);
+    let store = manager
+        .get_block_store(&session_id)
+        .await
+        .ok_or("session not found")?;
+    let blocks = store.lock().await.recent(limit);
+    Ok(blocks)
 }
 
 /// Close a terminal session.
@@ -1525,34 +1550,42 @@ const SHELL_INTEGRATION_MARKER: &str = "# wmux shell integration";
 
 const SHELL_INTEGRATION_SH: &str = include_str!("shell-integration.sh");
 const SHELL_INTEGRATION_BASH_MARKER: &str = "# wmux shell integration for bash";
+// A unique line from the current script version; used to detect stale installs.
+// Must be absent from older/broken versions so the ⚡ button reappears for upgrades.
+const SHELL_INTEGRATION_BASH_UNIQUE: &str =
+    "# B marker: end of prompt text, beginning of user input";
 
 /// Write the wmux shell integration snippet into the user's PowerShell
-/// CurrentUserCurrentHost profile. Returns `"installed"` if newly written,
-/// `"already_installed"` if the marker is already present.
+/// CurrentUserCurrentHost profile. Replaces any existing (possibly stale)
+/// wmux block so the installed version always matches the current script.
 #[tauri::command]
 pub async fn install_shell_integration() -> Result<String, String> {
-    use std::io::Write as _;
-
     let profile_path = get_powershell_profile_path().map_err(|e| e.to_string())?;
 
     if let Some(parent) = profile_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    if profile_path.exists() {
-        let existing = std::fs::read_to_string(&profile_path).map_err(|e| e.to_string())?;
-        if existing.contains(SHELL_INTEGRATION_MARKER) {
-            return Ok("already_installed".to_string());
-        }
-    }
+    let existing = if profile_path.exists() {
+        std::fs::read_to_string(&profile_path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&profile_path)
-        .map_err(|e| e.to_string())?;
+    // Strip any previous wmux block so we always write the current version.
+    let base = if let Some(idx) = existing.find(SHELL_INTEGRATION_MARKER) {
+        existing[..idx].trim_end().to_string()
+    } else {
+        existing.trim_end().to_string()
+    };
 
-    write!(file, "\n\n{SHELL_INTEGRATION_PS1}").map_err(|e| e.to_string())?;
+    let new_content = if base.is_empty() {
+        format!("{SHELL_INTEGRATION_PS1}\n")
+    } else {
+        format!("{base}\n\n{SHELL_INTEGRATION_PS1}\n")
+    };
+
+    std::fs::write(&profile_path, new_content).map_err(|e| e.to_string())?;
     Ok("installed".to_string())
 }
 
@@ -1575,7 +1608,9 @@ fn get_powershell_profile_path() -> std::io::Result<PathBuf> {
     Ok(PathBuf::from(path_str))
 }
 
-/// Return whether the wmux shell integration is already present in $PROFILE.
+/// Return whether the *current version* of the wmux shell integration is
+/// present in $PROFILE. Returns false if the marker exists but the script
+/// content has changed, so the toolbar button reappears and triggers an update.
 #[tauri::command]
 pub async fn check_shell_integration() -> Result<bool, String> {
     let profile_path = match get_powershell_profile_path() {
@@ -1586,15 +1621,16 @@ pub async fn check_shell_integration() -> Result<bool, String> {
         return Ok(false);
     }
     let content = std::fs::read_to_string(&profile_path).map_err(|e| e.to_string())?;
-    Ok(content.contains(SHELL_INTEGRATION_MARKER))
+    Ok(content.contains(SHELL_INTEGRATION_PS1.trim_end()))
 }
 
-/// Return whether wmux bash integration is already present in ~/.bashrc inside WSL.
+/// Return whether the current wmux bash integration is present in ~/.bashrc inside WSL.
+/// Checks for a unique line from the current script so stale installs still show the ⚡ button.
 #[tauri::command]
 pub async fn check_shell_integration_wsl(distro: Option<String>) -> Result<bool, String> {
     let check_cmd = format!(
         "grep -qF '{}' ~/.bashrc 2>/dev/null && echo yes || echo no",
-        SHELL_INTEGRATION_BASH_MARKER
+        SHELL_INTEGRATION_BASH_UNIQUE
     );
     let mut cmd = Command::new("wsl.exe");
     if let Some(d) = &distro {
@@ -1607,21 +1643,23 @@ pub async fn check_shell_integration_wsl(distro: Option<String>) -> Result<bool,
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
 }
 
-/// Append the wmux bash integration snippet to ~/.bashrc inside WSL.
-/// Returns `"installed"` or `"already_installed"`.
+/// Install (or replace) the wmux bash integration snippet in ~/.bashrc inside WSL.
+/// Always strips any existing wmux block first so stale installs are updated.
 #[tauri::command]
 pub async fn install_shell_integration_wsl(distro: Option<String>) -> Result<String, String> {
-    if check_shell_integration_wsl(distro.clone()).await? {
-        return Ok("already_installed".to_string());
-    }
-
     // Normalise to LF so bash on Linux doesn't see stray \r characters.
     let script = SHELL_INTEGRATION_SH.replace("\r\n", "\n").replace('\r', "\n");
 
-    // Heredoc with a quoted delimiter suppresses variable expansion,
-    // so the escape sequences in the script are written verbatim.
+    // Use Python to strip all existing wmux blocks (sed was silently failing on some WSL configs).
+    // Finds the FIRST occurrence of the marker line and truncates the file there, removing all copies.
+    let py_strip = format!(
+        "import os; p=os.path.expanduser('~/.bashrc'); c=open(p).read() if os.path.exists(p) else ''; m='{}\\n'; i=c.find(m); s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); c2=c[:s].rstrip('\\n'); open(p,'w').write(c2+'\\n' if c2 else '')",
+        SHELL_INTEGRATION_BASH_MARKER
+    );
+
+    // Heredoc with a quoted delimiter suppresses variable expansion in the appended script.
     let install_cmd = format!(
-        "cat >> ~/.bashrc << 'WMUX_INTEGRATION_EOF'\n\n{script}\nWMUX_INTEGRATION_EOF"
+        "python3 -c \"{py_strip}\"\ncat >> ~/.bashrc << 'WMUX_INTEGRATION_EOF'\n\n{script}\nWMUX_INTEGRATION_EOF"
     );
 
     let mut cmd = Command::new("wsl.exe");
@@ -1639,4 +1677,50 @@ pub async fn install_shell_integration_wsl(distro: Option<String>) -> Result<Str
     }
 
     Ok("installed".to_string())
+}
+
+/// Return whether the current wmux bash integration is present on a remote SSH host.
+#[tauri::command]
+pub async fn check_shell_integration_ssh(
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<bool, String> {
+    let check_cmd = format!(
+        "grep -qF '{}' ~/.bashrc 2>/dev/null && echo yes || echo no",
+        SHELL_INTEGRATION_BASH_UNIQUE
+    );
+    let result = tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &check_cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(result.trim() == "yes")
+}
+
+/// Install (or replace) the wmux bash integration snippet in ~/.bashrc on a remote SSH host.
+#[tauri::command]
+pub async fn install_shell_integration_ssh(
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<String, String> {
+    let script = SHELL_INTEGRATION_SH.replace("\r\n", "\n").replace('\r', "\n");
+
+    let py_strip = format!(
+        "import os; p=os.path.expanduser('~/.bashrc'); c=open(p).read() if os.path.exists(p) else ''; m='{}\\n'; i=c.find(m); s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); c2=c[:s].rstrip('\\n'); open(p,'w').write(c2+'\\n' if c2 else '')",
+        SHELL_INTEGRATION_BASH_MARKER
+    );
+    let install_cmd = format!(
+        "python3 -c \"{py_strip}\"\ncat >> ~/.bashrc << 'WMUX_INTEGRATION_EOF'\n\n{script}\nWMUX_INTEGRATION_EOF"
+    );
+
+    let result = tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &install_cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(result)
 }

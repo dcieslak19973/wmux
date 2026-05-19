@@ -649,7 +649,7 @@ html, body, #app {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  padding: 4px 4px 6px;
+  padding: 4px 4px 6px 8px;
 }
 
 .pane-footer {
@@ -788,6 +788,10 @@ html, body, #app {
 }
 .pane-tb-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.1); }
 .pane-tb-close:hover { color: #e06c75; }
+.pane-tb-blocks.is-installed { opacity: 0.35; }
+.pane-tb-blocks.is-installed:hover { opacity: 1; }
+.pane-tb-mcp { font-size: 10px; letter-spacing: 0.02em; color: #c678dd; }
+.pane-tb-mcp:hover { color: #e0aaff; }
 
 /* xterm.js overrides */
 .pane-terminal-host .xterm { height: 100%; }

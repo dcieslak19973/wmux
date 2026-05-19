@@ -887,12 +887,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     const key = event.key?.toLowerCase();
     const wantsPaste = (event.ctrlKey && !event.altKey && !event.shiftKey && key === 'v')
       || (!event.ctrlKey && !event.altKey && event.shiftKey && event.key === 'Insert');
+    // Return false so xterm doesn't process Ctrl+V as a key sequence.
+    // Do NOT preventDefault — let the browser fire the paste event, which
+    // the document-level capture handler below will intercept exclusively.
     if (!wantsPaste) return true;
-    event.preventDefault();
-    event.stopPropagation();
-    void readClipboardText()
-      .then((text) => pasteTextIntoPane(sessionId, text))
-      .catch((err) => showError(`Could not paste clipboard: ${err}`));
     return false;
   });
 
@@ -927,17 +925,23 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
   footerEl.appendChild(contextBadgeEl);
 
+  // Document-level capture handler — fires before xterm's own paste listeners.
+  // Intercepts all paste events while this terminal is focused, handles them
+  // via our path, and stops the event so xterm never sees it.
   const handleTerminalPaste = async (event) => {
+    if (!terminalHostEl.contains(document.activeElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
     const text = event.clipboardData?.getData('text/plain') ?? '';
     if (!text) return;
-    event.preventDefault();
     try {
       await pasteTextIntoPane(sessionId, text);
     } catch (err) {
       showError(`Could not paste into terminal: ${err}`);
     }
   };
-  terminalHostEl.addEventListener('paste', handleTerminalPaste);
+  document.addEventListener('paste', handleTerminalPaste, { capture: true });
 
   // Per-pane command input buffer and history for Ctrl+Alt+H picker.
   let cmdLineBuf = '';
@@ -1131,10 +1135,11 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     const borderColor = failed ? '#f87171' : done ? '#4ade80' : accent;
     // Use individual assignments — cssText would wipe the top/height xterm.js sets
     // before calling onRender, making the element 0px tall and the border invisible.
+    el.style.left = '-8px';
+    el.style.width = 'calc(100% + 8px)';
     el.style.borderLeft = `3px solid ${borderColor}`;
     el.style.background = failed ? 'rgba(248,113,113,0.04)' : '';
     el.style.pointerEvents = 'none';
-    el.style.width = '100%';
     el.style.boxSizing = 'border-box';
     if (failed) {
       let badge = el.querySelector('.block-exit-badge');
@@ -1216,7 +1221,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   // ── End block tracking ─────────────────────────────────────────────────────
 
   const unlistenAll = () => {
-    terminalHostEl.removeEventListener('paste', handleTerminalPaste);
+    document.removeEventListener('paste', handleTerminalPaste, { capture: true });
     if (restoreReplayFrame) {
       cancelAnimationFrame(restoreReplayFrame);
       restoreReplayFrame = null;
@@ -1262,8 +1267,9 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
   // Pane action toolbar (shown on hover)
   const targetKind = getTargetKind(target);
-  const isBlocksCapable = targetKind === 'local' || targetKind === 'wsl';
+  const isBlocksCapable = targetKind === 'local' || targetKind === 'wsl' || targetKind === 'ssh';
   const isWsl = targetKind === 'wsl';
+  const isSsh = targetKind === 'ssh';
   const toolbarEl = document.createElement('div');
   toolbarEl.className = 'pane-toolbar';
   toolbarEl.innerHTML = `
@@ -1273,7 +1279,8 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn" data-action="markdown" title="Open markdown pane">MD</button>
     <button class="pane-tb-btn" data-action="artifact" title="Preview HTML artifact from output">HTML</button>
     <button class="pane-tb-btn" data-action="zoom" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
-    ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up block view">&#x26a1;</button>' : ''}
+    ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up shell integration">&#x26a1;</button>' : ''}
+    ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code MCP setup command">MCP</button>' : ''}
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
   toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); splitPane(sessionId, 'h'); });
@@ -1285,12 +1292,21 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   if (isBlocksCapable) {
     const blocksBtn = toolbarEl.querySelector('[data-action="blocks"]');
-    const checkCmd = isWsl ? 'check_shell_integration_wsl' : 'check_shell_integration';
-    const installCmd = isWsl ? 'install_shell_integration_wsl' : 'install_shell_integration';
-    const shellArgs = isWsl ? { distro: target.distro ?? null } : {};
+    const checkCmd = isWsl ? 'check_shell_integration_wsl'
+                   : isSsh ? 'check_shell_integration_ssh'
+                   : 'check_shell_integration';
+    const installCmd = isWsl ? 'install_shell_integration_wsl'
+                     : isSsh ? 'install_shell_integration_ssh'
+                     : 'install_shell_integration';
+    const shellArgs = isWsl ? { distro: target.distro ?? null }
+                    : isSsh ? { host: target.host, user: target.user ?? null, port: target.port ?? null, identityFile: target.identity_file ?? null }
+                    : {};
 
     invoke(checkCmd, shellArgs).then((installed) => {
-      if (installed) blocksBtn.remove();
+      if (installed) {
+        blocksBtn.classList.add('is-installed');
+        blocksBtn.title = 'Shell integration installed (click to reinstall)';
+      }
     }).catch(() => {});
 
     blocksBtn.addEventListener('click', async (e) => {
@@ -1298,11 +1314,23 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       blocksBtn.disabled = true;
       try {
         await invoke(installCmd, shellArgs);
-        blocksBtn.remove();
+        blocksBtn.classList.add('is-installed');
+        blocksBtn.title = 'Shell integration installed (click to reinstall)';
       } catch (err) {
         blocksBtn.title = `Setup failed: ${err}`;
-        blocksBtn.disabled = false;
       }
+      blocksBtn.disabled = false;
+    });
+
+    const mcpBtn = toolbarEl.querySelector('[data-action="mcp"]');
+    // Local panes use PowerShell where $env:WMUX_API_BASE syntax differs — hardcode the port.
+    // WSL and SSH panes use bash, so $WMUX_API_BASE expands to the right IP/port automatically.
+    const mcpUrl = isWsl || isSsh ? '$WMUX_API_BASE/mcp' : 'http://localhost:7766/mcp';
+    const mcpCmd = `claude mcp add wmux --transport http --url ${mcpUrl}`;
+    mcpBtn.title = `Paste: ${mcpCmd}`;
+    mcpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      invoke('write_to_session', { id: sessionId, data: mcpCmd }).catch(() => {});
     });
   }
   leafEl.appendChild(toolbarEl);

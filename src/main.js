@@ -416,6 +416,13 @@ function showContextMenu(items, x, y) {
       menu.appendChild(sep);
       continue;
     }
+    if (item.type === 'label') {
+      const lbl = document.createElement('div');
+      lbl.className = 'context-menu-label';
+      lbl.textContent = item.text;
+      menu.appendChild(lbl);
+      continue;
+    }
     const btn = document.createElement('button');
     btn.className = `context-menu-item${item.danger ? ' danger' : ''}`;
     btn.textContent = item.label;
@@ -1480,21 +1487,47 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
 // Split type picker
 
-function showSplitTypePicker(paneId, dir, x, y) {
+async function showSplitTypePicker(paneId, dir, x, y) {
   const pane = panes.get(paneId);
   if (!pane) return;
   const cwd = pane.cwd || tabs.get(pane.tabId)?.cwd || '';
-  showContextMenu([
-    { label: 'Terminal', action: () => splitPane(paneId, dir) },
+
+  const items = [{ type: 'label', text: 'Terminal' }];
+
+  items.push({ label: 'Local', action: () => splitPane(paneId, dir, { type: 'local' }) });
+
+  try {
+    const distros = await invoke('list_wsl_distros');
+    for (const d of distros) {
+      items.push({
+        label: `WSL: ${d.name}${d.is_default ? ' (default)' : ''}`,
+        action: () => splitPane(paneId, dir, { type: 'wsl', distro: d.name }),
+      });
+    }
+  } catch { /* WSL unavailable */ }
+
+  const savedSsh = loadSavedSshTargets();
+  for (const conn of savedSsh) {
+    items.push({
+      label: `SSH: ${sshTargetDisplayName(conn)}`,
+      action: () => splitPane(paneId, dir, conn),
+    });
+  }
+
+  items.push(
+    { type: 'separator' },
+    { type: 'label', text: 'Pane' },
     { label: 'Browser', action: () => splitPaneWithBrowser(paneId, dir) },
     { label: 'Markdown', action: () => splitPaneWithMarkdown(paneId, dir) },
     { label: 'PR Review', action: () => splitPaneWithPrReview(paneId, dir, { cwd }) },
-  ], x, y);
+  );
+
+  showContextMenu(items, x, y);
 }
 
 // Split the active pane
 
-async function splitPane(paneId, dir) {
+async function splitPane(paneId, dir, target = null) {
   const pane = panes.get(paneId);
   if (!pane) return;
   if (isRemoteTmuxTarget(pane.target)) {
@@ -1526,7 +1559,7 @@ async function splitPane(paneId, dir) {
   sideBEl.style.display = 'flex';
   splitEl.appendChild(sideBEl);
 
-  const newSessionId = await createLeafPane(pane.tabId, getDefaultTarget(), sideBEl);
+  const newSessionId = await createLeafPane(pane.tabId, target ?? getDefaultTarget(), sideBEl);
   if (newSessionId) {
     activatePane(newSessionId);
   }

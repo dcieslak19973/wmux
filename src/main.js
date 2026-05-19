@@ -1350,7 +1350,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn" data-action="zoom" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up shell integration">&#x26a1;</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code MCP setup command">MCP</button>' : ''}
-    ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>' : ''}
+    <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
   toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); splitPane(sessionId, 'h'); });
@@ -1403,13 +1403,16 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       invoke('write_to_session', { id: sessionId, data: mcpCmd }).catch(() => {});
     });
 
-    const prBtn = toolbarEl.querySelector('[data-action="pr-review"]');
-    prBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const cwd = tabs.get(panes.get(sessionId)?.tabId)?.cwd ?? '';
-      splitPaneWithPrReview(sessionId, 'h', { cwd });
-    });
   }
+
+  const prBtn = toolbarEl.querySelector('[data-action="pr-review"]');
+  prBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const pane = panes.get(sessionId);
+    const cwd = pane?.cwd || tabs.get(pane?.tabId)?.cwd || '';
+    splitPaneWithPrReview(sessionId, 'h', { cwd });
+  });
+
   leafEl.appendChild(toolbarEl);
 
   if (isRemoteTmuxTarget(target)) {

@@ -2365,7 +2365,20 @@ body.has-tabs #empty-state { display: none; }
   font-weight: 600;
 }
 
-.pr-review-title { color: #e2e8f0; }
+.pr-review-title { color: #e2e8f0; flex-shrink: 0; }
+
+.pr-review-cwd-input {
+  flex: 1;
+  min-width: 0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #e2e8f0;
+  font-size: 11px;
+  padding: 2px 6px;
+  outline: none;
+}
+.pr-review-cwd-input:focus { border-color: #4ade80; }
 
 .pr-review-base-badge {
   font-size: 10px;

@@ -85,9 +85,9 @@ export function createPrReviewRuntime({
 
     prEl.innerHTML = `
       <div class="pr-review-bar">
-        <span class="pr-review-title">PR Review</span>
+        <span class="pr-review-title">PR</span>
+        <input class="pr-review-cwd-input" placeholder="Repo path…" spellcheck="false" />
         <span class="pr-review-base-badge"></span>
-        <span style="flex:1"></span>
         <button class="pr-review-btn" data-action="refresh" title="Refresh diff">&#x21bb;</button>
         <button class="pr-review-btn" data-action="zoom" title="Toggle zoom">&#x2922;</button>
         <button class="pr-review-btn pane-tb-close" data-action="close" title="Close">&#x2715;</button>
@@ -100,6 +100,7 @@ export function createPrReviewRuntime({
 
     mountEl.appendChild(prEl);
 
+    const cwdInput = prEl.querySelector('.pr-review-cwd-input');
     const baseBadge = prEl.querySelector('.pr-review-base-badge');
     const filesEl = prEl.querySelector('.pr-review-files');
     const diffEl = prEl.querySelector('.pr-review-diff');
@@ -113,6 +114,7 @@ export function createPrReviewRuntime({
       files: [],
       selectedPath: null,
     };
+    if (state.cwd) cwdInput.value = state.cwd;
     prReviewPanes.set(label, state);
     tabs.get(tabId)?.prReviewLabels?.add(label);
 
@@ -129,19 +131,34 @@ export function createPrReviewRuntime({
     };
 
     const loadSummary = async () => {
+      const cwd = cwdInput.value.trim();
+      if (!cwd) {
+        filesEl.innerHTML = '<div class="pr-review-empty">Enter a repo path above and press Enter.</div>';
+        diffEl.innerHTML = '';
+        baseBadge.textContent = '';
+        return;
+      }
+      state.cwd = cwd;
       filesEl.innerHTML = '<div class="pr-review-empty">Loading…</div>';
       diffEl.innerHTML = '<div class="pr-review-empty">Select a file to view its diff.</div>';
       state.selectedPath = null;
       try {
-        const summary = await invoke('get_pr_diff_summary', { cwd: state.cwd, base: null });
+        const summary = await invoke('get_pr_diff_summary', { cwd, base: null });
         state.baseRef = summary.base_ref;
         state.files = summary.files;
         baseBadge.textContent = `vs ${summary.base_ref}  +${summary.total_additions} -${summary.total_deletions}`;
         renderFileList(filesEl, summary.files, null, loadFile);
+        if (!summary.files.length) {
+          filesEl.innerHTML = '<div class="pr-review-empty">No changes vs base.</div>';
+        }
       } catch (err) {
         filesEl.innerHTML = `<div class="pr-review-empty">Error: ${escHtml(String(err))}</div>`;
       }
     };
+
+    cwdInput.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); await loadSummary(); }
+    });
 
     prEl.querySelector('[data-action="refresh"]').addEventListener('click', async () => {
       await loadSummary();

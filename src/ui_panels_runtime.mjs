@@ -228,10 +228,12 @@ export function createUiPanelsRuntime({
     } else if (targetTabId && tabs.get(targetTabId)?.workspaceId !== getActiveWorkspaceId()) {
       switchWorkspace(tabs.get(targetTabId).workspaceId);
     }
+    toggleArtifactPanel(false);
     if (sourcePane) {
       activateTab(sourcePane.tabId);
       activatePane(sourcePane.sessionId);
       await splitPaneWithBrowser(sourcePane.sessionId, 'h', { url: artifact.previewUrl });
+      setTimeout(() => activatePane(sourcePane.sessionId), 100);
       return;
     }
     if (targetTabId && tabs.has(targetTabId)) {
@@ -268,7 +270,7 @@ export function createUiPanelsRuntime({
           <div class="artifact-item" data-id="${item.id}">
             <div class="artifact-top">
               <div class="artifact-title">${escHtml(item.title)}</div>
-              <span class="artifact-kind">${escHtml(item.kind)}</span>
+              <span class="artifact-kind" data-kind="${escHtml(item.kind)}">${escHtml(item.kind)}</span>
             </div>
             <div class="artifact-meta">${escHtml(item.sourceLabel)} · ${new Date(item.time).toLocaleTimeString()}</div>
             <button class="artifact-open">Open</button>
@@ -301,10 +303,11 @@ export function createUiPanelsRuntime({
       const output = await invoke('capture_session_output_by_id', { id: paneId });
       const matches = extractHtmlArtifacts(output ?? '');
       if (matches.length === 0) {
-        showError('No HTML artifact found in recent pane output');
+        showError('No artifact found in recent pane output');
         return;
       }
       const tab = tabs.get(pane.tabId);
+      let firstId = null;
       for (const match of matches) {
         const existing = artifacts.find((item) => item.paneId === paneId && item.html === match.html);
         const previewUrl = await invoke('save_artifact_preview', { html: match.html });
@@ -313,10 +316,13 @@ export function createUiPanelsRuntime({
           existing.time = Date.now();
           existing.title = match.title;
           existing.kind = match.kind;
+          if (!firstId) firstId = existing.id;
           continue;
         }
+        const id = crypto.randomUUID();
+        if (!firstId) firstId = id;
         artifacts.unshift({
-          id: crypto.randomUUID(),
+          id,
           paneId,
           tabId: pane.tabId,
           tabTitle: tab?.title ?? 'Tab',
@@ -329,8 +335,7 @@ export function createUiPanelsRuntime({
         });
       }
       if (artifacts.length > 50) artifacts.length = 50;
-      artifactPanelVisible = true;
-      renderArtifactPanel();
+      if (firstId) await openArtifactPreview(firstId);
     } catch (err) {
       showError(`Could not preview artifact: ${err}`);
     }
@@ -432,6 +437,22 @@ export function createUiPanelsRuntime({
     if (!port) return;
     tab.ports.add(port);
     updateTabMeta(tabId);
+  }
+
+  function clearPaneNotifications(tabId, paneId) {
+    const list = notifications.get(tabId);
+    if (!list) return;
+    const before = list.length;
+    notifications.set(tabId, list.filter((n) => n.paneId !== paneId));
+    const after = notifications.get(tabId).length;
+    if (after !== before) {
+      if (after === 0) {
+        const tab = tabs.get(tabId);
+        if (tab) setTabRing(tab, false);
+      }
+      updateTabMeta(tabId);
+      if (getNotifPanelTabId() === tabId) renderNotifPanel(tabId);
+    }
   }
 
   function addNotification(tabId, notif) {
@@ -932,6 +953,7 @@ export function createUiPanelsRuntime({
     markTabNotificationsRead,
     markPaneNotificationsRead,
     clearTabNotifications,
+    clearPaneNotifications,
     getTabPortSummary,
     updateTabMeta,
     registerTabUrl,

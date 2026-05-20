@@ -1097,6 +1097,8 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     } else {
       term.write(bytes);
     }
+    const _pane = panes.get(sessionId);
+    if (_pane) _pane.lastOutputTime = Date.now();
     appendTranscriptChunk(decoded);
     if (sessionId !== activePaneId) {
       const tab = tabs.get(tabId);
@@ -1558,6 +1560,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     lastSentCols: initialCols,
     lastSentRows: initialRows,
     blocks: [],
+    lastOutputTime: null,
   };
   panes.set(sessionId, paneState);
   renderPaneContextBadge(sessionId);
@@ -2748,6 +2751,10 @@ function clearTabNotifications(tabId) {
   return result;
 }
 
+function clearPaneNotifications(tabId, paneId) {
+  panelsRuntime?.clearPaneNotifications(tabId, paneId);
+}
+
 function getTabPortSummary(tab) {
   return panelsRuntime?.getTabPortSummary(tab) ?? '';
 }
@@ -3420,6 +3427,8 @@ agentSidebarRuntime = createAgentSidebarRuntime({
   createTab,
   getDefaultTarget,
   escHtml,
+  addNotification,
+  clearPaneNotifications,
 });
 
 // Layout persistence

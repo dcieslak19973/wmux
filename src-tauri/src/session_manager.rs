@@ -113,6 +113,22 @@ impl BlockStore {
         let skip = self.blocks.len().saturating_sub(limit);
         self.blocks.iter().skip(skip).cloned().collect()
     }
+
+    pub fn is_running(&self) -> bool {
+        self.in_block
+    }
+
+    /// The command currently running, or the last completed command.
+    pub fn last_command(&self) -> Option<&str> {
+        if self.in_block && !self.pending_command.is_empty() {
+            return Some(&self.pending_command);
+        }
+        self.blocks.back().map(|b| b.command.as_str()).filter(|c| !c.is_empty())
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
 }
 
 fn now_ms() -> u64 {
@@ -418,6 +434,16 @@ impl Clone for SessionEntry {
     }
 }
 
+/// Summary of a session returned by `list_with_meta`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionMeta {
+    pub session_id: String,
+    pub label: String,
+    pub last_command: Option<String>,
+    pub is_running: bool,
+    pub block_count: usize,
+}
+
 #[derive(Clone)]
 pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
@@ -604,6 +630,99 @@ impl SessionManager {
 
     pub async fn list(&self) -> Vec<String> {
         self.sessions.lock().await.keys().cloned().collect()
+    }
+
+    /// List all sessions with block-store metadata for agent discovery.
+    pub async fn list_with_meta(&self) -> Vec<SessionMeta> {
+        let sessions = self.sessions.lock().await;
+        let mut result = Vec::new();
+        for (id, entry) in sessions.iter() {
+            let store = entry.block_store.lock().await;
+            result.push(SessionMeta {
+                session_id: id.clone(),
+                label: entry.label.clone(),
+                last_command: store.last_command().map(str::to_owned),
+                is_running: store.is_running(),
+                block_count: store.block_count(),
+            });
+        }
+        result
+    }
+
+    /// Write raw bytes to a session's PTY. Returns false if session not found.
+    pub async fn write_to(&self, id: &str, data: &[u8]) -> bool {
+        if let Some(session) = self.get(id).await {
+            session.write(data).await.is_ok()
+        } else {
+            false
+        }
+    }
+
+    /// Send `message` to a pane and wait for the response. Polls the raw output
+    /// buffer until `silence_secs` of no new output or `timeout_secs` elapses.
+    /// Returns the ANSI-stripped output produced after the message was sent.
+    pub async fn ask_and_wait(
+        &self,
+        id: &str,
+        message: &str,
+        timeout_secs: u64,
+        silence_secs: u64,
+    ) -> Result<String, String> {
+        let session = self.get(id).await
+            .ok_or_else(|| format!("session '{}' not found", id))?;
+        let output_buf = self.sessions.lock().await.get(id)
+            .map(|e| e.output_buf.clone())
+            .ok_or_else(|| "session not found".to_string())?;
+
+        // Record buffer length before writing.
+        let anchor = output_buf.lock().await.len();
+
+        // Write message with trailing newline.
+        let data = format!("{message}\n");
+        session.write(data.as_bytes()).await
+            .map_err(|e| format!("write failed: {e}"))?;
+
+        let timeout_dur = tokio::time::Duration::from_secs(timeout_secs.clamp(5, 600));
+        let silence_dur = tokio::time::Duration::from_secs(silence_secs.clamp(2, 30));
+        let poll = tokio::time::Duration::from_millis(300);
+
+        let deadline = tokio::time::Instant::now() + timeout_dur;
+        let mut last_len = anchor;
+        let mut last_change_at = tokio::time::Instant::now();
+
+        loop {
+            tokio::time::sleep(poll).await;
+            let current_len = output_buf.lock().await.len();
+            if current_len != last_len {
+                last_len = current_len;
+                last_change_at = tokio::time::Instant::now();
+            }
+            if last_change_at.elapsed() >= silence_dur || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+
+        let buf = output_buf.lock().await;
+        // If the rolling buffer was trimmed past our anchor, take everything available.
+        let start = anchor.min(buf.len());
+        let stripped = crate::url_detector::strip_ansi(&buf[start..]);
+        Ok(String::from_utf8_lossy(&stripped).into_owned())
+    }
+
+    /// Write `message` to every session except `exclude_id`. Returns sent session IDs.
+    pub async fn broadcast(&self, message: &str, exclude_id: Option<&str>) -> Vec<String> {
+        let ids: Vec<String> = self.sessions.lock().await.keys()
+            .filter(|id| exclude_id != Some(id.as_str()))
+            .cloned()
+            .collect();
+        let data = format!("{message}\n");
+        let mut sent = Vec::new();
+        for id in ids {
+            if self.write_to(&id, data.as_bytes()).await {
+                sent.push(id);
+            }
+        }
+        sent
     }
 }
 

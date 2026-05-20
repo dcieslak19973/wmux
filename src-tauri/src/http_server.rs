@@ -44,7 +44,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-      "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions. Configure in Claude Code with: claude mcp add wmux --transport http --url $WMUX_API_BASE/mcp"
+      "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast. Configure in Claude Code with: claude mcp add wmux --transport http --url $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -223,6 +223,60 @@ async fn handle_mcp(body: &str, manager: &SessionManager) -> (u16, String) {
                             "type": "object",
                             "properties": {}
                         }
+                    },
+                    {
+                        "name": "list_agents",
+                        "description": "List all active wmux panes with metadata for agent discovery. Returns session_id, label (e.g. 'Ubuntu', 'user@host'), last_command (the most recent command run in that pane — useful for detecting which agent is running), is_running (whether a command is currently executing), and block_count. Works across local, WSL, and SSH panes.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    },
+                    {
+                        "name": "ask_agent",
+                        "description": "Send a message to another wmux pane and wait for its response. Writes the message to the pane's terminal (as if you typed it), then waits for the output to settle. Works with any agent running in any pane — local, WSL, or SSH. Use list_agents to discover available panes. For long-running agents, increase timeout_secs.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pane_id": {
+                                    "type": "string",
+                                    "description": "Target pane/session ID (from list_agents or list_sessions)."
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "description": "Message to send to the agent. Will be submitted with a trailing newline."
+                                },
+                                "timeout_secs": {
+                                    "type": "integer",
+                                    "description": "Maximum total wait time in seconds (5–600). Default 60.",
+                                    "default": 60
+                                },
+                                "silence_secs": {
+                                    "type": "integer",
+                                    "description": "Seconds of output silence that signals the agent is done responding (2–30). Default 5.",
+                                    "default": 5
+                                }
+                            },
+                            "required": ["pane_id", "message"]
+                        }
+                    },
+                    {
+                        "name": "broadcast",
+                        "description": "Send a message to all active wmux panes simultaneously. Useful for coordinating multiple agents (e.g. 'wrap up your current task'). Optionally exclude the calling pane.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "Message to broadcast to all panes."
+                                },
+                                "exclude_pane_id": {
+                                    "type": "string",
+                                    "description": "Optional pane ID to exclude (typically $WMUX_PANE_ID to avoid sending to yourself)."
+                                }
+                            },
+                            "required": ["message"]
+                        }
                     }
                 ]
             })
@@ -270,6 +324,30 @@ async fn dispatch_tool(
         "list_sessions" => {
             let ids = manager.list().await;
             serde_json::to_string_pretty(&ids).map_err(|e| e.to_string())
+        }
+        "list_agents" => {
+            let meta = manager.list_with_meta().await;
+            serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())
+        }
+        "ask_agent" => {
+            let pane_id = args["pane_id"]
+                .as_str()
+                .ok_or_else(|| "pane_id is required".to_string())?;
+            let message = args["message"]
+                .as_str()
+                .ok_or_else(|| "message is required".to_string())?;
+            let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60);
+            let silence_secs = args["silence_secs"].as_u64().unwrap_or(5);
+            manager.ask_and_wait(pane_id, message, timeout_secs, silence_secs).await
+        }
+        "broadcast" => {
+            let message = args["message"]
+                .as_str()
+                .ok_or_else(|| "message is required".to_string())?;
+            let exclude = args["exclude_pane_id"].as_str();
+            let sent = manager.broadcast(message, exclude).await;
+            serde_json::to_string_pretty(&serde_json::json!({ "sent_to": sent }))
+                .map_err(|e| e.to_string())
         }
         _ => Err(format!("unknown tool: {}", name)),
     }

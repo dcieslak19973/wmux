@@ -8,9 +8,13 @@ export function createAgentSidebarRuntime({
   createTab,
   getDefaultTarget,
   escHtml,
+  addNotification = () => {},
+  clearPaneNotifications = () => {},
 }) {
   let sidebarEl = null;
-  let refreshTimer = null;
+  let _refreshing = false;
+  const prevStates = new Map();       // paneId → last known state
+  const lastNotifyTime = new Map();   // paneId → timestamp of last blocked notification
 
   // ── Agent registry ──────────────────────────────────────────────────────
 
@@ -37,9 +41,50 @@ export function createAgentSidebarRuntime({
 
   // ── Status helpers ──────────────────────────────────────────────────────
 
-  function isRunning(pane) {
-    const last = pane.blocks?.[pane.blocks.length - 1];
-    return last != null && last.exitCode === null;
+  const BLOCKED_MIN_MS = 8_000;
+  const BLOCKED_MAX_MS = 30 * 60 * 1000;
+  const NOTIFY_COOLDOWN_MS = 5 * 60 * 1000;
+
+  // Track visible screen content changes (bottom 10 rows of the terminal buffer).
+  function tickScreenSnapshot(pane) {
+    const screen = pane.serializeAddon?.serialize({ rows: 10 }) ?? null;
+    if (screen !== null && screen !== pane._screenSnapshot) {
+      pane._screenSnapshot = screen;
+      pane._screenSnapshotTime = Date.now();
+      pane._screenChangeCount = (pane._screenChangeCount ?? 0) + 1;
+    }
+  }
+
+  // Shell prompt suffixes — deliberately narrow: bash ($), zsh (%), root (#).
+  // Exclude ❯ and > because Claude Code's interactive menus also end lines with those.
+  const SHELL_PROMPT_RE = /[$%#]\s*$/;
+
+  function looksLikeShellPrompt(snapshot) {
+    if (!snapshot) return false;
+    const plain = snapshot.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+    const lines = plain.split(/\r?\n/).filter((l) => l.trim());
+    const last = lines[lines.length - 1] ?? '';
+    return SHELL_PROMPT_RE.test(last);
+  }
+
+  function agentState(pane) {
+    // OSC 133 panes: if last block finished, the agent process exited.
+    if (pane.blocks?.length > 0 && pane.blocks[pane.blocks.length - 1].ended_ms) return 'ready';
+
+    // Need at least a few screen changes before we can meaningfully detect state,
+    // to avoid false positives on panes that just opened.
+    const changes = pane._screenChangeCount ?? 0;
+    if (!pane._screenSnapshotTime || changes < 3) return 'idle';
+
+    const sinceLastChange = Date.now() - pane._screenSnapshotTime;
+    if (sinceLastChange < BLOCKED_MIN_MS) return 'working';
+
+    // Screen has been stable for 8 s+. Decide what that means:
+    // - Shell prompt visible → agent exited, pane is ready for a new task.
+    // - No shell prompt → some TUI (agent, vim, etc.) is waiting for input.
+    if (looksLikeShellPrompt(pane._screenSnapshot)) return 'ready';
+    if (sinceLastChange < BLOCKED_MAX_MS) return 'blocked';
+    return 'idle';
   }
 
   function getLastCommand(pane) {
@@ -58,15 +103,15 @@ export function createAgentSidebarRuntime({
     return `<span class="agent-badge" style="color:${agent.color};background:${agent.bg};border-color:${agent.border}">${escHtml(agent.label)}</span>`;
   }
 
-  function createPaneItem(summary, pane, running, lastCmd) {
+  function createPaneItem(summary, pane, state, lastCmd) {
     const agent = detectAgent(pane);
     const el = document.createElement('div');
-    el.className = `agent-sidebar-item${running ? ' running' : ''}${summary.active ? ' active' : ''}`;
+    el.className = `agent-sidebar-item${state === 'working' || state === 'ready' ? ' running' : ''}${state === 'blocked' ? ' blocked' : ''}${summary.active ? ' active' : ''}`;
     el.dataset.paneId = summary.paneId;
     el.dataset.agent = agent?.label ?? '';
     el.innerHTML = `
       <div class="agent-item-top">
-        <span class="agent-status-dot ${running ? 'running' : 'idle'}"></span>
+        <span class="agent-status-dot ${state}"></span>
         <span class="agent-item-name">${escHtml(summary.paneTitle || summary.targetLabel)}</span>
         ${agentBadgeHtml(agent)}
         <button class="agent-kill-btn" title="Close pane">&#x2715;</button>
@@ -99,14 +144,81 @@ export function createAgentSidebarRuntime({
   // ── Render / refresh ────────────────────────────────────────────────────
 
   function refresh() {
+    if (_refreshing) return;
+    _refreshing = true;
+    try { _refresh(); } finally { _refreshing = false; }
+  }
+
+  function _refresh() {
+    const summaries = listPaneSummaries();
+
+    // Tick screen snapshots and compute states
+    for (const summary of summaries) {
+      const pane = panes.get(summary.paneId);
+      if (!pane) continue;
+      tickScreenSnapshot(pane);
+
+      const state = agentState(pane);
+      const prev = prevStates.get(summary.paneId);
+
+      // H2: notify on →blocked, but only for panes running a known agent
+      if (state === 'blocked' && prev !== 'blocked') {
+        const agent = detectAgent(pane);
+        const lastNotify = lastNotifyTime.get(summary.paneId) ?? 0;
+        if (agent && Date.now() - lastNotify > NOTIFY_COOLDOWN_MS) {
+          const lastCmd = getLastCommand(pane);
+          addNotification(pane.tabId, {
+            title: `${agent.label} waiting for input`,
+            body: lastCmd ? `Last command: ${lastCmd}` : 'Agent is waiting for your input.',
+            paneId: summary.paneId,
+            time: Date.now(),
+          });
+          lastNotifyTime.set(summary.paneId, Date.now());
+        }
+      }
+
+      // Clear notification when agent exits or starts working again
+      if (prev === 'blocked' && state !== 'blocked') {
+        clearPaneNotifications(pane.tabId, summary.paneId);
+        lastNotifyTime.delete(summary.paneId);
+      }
+
+      prevStates.set(summary.paneId, state);
+    }
+
+    // Clean up closed panes
+    for (const id of prevStates.keys()) {
+      if (!panes.has(id)) {
+        prevStates.delete(id);
+        lastNotifyTime.delete(id);
+      }
+    }
+
+    // H3: AG button badge — blocked count across all workspaces
+    const blockedCount = summaries.filter((s) => {
+      const p = panes.get(s.paneId);
+      return p && agentState(p) === 'blocked';
+    }).length;
+    const agBtn = document.getElementById('btn-agent-sidebar');
+    if (agBtn) {
+      let badge = agBtn.querySelector('.ag-blocked-badge');
+      if (blockedCount > 0) {
+        if (!badge) {
+          badge = document.createElement('span');
+          badge.className = 'ag-blocked-badge';
+          agBtn.appendChild(badge);
+        }
+        badge.textContent = String(blockedCount);
+      } else {
+        badge?.remove();
+      }
+    }
+
     if (!sidebarEl) return;
     const listEl = sidebarEl.querySelector('.agent-sidebar-list');
     if (!listEl) return;
 
-    const summaries = listPaneSummaries();
     const currentIds = new Set(summaries.map((s) => s.paneId));
-
-    // Remove stale entries
     for (const el of [...listEl.querySelectorAll('[data-pane-id]')]) {
       if (!currentIds.has(el.dataset.paneId)) el.remove();
     }
@@ -122,25 +234,24 @@ export function createAgentSidebarRuntime({
     for (const summary of summaries) {
       const pane = panes.get(summary.paneId);
       if (!pane) continue;
-      const running = isRunning(pane);
+      const state = agentState(pane);
       const lastCmd = getLastCommand(pane);
 
       let el = listEl.querySelector(`[data-pane-id="${summary.paneId}"]`);
       if (!el) {
-        el = createPaneItem(summary, pane, running, lastCmd);
+        el = createPaneItem(summary, pane, state, lastCmd);
         listEl.appendChild(el);
       } else {
-        // In-place update — avoids losing hover state on kill button
-        el.classList.toggle('running', running);
+        el.classList.toggle('running', state === 'working' || state === 'ready');
+        el.classList.toggle('blocked', state === 'blocked');
         el.classList.toggle('active', summary.active);
         const dot = el.querySelector('.agent-status-dot');
-        if (dot) { dot.className = `agent-status-dot ${running ? 'running' : 'idle'}`; }
+        if (dot) dot.className = `agent-status-dot ${state}`;
         const cmdEl = el.querySelector('.agent-item-cmd');
         if (cmdEl && lastCmd) {
           cmdEl.textContent = lastCmd;
           cmdEl.classList.remove('agent-item-cmd-empty');
         }
-        // Update agent badge if detection changed
         const agent = detectAgent(pane);
         const agentLabel = agent?.label ?? '';
         if (el.dataset.agent !== agentLabel) {
@@ -166,7 +277,6 @@ export function createAgentSidebarRuntime({
 
   function open() {
     if (sidebarEl) return;
-
     sidebarEl = document.createElement('div');
     sidebarEl.className = 'agent-sidebar';
     sidebarEl.innerHTML = `
@@ -179,30 +289,21 @@ export function createAgentSidebarRuntime({
       </div>
       <div class="agent-sidebar-list"></div>
     `;
-
     document.querySelector('#content')?.appendChild(sidebarEl);
-
     sidebarEl.querySelector('.agent-sidebar-close').addEventListener('click', close);
-    sidebarEl.querySelector('.agent-spawn-btn').addEventListener('click', () => {
-      createTab(getDefaultTarget());
-    });
-
+    sidebarEl.querySelector('.agent-spawn-btn').addEventListener('click', () => createTab(getDefaultTarget()));
     refresh();
-    refreshTimer = setInterval(refresh, 600);
   }
 
   function close() {
     sidebarEl?.remove();
     sidebarEl = null;
-    clearInterval(refreshTimer);
-    refreshTimer = null;
   }
 
-  function toggle() {
-    if (sidebarEl) close(); else open();
-  }
-
+  function toggle() { if (sidebarEl) close(); else open(); }
   function isOpen() { return !!sidebarEl; }
+
+  setInterval(refresh, 600);
 
   return { toggle, open, close, isOpen, refresh };
 }

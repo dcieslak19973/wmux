@@ -974,6 +974,7 @@ body.has-tabs #empty-state { display: none; }
   border: 1px solid rgba(124,106,247,0.28);
 }
 
+
 .artifact-meta {
   color: var(--text-muted);
   font-size: 11px;
@@ -1087,11 +1088,47 @@ body.has-tabs #empty-state { display: none; }
   border-radius: 50%;
   flex-shrink: 0;
 }
+.agent-status-dot.working {
+  background: #4ade80;
+  animation: agent-pulse 1.4s ease-in-out infinite;
+}
 .agent-status-dot.running {
   background: #4ade80;
   animation: agent-pulse 1.4s ease-in-out infinite;
 }
-.agent-status-dot.idle { background: #475569; }
+.agent-status-dot.blocked {
+  background: #fb923c;
+  animation: agent-pulse-blocked 1.2s ease-in-out infinite;
+}
+.agent-status-dot.idle  { background: #475569; }
+.agent-status-dot.ready { background: #4ade80; } /* steady green: agent slot ready, nothing running */
+
+@keyframes agent-pulse-blocked {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(251,146,60,0.5); }
+  50%       { opacity: 0.75; box-shadow: 0 0 0 4px rgba(251,146,60,0); }
+}
+
+.agent-sidebar-item.blocked { background: rgba(251,146,60,0.06); }
+
+#btn-agent-sidebar {
+  position: relative;
+}
+.ag-blocked-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: #fb923c;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
 
 .agent-item-name {
   flex: 1;

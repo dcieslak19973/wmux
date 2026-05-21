@@ -1985,7 +1985,7 @@ pub async fn install_claude_hooks() -> Result<String, String> {
         settings["hooks"] = serde_json::json!({});
     }
 
-    for event in ["PreToolUse", "PostToolUse", "Stop", "Notification"] {
+    for event in ["PreToolUse", "PostToolUse", "Stop", "Notification", "UserPromptSubmit"] {
         let updated = merge_hook_entry(&settings["hooks"][event], CLAUDE_HOOK_CMD_PS1);
         settings["hooks"][event] = updated;
     }
@@ -2025,7 +2025,7 @@ h=s.setdefault('hooks',{{}});\
 cmd=binascii.unhexlify('{}').decode();\
 marker='agent-event?pane_id=';\
 entry={{'matcher':'','hooks':[{{'type':'command','command':cmd}}]}};\
-[h.__setitem__(e,[x for x in h.get(e,[]) if not any(marker in hk.get('command','') for hk in x.get('hooks',[]))]+[entry]) for e in ['PreToolUse','PostToolUse','Stop','Notification']];\
+[h.__setitem__(e,[x for x in h.get(e,[]) if not any(marker in hk.get('command','') for hk in x.get('hooks',[]))]+[entry]) for e in ['PreToolUse','PostToolUse','Stop','Notification','UserPromptSubmit']];\
 os.makedirs(os.path.dirname(p),exist_ok=True);\
 open(p,'w').write(json.dumps(s,indent=2));\
 print('ok')\"",

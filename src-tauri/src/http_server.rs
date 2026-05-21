@@ -181,13 +181,16 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app:
             };
             let state = agent_hook_state_from_event(&data);
             manager.set_agent_hook_state(&pane_id, state.clone()).await;
-            let payload = serde_json::json!({
-                "pane_id": pane_id,
-                "hook_event": state.hook_event,
-                "tool": state.tool,
-                "message": state.message,
-                "event_ms": state.event_ms,
-            });
+            // Start with the full raw body so all Claude Code fields pass through,
+            // then overwrite/add our server-side fields.
+            let mut payload = data.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("pane_id".into(), serde_json::json!(pane_id));
+                obj.insert("hook_event".into(), serde_json::json!(state.hook_event));
+                obj.insert("tool".into(), serde_json::json!(state.tool));
+                obj.insert("message".into(), serde_json::json!(state.message));
+                obj.insert("event_ms".into(), serde_json::json!(state.event_ms));
+            }
             let _ = app.emit("agent-hook-event", payload);
             write_response(&mut stream, 200, r#"{"ok":true}"#).await;
         }

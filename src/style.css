@@ -1318,6 +1318,179 @@ body.has-tabs #empty-state { display: none; }
   padding: 20px;
 }
 
+/* ── Activity Log panel (Ctrl+Shift+L) ──────────────────────────────── */
+.activity-log-panel {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 440px;
+  max-height: 72vh;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+}
+.al-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.al-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.al-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.al-clear-btn {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 3px 7px;
+}
+.al-clear-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+.al-close-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.al-close-btn:hover { color: var(--text-primary); }
+.al-search-row {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.al-search {
+  width: 100%;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 5px 8px;
+  box-sizing: border-box;
+  outline: none;
+}
+.al-search:focus { border-color: var(--accent); }
+.al-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px;
+}
+.al-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 24px 12px;
+}
+.al-entry {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background: rgba(255,255,255,0.04);
+  cursor: pointer;
+  user-select: none;
+}
+.al-entry:hover { background: rgba(255,255,255,0.07); }
+.al-entry-top {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.al-agent-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.al-pane-name {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100px;
+}
+.al-spacer { flex: 1; }
+.al-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.al-badge-exit {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(74,222,128,0.15);
+  color: #4ade80;
+  white-space: nowrap;
+}
+.al-badge-exit.fail {
+  background: rgba(248,113,113,0.15);
+  color: #f87171;
+}
+.al-duration {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.al-entry-cmd {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+.al-entry-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  margin-bottom: 2px;
+}
+.al-output {
+  display: none;
+  margin-top: 6px;
+}
+.al-entry.expanded .al-output { display: block; }
+.al-output pre {
+  margin: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  color: var(--text-muted);
+  background: rgba(0,0,0,0.25);
+  border-radius: 4px;
+  padding: 8px;
+  overflow-x: auto;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ── Session Vault ───────────────────────────────────────────────────── */
 .session-vault-panel {
   position: absolute;
@@ -2134,6 +2307,7 @@ body.has-tabs #empty-state { display: none; }
   margin-top: auto;
 }
 #btn-agent-sidebar,
+#btn-activity-log,
 #btn-session-vault,
 #btn-settings {
   background: none;
@@ -2147,12 +2321,14 @@ body.has-tabs #empty-state { display: none; }
   flex-shrink: 0;
 }
 #btn-agent-sidebar,
+#btn-activity-log,
 #btn-session-vault {
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.08em;
 }
 #btn-agent-sidebar:hover,
+#btn-activity-log:hover,
 #btn-session-vault:hover,
 #btn-settings:hover { color: var(--accent); background: var(--bg-tab-hover); }
 

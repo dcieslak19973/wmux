@@ -35,6 +35,7 @@ import { createUiPanelsRuntime } from './ui_panels_runtime.mjs';
 import { createSurfaceRuntime } from './surfaces_runtime.mjs';
 import { createPrReviewRuntime } from './pr_review_runtime.mjs';
 import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
+import { createActivityLogRuntime } from './activity_log_runtime.mjs';
 import {
   createWorkspaceManager,
   DEFAULT_WORKSPACE_THEME_ID,
@@ -88,6 +89,7 @@ let surfaceRuntime = null;
 let panelsRuntime = null;
 let prReviewRuntime = null;
 let agentSidebarRuntime = null;
+let activityLogRuntime = null;
 let paneAuxRuntime = null;
 
 const workspaces = new Map();
@@ -1310,16 +1312,19 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       });
       block.decoration = dec ?? null;
 
-      // For failed blocks, fetch the full TermBlock output so the Fix button can
-      // include it. Fire-and-forget .then() — no new await in the init chain.
-      if (block.exitCode !== 0) {
+      // Fetch the full TermBlock output for: the Fix button (failed blocks) and
+      // the activity log (agent panes). One call serves both.
+      if (block.exitCode !== 0 || panes.get(sessionId)?.preferredAgent) {
         invoke('get_blocks', { sessionId, limit: 1 }).then((blocks) => {
           const rustBlock = blocks?.[blocks.length - 1];
           if (!rustBlock) return;
-          block.rustBlock = rustBlock;
-          // _decorationEl is set by onRender; re-render if it's already available,
-          // otherwise onRender will fire later and pick up rustBlock itself.
-          if (block._decorationEl) renderBlockDecoration(block._decorationEl, block);
+          if (block.exitCode !== 0) {
+            block.rustBlock = rustBlock;
+            // _decorationEl is set by onRender; re-render if it's already available,
+            // otherwise onRender will fire later and pick up rustBlock itself.
+            if (block._decorationEl) renderBlockDecoration(block._decorationEl, block);
+          }
+          activityLogRuntime?.onRustBlock(sessionId, rustBlock);
         }).catch(() => {});
       }
     });
@@ -3460,6 +3465,14 @@ agentSidebarRuntime = createAgentSidebarRuntime({
 
 void listen('agent-hook-event', (event) => {
   agentSidebarRuntime?.handleHookEvent(event.payload);
+  activityLogRuntime?.onHookEvent(event.payload);
+});
+
+activityLogRuntime = createActivityLogRuntime({
+  panes,
+  listPaneSummaries,
+  activatePane,
+  escHtml,
 });
 
 // Layout persistence
@@ -3636,6 +3649,7 @@ document.addEventListener('keydown', (e) => {
   }
 
   if (ctrl && !shift && !alt && key === 'i') { e.preventDefault(); toggleNotifPanel(); return; }
+  if (ctrl && shift && !alt && key.toUpperCase() === 'L') { e.preventDefault(); activityLogRuntime?.toggle(); return; }
 
   if (ctrl && shift && !alt && key.toUpperCase() === 'O') {
     e.preventDefault();
@@ -3771,6 +3785,7 @@ btnNewTab.addEventListener('click', () => createTab(getDefaultTarget()));
 btnNewTabMore.addEventListener('click', showNewTabPopover);
 updateNewTabTooltip();
 document.getElementById('btn-agent-sidebar')?.addEventListener('click', () => agentSidebarRuntime?.toggle());
+document.getElementById('btn-activity-log')?.addEventListener('click', () => activityLogRuntime?.toggle());
 document.getElementById('btn-session-vault')?.addEventListener('click', () => { void toggleSessionVaultPanel(); });
 document.getElementById('btn-settings')?.addEventListener('click', showSettingsPanel);
 

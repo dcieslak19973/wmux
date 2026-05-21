@@ -8,8 +8,12 @@
 ///   GET  /info                                  — capabilities document
 ///   GET  /sessions                              — list active session IDs
 ///   GET  /blocks?session_id=<id>&limit=<n>      — recent completed blocks for a pane
+///   GET  /agent-states                          — latest hook-pushed state per pane
+///   POST /agent-event?pane_id=<id>              — receive a Claude Code hook event
 ///   POST /mcp                                   — MCP JSON-RPC 2.0 (Streamable HTTP transport)
+use crate::session_manager::AgentHookState;
 use crate::SessionManager;
+use tauri::Emitter;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -42,6 +46,19 @@ const INFO_JSON: &str = r#"{
       "description": "Returns a JSON array of completed command blocks for a session, oldest first. Each block contains: id (sequence number), command (the command that was run), output (plain text, ANSI escape codes stripped), exit_code (integer or null), started_ms (unix epoch ms), ended_ms (unix epoch ms). Blocks are produced by OSC 133 shell integration — install it with the lightning bolt button in the pane toolbar."
     },
     {
+      "method": "GET",
+      "path": "/agent-states",
+      "description": "Returns the latest hook-pushed agent state for every pane that has reported one. Each entry: pane_id, hook_event (PreToolUse/PostToolUse/Stop/Notification/UserPromptSubmit), tool, message, event_ms."
+    },
+    {
+      "method": "POST",
+      "path": "/agent-event",
+      "params": {
+        "pane_id": "required — the pane ID to attribute this event to (use $WMUX_PANE_ID)"
+      },
+      "description": "Receive a Claude Code lifecycle hook event. POST the raw stdin JSON from a Claude Code hook here. Pane ID is passed as a query param. Used by the HK (hooks) toolbar button to give wmux authoritative agent state."
+    },
+    {
       "method": "POST",
       "path": "/mcp",
       "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast. Configure in Claude Code with: claude mcp add wmux --transport http --url $WMUX_API_BASE/mcp"
@@ -52,11 +69,11 @@ const INFO_JSON: &str = r#"{
 
 pub const PORT: u16 = 7766;
 
-pub fn start(manager: SessionManager) {
-    tauri::async_runtime::spawn(serve(manager));
+pub fn start(manager: SessionManager, app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(serve(manager, app));
 }
 
-async fn serve(manager: SessionManager) {
+async fn serve(manager: SessionManager, app: tauri::AppHandle) {
     // Bind on all interfaces so WSL2 can reach the server via the Windows host IP.
     // WSL2's localhost-forwarding proxy is unreliable for 127.0.0.1 binds;
     // 0.0.0.0 lets WSL2 connect through the virtual Ethernet adapter instead.
@@ -73,7 +90,7 @@ async fn serve(manager: SessionManager) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(handle(stream, manager.clone()));
+                tokio::spawn(handle(stream, manager.clone(), app.clone()));
             }
             Err(e) => {
                 log::warn!("HTTP accept error: {e}");
@@ -82,7 +99,7 @@ async fn serve(manager: SessionManager) {
     }
 }
 
-async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager) {
+async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app: tauri::AppHandle) {
     // 64 KB — plenty for any MCP JSON-RPC payload.
     let mut buf = vec![0u8; 65536];
     let n = match stream.read(&mut buf).await {
@@ -141,6 +158,39 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager) {
             let body = serde_json::to_string(&ids).unwrap_or_default();
             write_response(&mut stream, 200, &body).await;
         }
+        ("GET", "/agent-states") => {
+            let states = manager.get_all_agent_hook_states().await;
+            let body = serde_json::to_string(&states).unwrap_or_default();
+            write_response(&mut stream, 200, &body).await;
+        }
+        ("POST", "/agent-event") => {
+            let params = parse_query(query);
+            let pane_id = params.get("pane_id").cloned().unwrap_or_default();
+            if pane_id.is_empty() {
+                write_response(&mut stream, 400, r#"{"error":"pane_id required"}"#).await;
+                return;
+            }
+            let body_start = (header_end + 4).min(n);
+            let body = String::from_utf8_lossy(&req_bytes[body_start..n]);
+            let data: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => {
+                    write_response(&mut stream, 400, r#"{"error":"invalid JSON"}"#).await;
+                    return;
+                }
+            };
+            let state = agent_hook_state_from_event(&data);
+            manager.set_agent_hook_state(&pane_id, state.clone()).await;
+            let payload = serde_json::json!({
+                "pane_id": pane_id,
+                "hook_event": state.hook_event,
+                "tool": state.tool,
+                "message": state.message,
+                "event_ms": state.event_ms,
+            });
+            let _ = app.emit("agent-hook-event", payload);
+            write_response(&mut stream, 200, r#"{"ok":true}"#).await;
+        }
         ("POST", "/mcp") => {
             // If \r\n\r\n was absent (truncated request), body_start clamps to n → empty body.
             let body_start = (header_end + 4).min(n);
@@ -156,6 +206,27 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager) {
             write_response(&mut stream, 404, r#"{"error":"not found"}"#).await;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Agent hook event helpers
+// ---------------------------------------------------------------------------
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn agent_hook_state_from_event(data: &serde_json::Value) -> AgentHookState {
+    let hook_event = data["hook_event_name"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let tool = data["tool_name"].as_str().map(|s| s.to_string());
+    let message = data["message"].as_str().map(|s| s.to_string());
+    AgentHookState { hook_event, tool, message, event_ms: now_ms() }
 }
 
 // ---------------------------------------------------------------------------

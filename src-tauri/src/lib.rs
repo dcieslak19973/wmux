@@ -69,6 +69,10 @@ pub fn run() {
             commands::get_pr_diff_summary,
             commands::get_pr_file_diff,
             commands::ask_claude_about_diff,
+            commands::install_claude_hooks,
+            commands::check_claude_hooks,
+            commands::install_claude_hooks_wsl,
+            commands::check_claude_hooks_wsl,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
@@ -82,7 +86,7 @@ pub fn run() {
             let mgr: tauri::State<SessionManager> = app.state();
             let bridge: tauri::State<FrontendControlBridge> = app.state();
             ipc_server::start(app.handle().clone(), mgr.inner().clone(), bridge.inner().clone());
-            http_server::start(mgr.inner().clone());
+            http_server::start(mgr.inner().clone(), app.handle().clone());
 
             Ok(())
         })

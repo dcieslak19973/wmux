@@ -444,11 +444,26 @@ pub struct SessionMeta {
     pub block_count: usize,
 }
 
+/// Authoritative agent state pushed by a Claude Code hook event.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentHookState {
+    /// Raw hook event name: "PreToolUse", "PostToolUse", "Stop", "Notification", "UserPromptSubmit".
+    pub hook_event: String,
+    /// Tool name, present for PreToolUse/PostToolUse.
+    pub tool: Option<String>,
+    /// Notification message, present for Notification events.
+    pub message: Option<String>,
+    /// Unix epoch milliseconds when this event was received.
+    pub event_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
     /// Human-readable name → session ID (for tmux-compat IPC).
     named: Arc<Mutex<HashMap<String, String>>>,
+    /// Latest hook-pushed agent state per pane ID.
+    pub hook_states: Arc<Mutex<HashMap<String, AgentHookState>>>,
 }
 
 impl SessionManager {
@@ -456,7 +471,33 @@ impl SessionManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             named: Arc::new(Mutex::new(HashMap::new())),
+            hook_states: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub async fn set_agent_hook_state(&self, pane_id: &str, state: AgentHookState) {
+        self.hook_states.lock().await.insert(pane_id.to_string(), state);
+    }
+
+    pub async fn remove_agent_hook_state(&self, pane_id: &str) {
+        self.hook_states.lock().await.remove(pane_id);
+    }
+
+    pub async fn get_all_agent_hook_states(&self) -> Vec<serde_json::Value> {
+        self.hook_states
+            .lock()
+            .await
+            .iter()
+            .map(|(id, s)| {
+                serde_json::json!({
+                    "pane_id": id,
+                    "hook_event": s.hook_event,
+                    "tool": s.tool,
+                    "message": s.message,
+                    "event_ms": s.event_ms,
+                })
+            })
+            .collect()
     }
 
     /// Spawn a new ConPTY session for `target`. Returns `(session_id, tab_label)`.

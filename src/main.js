@@ -1387,6 +1387,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn" data-action="zoom" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up shell integration">&#x26a1;</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code MCP setup command">MCP</button>' : ''}
+    ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-hooks" data-action="hooks" title="Install Claude Code hooks for live agent state">HK</button>' : ''}
     <button class="pane-tb-btn pane-tb-agent" data-action="agent" title="Set preferred AI agent for this pane">AI</button>
     <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
@@ -1439,6 +1440,32 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     mcpBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       invoke('write_to_session', { id: sessionId, data: mcpCmd }).catch(() => {});
+    });
+
+    const hooksBtn = toolbarEl.querySelector('[data-action="hooks"]');
+    const installHooksCmd = isWsl ? 'install_claude_hooks_wsl' : 'install_claude_hooks';
+    const installHooksArgs = isWsl ? { distro: target.distro ?? null } : {};
+    const checkHooksCmd = isWsl ? 'check_claude_hooks_wsl' : 'check_claude_hooks';
+    const checkHooksArgs = isWsl ? { distro: target.distro ?? null } : {};
+
+    invoke(checkHooksCmd, checkHooksArgs).then((installed) => {
+      if (installed) {
+        hooksBtn.classList.add('is-installed');
+        hooksBtn.title = 'Claude Code hooks installed (click to reinstall)';
+      }
+    }).catch(() => {});
+
+    hooksBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      hooksBtn.disabled = true;
+      try {
+        await invoke(installHooksCmd, installHooksArgs);
+        hooksBtn.classList.add('is-installed');
+        hooksBtn.title = 'Claude Code hooks installed (click to reinstall)';
+      } catch (err) {
+        hooksBtn.title = `Hook install failed: ${err}`;
+      }
+      hooksBtn.disabled = false;
     });
 
   }
@@ -3429,6 +3456,10 @@ agentSidebarRuntime = createAgentSidebarRuntime({
   escHtml,
   addNotification,
   clearPaneNotifications,
+});
+
+void listen('agent-hook-event', (event) => {
+  agentSidebarRuntime?.handleHookEvent(event.payload);
 });
 
 // Layout persistence

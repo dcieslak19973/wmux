@@ -1207,6 +1207,34 @@ body.has-tabs #empty-state { display: none; }
   border: 1px solid;
 }
 
+.agent-live-badge {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  padding: 1px 4px;
+  flex-shrink: 0;
+  color: #4ade80;
+  background: rgba(74,222,128,0.1);
+  border: 1px solid rgba(74,222,128,0.3);
+}
+
+.agent-item-notif {
+  font-size: 11px;
+  color: #f59e0b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 3px;
+  padding-left: 13px;
+}
+
+.agent-sidebar-item.completed { background: rgba(74,222,128,0.06); }
+.agent-status-dot.completed { background: #4ade80; }
+
+.pane-tb-hooks.is-installed { color: #4ade80; }
+
 /* ── Notification panel (Ctrl+I) ───────────────────────────────── */
 .notif-panel {
   position: absolute;

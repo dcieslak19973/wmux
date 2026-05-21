@@ -1904,3 +1904,167 @@ pub async fn install_shell_integration_ssh(
     .map_err(|e| e.to_string())??;
     Ok(result)
 }
+
+// ---------------------------------------------------------------------------
+// Claude Code hook installation
+// ---------------------------------------------------------------------------
+
+/// Unique substring present in every wmux hook command — used to detect/replace existing installs.
+const CLAUDE_HOOK_UNIQUE: &str = "agent-event?pane_id=";
+
+/// PowerShell hook command — reads Claude Code's stdin JSON and posts it to wmux.
+const CLAUDE_HOOK_CMD_PS1: &str = concat!(
+    "$b=[Console]::In.ReadToEnd();",
+    "try{$null=Invoke-RestMethod",
+    " -Uri \"$env:WMUX_API_BASE/agent-event?pane_id=$env:WMUX_PANE_ID\"",
+    " -Method Post -Body $b -ContentType 'application/json' -TimeoutSec 2}catch{}"
+);
+
+/// Bash hook command — reads Claude Code's stdin JSON and posts it to wmux.
+const CLAUDE_HOOK_CMD_BASH: &str =
+    "curl -sf --max-time 2 -X POST \"$WMUX_API_BASE/agent-event?pane_id=$WMUX_PANE_ID\" -H \"Content-Type: application/json\" -d @- 2>/dev/null || true";
+
+fn get_claude_settings_path() -> Result<PathBuf, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "cannot find home directory".to_string())?;
+    Ok(PathBuf::from(home).join(".claude").join("settings.json"))
+}
+
+/// Merge the wmux hook entry into a hooks array for one event type, replacing
+/// any existing wmux entry so re-installs always write the current command.
+fn merge_hook_entry(
+    existing: &serde_json::Value,
+    new_cmd: &str,
+) -> serde_json::Value {
+    let filtered: Vec<serde_json::Value> = existing
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| {
+            !entry["hooks"]
+                .as_array()
+                .is_some_and(|hooks| {
+                    hooks.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .is_some_and(|cmd| cmd.contains(CLAUDE_HOOK_UNIQUE))
+                    })
+                })
+        })
+        .collect();
+
+    let mut entries = filtered;
+    entries.push(serde_json::json!({
+        "matcher": "",
+        "hooks": [{"type": "command", "command": new_cmd}]
+    }));
+    serde_json::Value::Array(entries)
+}
+
+/// Install wmux lifecycle hooks into the Windows Claude Code settings.json.
+/// Uses PowerShell syntax for the hook command since Claude runs in PowerShell on Windows.
+#[tauri::command]
+pub async fn install_claude_hooks() -> Result<String, String> {
+    let settings_path = get_claude_settings_path()?;
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let existing = if settings_path.exists() {
+        std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?
+    } else {
+        "{}".to_string()
+    };
+
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&existing).unwrap_or_else(|_| serde_json::json!({}));
+
+    if !settings["hooks"].is_object() {
+        settings["hooks"] = serde_json::json!({});
+    }
+
+    for event in ["PreToolUse", "PostToolUse", "Stop", "Notification"] {
+        let updated = merge_hook_entry(&settings["hooks"][event], CLAUDE_HOOK_CMD_PS1);
+        settings["hooks"][event] = updated;
+    }
+
+    let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&settings_path, content).map_err(|e| e.to_string())?;
+    Ok("installed".to_string())
+}
+
+/// Return whether the current wmux hooks are present in the Windows Claude settings.json.
+#[tauri::command]
+pub async fn check_claude_hooks() -> Result<bool, String> {
+    let settings_path = match get_claude_settings_path() {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
+    if !settings_path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+    Ok(content.contains(CLAUDE_HOOK_UNIQUE))
+}
+
+/// Install wmux lifecycle hooks into the WSL Claude Code settings.json (~/.claude/settings.json).
+/// Uses bash/curl syntax for the hook command.
+#[tauri::command]
+pub async fn install_claude_hooks_wsl(distro: Option<String>) -> Result<String, String> {
+    let hook_cmd_hex = hex_encode(CLAUDE_HOOK_CMD_BASH.as_bytes());
+
+    // Python merges the hook into ~/.claude/settings.json, replacing any existing wmux entry.
+    let install_cmd = format!(
+        "python3 -c \"\
+import json,os,binascii;\
+p=os.path.expanduser('~/.claude/settings.json');\
+s=json.loads(open(p).read()) if os.path.exists(p) else {{}};\
+h=s.setdefault('hooks',{{}});\
+cmd=binascii.unhexlify('{}').decode();\
+marker='agent-event?pane_id=';\
+entry={{'matcher':'','hooks':[{{'type':'command','command':cmd}}]}};\
+[h.__setitem__(e,[x for x in h.get(e,[]) if not any(marker in hk.get('command','') for hk in x.get('hooks',[]))]+[entry]) for e in ['PreToolUse','PostToolUse','Stop','Notification']];\
+os.makedirs(os.path.dirname(p),exist_ok=True);\
+open(p,'w').write(json.dumps(s,indent=2));\
+print('ok')\"",
+        hook_cmd_hex
+    );
+
+    let mut cmd = Command::new("wsl.exe");
+    if let Some(d) = &distro {
+        cmd.args(["--distribution", d.as_str()]);
+    }
+    let output = cmd
+        .args(["--", "bash", "-c", &install_cmd])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("error: {stderr}"));
+    }
+    Ok("installed".to_string())
+}
+
+/// Return whether the wmux hooks are present in the WSL Claude settings.json.
+#[tauri::command]
+pub async fn check_claude_hooks_wsl(distro: Option<String>) -> Result<bool, String> {
+    let check_cmd = "python3 -c \"\
+import json,os;\
+p=os.path.expanduser('~/.claude/settings.json');\
+s=json.loads(open(p).read()) if os.path.exists(p) else {};\
+print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get('hooks',{}).values() for e in v for hk in e.get('hooks',[])) else 'no')\
+\" 2>/dev/null || echo no";
+
+    let mut cmd = Command::new("wsl.exe");
+    if let Some(d) = &distro {
+        cmd.args(["--distribution", d.as_str()]);
+    }
+    let output = cmd
+        .args(["--", "bash", "-c", check_cmd])
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
+}

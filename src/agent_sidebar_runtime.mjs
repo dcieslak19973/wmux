@@ -15,6 +15,11 @@ export function createAgentSidebarRuntime({
   let _refreshing = false;
   const prevStates = new Map();       // paneId → last known state
   const lastNotifyTime = new Map();   // paneId → timestamp of last blocked notification
+  // Authoritative hook state from Claude Code lifecycle hooks.
+  const hookStates = new Map();       // paneId → { hook_event, tool, message, event_ms }
+
+  // Hook events older than this are considered stale; fall back to screen-scraping.
+  const HOOK_STALE_MS = 5 * 60 * 1000;
 
   // ── Agent registry ──────────────────────────────────────────────────────
 
@@ -68,6 +73,24 @@ export function createAgentSidebarRuntime({
   }
 
   function agentState(pane) {
+    // Prefer authoritative hook state when it's fresh.
+    const hook = hookStates.get(pane.sessionId);
+    if (hook && Date.now() - hook.event_ms < HOOK_STALE_MS) {
+      switch (hook.hook_event) {
+        case 'PreToolUse':
+        case 'PostToolUse':
+        case 'UserPromptSubmit':
+          return 'working';
+        case 'Stop':
+          return 'completed';
+        case 'Notification':
+          // Keep showing previous state; notification is supplemental.
+          return prevStates.get(pane.sessionId) ?? 'working';
+      }
+    }
+
+    // Fall back to screen-scraping heuristics.
+
     // OSC 133 panes: if last block finished, the agent process exited.
     if (pane.blocks?.length > 0 && pane.blocks[pane.blocks.length - 1].ended_ms) return 'ready';
 
@@ -85,6 +108,11 @@ export function createAgentSidebarRuntime({
     if (looksLikeShellPrompt(pane._screenSnapshot)) return 'ready';
     if (sinceLastChange < BLOCKED_MAX_MS) return 'blocked';
     return 'idle';
+  }
+
+  function hasLiveHookState(pane) {
+    const hook = hookStates.get(pane.sessionId);
+    return !!(hook && Date.now() - hook.event_ms < HOOK_STALE_MS);
   }
 
   function getLastCommand(pane) {
@@ -105,8 +133,11 @@ export function createAgentSidebarRuntime({
 
   function createPaneItem(summary, pane, state, lastCmd) {
     const agent = detectAgent(pane);
+    const hook = hookStates.get(summary.paneId);
+    const live = hasLiveHookState(pane);
+    const notifMsg = live && hook?.hook_event === 'Notification' ? hook.message : null;
     const el = document.createElement('div');
-    el.className = `agent-sidebar-item${state === 'working' || state === 'ready' ? ' running' : ''}${state === 'blocked' ? ' blocked' : ''}${summary.active ? ' active' : ''}`;
+    el.className = `agent-sidebar-item${state === 'working' || state === 'ready' ? ' running' : ''}${state === 'blocked' ? ' blocked' : ''}${state === 'completed' ? ' completed' : ''}${summary.active ? ' active' : ''}`;
     el.dataset.paneId = summary.paneId;
     el.dataset.agent = agent?.label ?? '';
     el.innerHTML = `
@@ -114,8 +145,10 @@ export function createAgentSidebarRuntime({
         <span class="agent-status-dot ${state}"></span>
         <span class="agent-item-name">${escHtml(summary.paneTitle || summary.targetLabel)}</span>
         ${agentBadgeHtml(agent)}
+        ${live ? '<span class="agent-live-badge" title="Authoritative state via Claude Code hooks">live</span>' : ''}
         <button class="agent-kill-btn" title="Close pane">&#x2715;</button>
       </div>
+      ${notifMsg ? `<div class="agent-item-notif">${escHtml(notifMsg)}</div>` : ''}
       ${lastCmd ? `<div class="agent-item-cmd">${escHtml(lastCmd)}</div>` : '<div class="agent-item-cmd agent-item-cmd-empty">no commands yet</div>'}
       <div class="agent-item-meta">
         <span class="agent-item-ws">${escHtml(summary.workspaceName)}</span>
@@ -303,7 +336,15 @@ export function createAgentSidebarRuntime({
   function toggle() { if (sidebarEl) close(); else open(); }
   function isOpen() { return !!sidebarEl; }
 
+  function handleHookEvent(payload) {
+    const { pane_id, hook_event, tool, message, event_ms } = payload ?? {};
+    if (!pane_id) return;
+    hookStates.set(pane_id, { hook_event, tool, message, event_ms });
+    // Clear completed state once the user opens the pane (handled in activatePane).
+    refresh();
+  }
+
   setInterval(refresh, 600);
 
-  return { toggle, open, close, isOpen, refresh };
+  return { toggle, open, close, isOpen, refresh, handleHookEvent };
 }

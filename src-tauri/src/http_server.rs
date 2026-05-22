@@ -14,9 +14,48 @@
 use crate::session_manager::AgentHookState;
 use crate::workbook::{render_workbook_html, WorkbookChart, WorkbookSpec, WorkbookStore};
 use crate::{FrontendControlBridge, SessionManager};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::{oneshot, Mutex};
+
+// ---------------------------------------------------------------------------
+// Browser content read-back state
+// ---------------------------------------------------------------------------
+
+/// Tracks in-flight `browser_read_content` MCP requests. The JS eval'd into
+/// the browser webview posts the page text to `POST /browser-content`, which
+/// completes the waiting oneshot channel.
+#[derive(Clone, Default)]
+pub struct BrowserContentPending {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
+}
+
+impl BrowserContentPending {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn register(&self, request_id: String) -> oneshot::Receiver<String> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(request_id, tx);
+        rx
+    }
+
+    async fn deliver(&self, request_id: &str, content: String) {
+        if let Some(tx) = self.pending.lock().await.remove(request_id) {
+            let _ = tx.send(content);
+        }
+    }
+
+    async fn cancel(&self, request_id: &str) {
+        self.pending.lock().await.remove(request_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 const INFO_JSON: &str = r#"{
   "name": "wmux",
@@ -62,7 +101,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -228,6 +267,36 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app:
             }
             let _ = app.emit("agent-hook-event", payload);
             write_response(&mut stream, 200, r#"{"ok":true}"#).await;
+        }
+        ("POST", "/browser-content") => {
+            // Callback endpoint: JS eval'd in a browser webview posts page text here.
+            // Read the full body, honoring Content-Length for payloads > initial buffer.
+            let params = parse_query(query);
+            let request_id = params.get("request_id").cloned().unwrap_or_default();
+            if request_id.is_empty() {
+                write_response_no_body(&mut stream, 400).await;
+                return;
+            }
+            let content_length: usize = headers
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|l| l.split(':').nth(1)?.trim().parse().ok())
+                .unwrap_or(0);
+            let body_start = (header_end + 4).min(n);
+            let mut body_bytes = req_bytes[body_start..n].to_vec();
+            const MAX_CONTENT: usize = 512 * 1024;
+            while body_bytes.len() < content_length.min(MAX_CONTENT) {
+                let mut chunk = vec![0u8; 65536];
+                match stream.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(k) => body_bytes.extend_from_slice(&chunk[..k]),
+                    Err(_) => break,
+                }
+            }
+            let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
+            let pending = app.state::<BrowserContentPending>();
+            pending.deliver(&request_id, body_str).await;
+            write_response_no_body(&mut stream, 204).await;
         }
         ("POST", "/mcp") => {
             // If \r\n\r\n was absent (truncated request), body_start clamps to n → empty body.
@@ -594,6 +663,18 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                             },
                             "required": ["label"]
                         }
+                    },
+                    {
+                        "name": "browser_read_content",
+                        "description": "Read the visible text (or raw HTML) of the page currently loaded in a browser pane. Works by evaluating a script inside the webview that posts the page content back to the wmux API. Works reliably for http:// pages and localhost dev servers. May time out on https:// pages with a strict Content-Security-Policy connect-src directive — in that case, fetch the URL directly instead.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label (from browser_list or browser_open)." },
+                                "format": { "type": "string", "enum": ["text", "html"], "description": "Return innerText (default) or full outerHTML." }
+                            },
+                            "required": ["label"]
+                        }
                     }
                 ]
             })
@@ -848,6 +929,47 @@ async fn dispatch_tool(
                 .request(app, "close-browser", serde_json::json!({ "label": label }))
                 .await?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_read_content" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let format = args.get("format").and_then(|v| v.as_str()).unwrap_or("text");
+
+            let win = app
+                .get_webview(label)
+                .ok_or_else(|| format!("browser pane '{}' not found", label))?;
+
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let pending = app.state::<BrowserContentPending>();
+            let rx = pending.register(request_id.clone()).await;
+
+            let js_extract = if format == "html" {
+                "document.documentElement.outerHTML.slice(0, 400000)"
+            } else {
+                "(document.body ? document.body.innerText : document.documentElement.textContent || '').slice(0, 200000)"
+            };
+
+            let js = format!(
+                r#"(function(){{try{{var c={extract};fetch('http://localhost:{port}/browser-content?request_id={rid}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:location.href,title:document.title,content:c}})}}).catch(function(){{}});}}catch(e){{}}}})()"#,
+                extract = js_extract,
+                port = PORT,
+                rid = request_id,
+            );
+
+            win.eval(&js).map_err(|e| e.to_string())?;
+
+            match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+                Ok(Ok(body)) => Ok(body),
+                Ok(Err(_)) => Err("browser content channel dropped".to_string()),
+                Err(_) => {
+                    pending.cancel(&request_id).await;
+                    Err(format!(
+                        "timed out reading content from browser pane '{}' — the page may have a restrictive Content-Security-Policy",
+                        label
+                    ))
+                }
+            }
         }
         _ => Err(format!("unknown tool: {}", name)),
     }

@@ -4,12 +4,14 @@ mod conpty;
 mod http_server;
 mod ipc_server;
 mod osc_parser;
+mod tunnel_manager;
 mod workbook;
 mod session_manager;
 mod url_detector;
 
 pub use control_bridge::FrontendControlBridge;
 pub use session_manager::{SessionManager, ShellTarget};
+pub use tunnel_manager::TunnelManager;
 
 use tauri::Manager;
 use tauri_plugin_updater::Builder as UpdaterPluginBuilder;
@@ -20,11 +22,13 @@ pub fn run() {
 
     let session_manager = SessionManager::new();
     let control_bridge = FrontendControlBridge::new();
+    let tunnel_manager = TunnelManager::new();
 
     tauri::Builder::default()
         .plugin(UpdaterPluginBuilder::new().build())
         .manage(session_manager)
         .manage(control_bridge)
+        .manage(tunnel_manager)
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
             commands::probe_remote_tmux_metadata,
@@ -35,6 +39,7 @@ pub fn run() {
             commands::list_sessions,
             commands::resize_session,
             commands::open_url,
+            commands::resolve_localhost_url,
             commands::read_clipboard_text,
             commands::list_wsl_distros,
             commands::start_session_stream,

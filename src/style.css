@@ -1859,6 +1859,19 @@ body.has-tabs #empty-state { display: none; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
 /* ── URL detection banner ─────────────────────────────────────────────────── */
+.wmux-link-tip {
+  position: fixed;
+  z-index: 9999;
+  padding: 3px 8px;
+  background: rgba(30, 30, 30, 0.92);
+  color: #e0e0e0;
+  font-size: 11px;
+  border-radius: 4px;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+}
+
 .url-banner {
   position: absolute;
   bottom: 10px;

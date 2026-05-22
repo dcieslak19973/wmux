@@ -907,7 +907,32 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   term.loadAddon(imageAddon);
   term.loadAddon(searchAddon);
   term.loadAddon(serializeAddon);
-  term.loadAddon(new WebLinksAddon());
+  term.loadAddon(new WebLinksAddon(async (_event, uri) => {
+    if (/^https?:\/\/(localhost|127\.0\.0\.1):/.test(uri)) {
+      try {
+        const resolved = await invoke('resolve_localhost_url', { paneId: sessionId, url: uri });
+        await openBrowserSplitForTab(tabId, resolved);
+      } catch (err) {
+        console.warn('[wmux] tunnel resolve failed, falling back to OS browser:', err);
+        window.open(uri, '_blank');
+      }
+    } else {
+      window.open(uri, '_blank');
+    }
+  }, {
+    hover(event) {
+      const tip = document.createElement('div');
+      tip.id = 'wmux-link-tip';
+      tip.className = 'wmux-link-tip';
+      tip.textContent = 'Ctrl+click to open';
+      tip.style.left = `${event.clientX + 12}px`;
+      tip.style.top  = `${event.clientY + 16}px`;
+      document.body.appendChild(tip);
+    },
+    leave() {
+      document.getElementById('wmux-link-tip')?.remove();
+    },
+  }));
   term.attachCustomKeyEventHandler((event) => {
     const key = event.key?.toLowerCase();
     const wantsPaste = (event.ctrlKey && !event.altKey && !event.shiftKey && key === 'v')
@@ -975,15 +1000,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   term.open(terminalHostEl);
   fitAddon.fit();
   // Log focus changes on the xterm textarea to diagnose keyboard-focus theft.
-  {
-    const ta = term.textarea;
-    if (ta) {
-      ta.addEventListener('focus', () =>
-        console.log(`[wmux FOCUS IN] t=${Date.now()} textarea focused`));
-      ta.addEventListener('blur', (e) =>
-        console.log(`[wmux FOCUS OUT] t=${Date.now()} textarea blurred → relatedTarget=${e.relatedTarget?.tagName}#${e.relatedTarget?.id}.${[...((e.relatedTarget?.classList) ?? [])].join('.')} activeElement=${document.activeElement?.tagName}#${document.activeElement?.id}`));
-    }
-  }
   const initialCols = term.cols || DEFAULT_COLS;
   const initialRows = term.rows || DEFAULT_ROWS;
 
@@ -1120,7 +1136,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   const unlistenUrl = await listen(`terminal-url-${sessionId}`, (event) => {
     const { url, is_oauth } = event.payload;
     registerTabUrl(tabId, url);
-    showUrlBanner(sessionId, url, is_oauth);
+    showUrlBanner(sessionId, tabId, url, is_oauth);
   });
 
   const unlistenClipboard = await listen(`terminal-clipboard-${sessionId}`, async (event) => {
@@ -2656,8 +2672,8 @@ function showError(msg) {
   return panelsRuntime?.showError(msg);
 }
 
-function showUrlBanner(sessionId, url, isOauth) {
-  return panelsRuntime?.showUrlBanner(sessionId, url, isOauth);
+function showUrlBanner(sessionId, tabId, url, isOauth) {
+  return panelsRuntime?.showUrlBanner(sessionId, tabId, url, isOauth);
 }
 
 

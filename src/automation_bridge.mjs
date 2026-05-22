@@ -95,6 +95,10 @@ export function createAutomationBridge({
       case 'navigate-browser':
         await windowObject.wmux.browser.navigate(payload.label, payload.url ?? '');
         return windowObject.wmux.browser.getState(payload.label);
+      case 'browser-back':
+        return windowObject.wmux.browser.back(payload.label);
+      case 'browser-forward':
+        return windowObject.wmux.browser.forward(payload.label);
       case 'close-browser':
         await windowObject.wmux.browser.close(payload.label);
         return {};

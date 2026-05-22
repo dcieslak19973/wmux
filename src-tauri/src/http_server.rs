@@ -13,7 +13,7 @@
 ///   POST /mcp                                   — MCP JSON-RPC 2.0 (Streamable HTTP transport)
 use crate::session_manager::AgentHookState;
 use crate::workbook::{render_workbook_html, WorkbookChart, WorkbookSpec, WorkbookStore};
-use crate::SessionManager;
+use crate::{FrontendControlBridge, SessionManager};
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -62,7 +62,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -527,6 +527,73 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                             },
                             "required": ["workbook_id", "chart_ids"]
                         }
+                    },
+                    {
+                        "name": "browser_list",
+                        "description": "List all open browser panes in wmux. Optionally filter by tab. Returns label, tabId, url, history, historyIndex, and active flag for each pane.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tab_id": { "type": "string", "description": "Optional tab ID to filter browser panes. Omit to list all." }
+                            }
+                        }
+                    },
+                    {
+                        "name": "browser_open",
+                        "description": "Open a URL in a new browser split pane in wmux. Returns the new pane's label and state.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "url": { "type": "string", "description": "URL to open." },
+                                "tab_id": { "type": "string", "description": "Tab to open the browser pane in. Defaults to the active tab." }
+                            },
+                            "required": ["url"]
+                        }
+                    },
+                    {
+                        "name": "browser_navigate",
+                        "description": "Navigate an existing browser pane to a new URL. Returns the updated pane state.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label (from browser_list or browser_open)." },
+                                "url": { "type": "string", "description": "URL to navigate to." }
+                            },
+                            "required": ["label", "url"]
+                        }
+                    },
+                    {
+                        "name": "browser_back",
+                        "description": "Navigate back in a browser pane's history.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label." }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    {
+                        "name": "browser_forward",
+                        "description": "Navigate forward in a browser pane's history.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label." }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    {
+                        "name": "browser_close",
+                        "description": "Close a browser pane in wmux.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label to close." }
+                            },
+                            "required": ["label"]
+                        }
                     }
                 ]
             })
@@ -534,7 +601,8 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
         "tools/call" => {
             let tool_name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-            match dispatch_tool(tool_name, &args, manager, app).await {
+            let bridge = app.state::<FrontendControlBridge>();
+            match dispatch_tool(tool_name, &args, manager, app, &bridge).await {
                 Ok(text) => serde_json::json!({
                     "content": [{"type": "text", "text": text}]
                 }),
@@ -557,6 +625,7 @@ async fn dispatch_tool(
     args: &serde_json::Value,
     manager: &SessionManager,
     app: &tauri::AppHandle,
+    bridge: &FrontendControlBridge,
 ) -> Result<String, String> {
     match name {
         "get_blocks" => {
@@ -720,6 +789,65 @@ async fn dispatch_tool(
                 "preview_url": WorkbookStore::preview_url(&saved.id)
             }))
             .map_err(|e| e.to_string())
+        }
+        "browser_list" => {
+            let tab_id = args.get("tab_id").and_then(|v| v.as_str());
+            let payload = match tab_id {
+                Some(id) => serde_json::json!({ "tabId": id }),
+                None => serde_json::Value::Null,
+            };
+            let result = bridge.request(app, "list-browsers", payload).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_open" => {
+            let url = args["url"]
+                .as_str()
+                .ok_or_else(|| "url is required".to_string())?;
+            let mut payload = serde_json::json!({ "url": url });
+            if let Some(tab_id) = args.get("tab_id").and_then(|v| v.as_str()) {
+                payload["tabId"] = serde_json::json!(tab_id);
+            }
+            let result = bridge.request(app, "open-browser", payload).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_navigate" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let url = args["url"]
+                .as_str()
+                .ok_or_else(|| "url is required".to_string())?;
+            let result = bridge
+                .request(app, "navigate-browser", serde_json::json!({ "label": label, "url": url }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_back" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let result = bridge
+                .request(app, "browser-back", serde_json::json!({ "label": label }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_forward" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let result = bridge
+                .request(app, "browser-forward", serde_json::json!({ "label": label }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_close" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let result = bridge
+                .request(app, "close-browser", serde_json::json!({ "label": label }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
         _ => Err(format!("unknown tool: {}", name)),
     }

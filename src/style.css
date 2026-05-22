@@ -30,6 +30,78 @@ html, body, #app {
 #app {
   display: flex;
   height: 100%;
+  position: relative;
+}
+
+/* ── Right dock ───────────────────────────────────────────────────────── */
+#right-dock {
+  flex-shrink: 0;
+  width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.2s ease;
+  background: var(--bg-sidebar);
+}
+
+#right-dock.has-panels {
+  width: 340px;
+  border-left: 1px solid var(--border);
+}
+
+/* Panels inside the dock lose floating geometry and fill the column. */
+#right-dock .agent-sidebar,
+#right-dock .activity-log-panel,
+#right-dock .session-vault-panel,
+#right-dock .artifact-panel,
+#right-dock .notif-panel,
+#right-dock .settings-panel {
+  position: static !important;
+  width: 100% !important;
+  max-height: none !important;
+  flex: 1 1 0;
+  min-height: 80px;
+  border-radius: 0 !important;
+  border: none !important;
+  border-bottom: 1px solid var(--border) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  z-index: auto !important;
+  transition: none !important;
+}
+
+#right-dock .agent-sidebar:last-child,
+#right-dock .activity-log-panel:last-child,
+#right-dock .session-vault-panel:last-child,
+#right-dock .artifact-panel:last-child,
+#right-dock .notif-panel:last-child,
+#right-dock .settings-panel:last-child {
+  border-bottom: none !important;
+}
+
+/* ── Panel pin button ─────────────────────────────────────────────────── */
+.panel-pin-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 1px 4px;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 3px;
+  opacity: 0.6;
+  transition: opacity 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.panel-pin-btn:hover {
+  opacity: 1;
+  color: var(--text-primary);
+}
+
+.panel-pin-btn.is-pinned {
+  color: var(--accent, #7c6af7);
+  opacity: 1;
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────────── */
@@ -661,12 +733,33 @@ html, body, #app {
 }
 
 .pane-footer {
-  flex: 0 0 auto;
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, calc(100% - 24px));
+  z-index: 10;
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 34px;
-  padding: 4px 8px 8px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.pane-footer.footer-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.footer-hotspot {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 48px;
+  z-index: 9;
+  pointer-events: auto;
 }
 
 .pane-leaf.active-pane {
@@ -712,8 +805,7 @@ html, body, #app {
 }
 
 .pane-context-badge {
-  max-width: min(420px, calc(100% - 24px));
-  min-width: min(180px, calc(100% - 24px));
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1027,7 +1119,7 @@ body.has-tabs #empty-state { display: none; }
 .agent-sidebar {
   position: absolute;
   top: 8px;
-  left: 8px;
+  left: calc(var(--sidebar-width) + 8px);
   width: 300px;
   max-height: calc(100% - 16px);
   background: var(--bg-sidebar);
@@ -1049,6 +1141,7 @@ body.has-tabs #empty-state { display: none; }
   font-weight: 600;
   color: var(--text-primary);
   flex-shrink: 0;
+  cursor: grab;
 }
 
 .agent-sidebar-title { flex: 1; }
@@ -1348,6 +1441,7 @@ body.has-tabs #empty-state { display: none; }
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  cursor: grab;
 }
 .al-title {
   font-size: 12px;
@@ -1531,6 +1625,7 @@ body.has-tabs #empty-state { display: none; }
 .session-vault-header {
   padding: 12px 14px 10px;
   border-bottom: 1px solid rgba(255,255,255,0.06);
+  cursor: grab;
 }
 
 .session-vault-title {
@@ -2354,7 +2449,7 @@ body.has-tabs #empty-state { display: none; }
 
 /* ── Settings panel ───────────────────────────────────────────────────────────── */
 .settings-panel {
-  position: fixed;
+  position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
@@ -2381,6 +2476,13 @@ body.has-tabs #empty-state { display: none; }
   font-size: 13px;
   color: var(--text-primary);
   background: #16171d;
+  cursor: grab;
+}
+
+.settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .settings-close {

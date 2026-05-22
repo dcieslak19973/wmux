@@ -311,12 +311,11 @@ function shortPathLabel(path) {
 function getPaneAutoLabel(pane) {
   if (!pane) return { primary: 'Terminal', secondary: '' };
 
-  const cwdShort = shortPathLabel(pane.cwd);
   const git = pane.gitContext;
   if (!git?.repo_root) {
     return {
       primary: basenameFromAnyPath(pane.cwd) || defaultTargetLabel(pane.target),
-      secondary: cwdShort,
+      secondary: '',
     };
   }
 
@@ -1149,6 +1148,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     if (pane) {
       pane.gitContext = metadata?.gitContext ?? null;
       renderPaneContextBadge(sessionId);
+      pane.fbFlash?.();
     }
   });
 
@@ -1563,6 +1563,54 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   });
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ── Footer badge auto-hide ────────────────────────────────────────────────
+  const footerHotspotEl = document.createElement('div');
+  footerHotspotEl.className = 'footer-hotspot';
+  leafEl.appendChild(footerHotspotEl);
+
+  let fbHideTimer = null;
+  let fbDwellTimer = null;
+
+  function fbShow() {
+    clearTimeout(fbHideTimer);
+    fbHideTimer = null;
+    footerEl.classList.add('footer-visible');
+  }
+  function fbHide() {
+    footerEl.classList.remove('footer-visible');
+    fbHideTimer = null;
+  }
+  function fbScheduleHide(delay) {
+    clearTimeout(fbHideTimer);
+    fbHideTimer = setTimeout(fbHide, delay);
+  }
+  function fbFlash() {
+    fbShow();
+    fbScheduleHide(2000);
+  }
+
+  // Show briefly on creation
+  fbFlash();
+
+  footerHotspotEl.addEventListener('mouseenter', () => {
+    clearTimeout(fbHideTimer);
+    fbHideTimer = null;
+    fbDwellTimer = setTimeout(fbShow, 200);
+  });
+  footerHotspotEl.addEventListener('mouseleave', () => {
+    clearTimeout(fbDwellTimer);
+    fbDwellTimer = null;
+    if (!footerEl.matches(':hover')) fbScheduleHide(500);
+  });
+  footerEl.addEventListener('mouseenter', () => {
+    clearTimeout(fbHideTimer);
+    fbHideTimer = null;
+  });
+  footerEl.addEventListener('mouseleave', () => {
+    fbScheduleHide(700);
+  });
+  // ─────────────────────────────────────────────────────────────────────────
+
   if (isRemoteTmuxTarget(target)) {
     leafEl.classList.add('pane-remote-tmux');
     for (const selector of ['[data-action="split-h"]', '[data-action="split-v"]']) {
@@ -1594,6 +1642,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     labelOverride: initialState?.labelOverride ?? null,
     preferredAgent: null,
     tbFlash,
+    fbFlash,
     lastSessionVaultEntryId: typeof initialState?.vaultEntryId === 'string' ? initialState.vaultEntryId : null,
     lastSessionVaultSignature: null,
     contextBadgeEl,
@@ -1608,6 +1657,19 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   };
   panes.set(sessionId, paneState);
   renderPaneContextBadge(sessionId);
+  // Eagerly fetch git context for the initial cwd so the badge shows
+  // repo/worktree info without waiting for the first OSC 7 event.
+  // For fresh panes without a restoredCwd, fall back to the tab's current cwd.
+  const initialGitCwd = restoredCwd || (!isRemoteTmuxTarget(target) ? (tabs.get(tabId)?.cwd ?? null) : null);
+  if (initialGitCwd && !isRemoteTmuxTarget(target)) {
+    updateTabCwd(tabId, initialGitCwd).then((metadata) => {
+      const pane = panes.get(sessionId);
+      if (pane) {
+        pane.gitContext = metadata?.gitContext ?? null;
+        renderPaneContextBadge(sessionId);
+      }
+    }).catch(() => {});
+  }
   if (pendingRestoreSnapshot) scheduleRestoreReplay();
 
   const tabState = tabs.get(tabId);

@@ -1,3 +1,5 @@
+import { makeDockable } from './panel_dock.mjs';
+
 export function createAgentSidebarRuntime({
   document,
   panes,
@@ -322,9 +324,9 @@ export function createAgentSidebarRuntime({
       </div>
       <div class="agent-sidebar-list"></div>
     `;
-    document.querySelector('#content')?.appendChild(sidebarEl);
     sidebarEl.querySelector('.agent-sidebar-close').addEventListener('click', close);
     sidebarEl.querySelector('.agent-spawn-btn').addEventListener('click', () => createTab(getDefaultTarget()));
+    makeDockable(sidebarEl, sidebarEl.querySelector('.agent-sidebar-header'), 'agent-sidebar');
     refresh();
   }
 

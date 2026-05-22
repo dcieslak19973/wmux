@@ -12,8 +12,9 @@
 ///   POST /agent-event?pane_id=<id>              — receive a Claude Code hook event
 ///   POST /mcp                                   — MCP JSON-RPC 2.0 (Streamable HTTP transport)
 use crate::session_manager::AgentHookState;
+use crate::workbook::{render_workbook_html, WorkbookChart, WorkbookSpec, WorkbookStore};
 use crate::SessionManager;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -61,7 +62,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-      "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast. Configure in Claude Code with: claude mcp add wmux --transport http --url $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -153,6 +154,40 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app:
                 }
             }
         }
+        ("GET", "/workbook") => {
+            let params = parse_query(query);
+            let Some(workbook_id) = params.get("id") else {
+                write_response(&mut stream, 400, r#"{"error":"id required"}"#).await;
+                return;
+            };
+            match WorkbookStore::from_app(&app).and_then(|store| store.get(workbook_id)) {
+                Ok(spec) => {
+                    let html = render_workbook_html(&spec);
+                    write_response_html(&mut stream, 200, &html).await;
+                }
+                Err(err) => {
+                    let status = if err.contains("not found") { 404 } else { 500 };
+                    write_response(&mut stream, status, &serde_json::json!({"error": err}).to_string()).await;
+                }
+            }
+        }
+        ("GET", "/workbook-data") => {
+            let params = parse_query(query);
+            let Some(workbook_id) = params.get("id") else {
+                write_response(&mut stream, 400, r#"{"error":"id required"}"#).await;
+                return;
+            };
+            match WorkbookStore::from_app(&app).and_then(|store| store.get(workbook_id)) {
+                Ok(spec) => {
+                    let body = serde_json::to_string_pretty(&spec).unwrap_or_default();
+                    write_response(&mut stream, 200, &body).await;
+                }
+                Err(err) => {
+                    let status = if err.contains("not found") { 404 } else { 500 };
+                    write_response(&mut stream, status, &serde_json::json!({"error": err}).to_string()).await;
+                }
+            }
+        }
         ("GET", "/sessions") => {
             let ids = manager.list().await;
             let body = serde_json::to_string(&ids).unwrap_or_default();
@@ -198,11 +233,35 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app:
             // If \r\n\r\n was absent (truncated request), body_start clamps to n → empty body.
             let body_start = (header_end + 4).min(n);
             let body = String::from_utf8_lossy(&req_bytes[body_start..n]);
-            let (status, resp_body) = handle_mcp(&body, &manager).await;
+            let (status, resp_body) = handle_mcp(&body, &manager, &app).await;
             if status == 204 {
                 write_response_no_body(&mut stream, 204).await;
             } else {
                 write_response(&mut stream, status, &resp_body).await;
+            }
+        }
+        ("GET", artifact_path) if artifact_path.starts_with("/artifact/") => {
+            let filename = &artifact_path["/artifact/".len()..];
+            // Reject any filename that attempts path traversal or contains separators.
+            if filename.is_empty()
+                || filename.contains('/')
+                || filename.contains('\\')
+                || filename.contains("..")
+            {
+                write_response(&mut stream, 400, r#"{"error":"invalid filename"}"#).await;
+                return;
+            }
+            let artifacts_dir = match app.path().app_data_dir() {
+                Ok(d) => d.join("artifacts"),
+                Err(_) => {
+                    write_response(&mut stream, 500, r#"{"error":"could not resolve app data dir"}"#).await;
+                    return;
+                }
+            };
+            let file_path = artifacts_dir.join(filename);
+            match tokio::fs::read_to_string(&file_path).await {
+                Ok(content) => write_response_html(&mut stream, 200, &content).await,
+                Err(_) => write_response(&mut stream, 404, r#"{"error":"artifact not found"}"#).await,
             }
         }
         _ => {
@@ -236,7 +295,7 @@ fn agent_hook_state_from_event(data: &serde_json::Value) -> AgentHookState {
 // MCP JSON-RPC 2.0 handler
 // ---------------------------------------------------------------------------
 
-async fn handle_mcp(body: &str, manager: &SessionManager) -> (u16, String) {
+async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle) -> (u16, String) {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => {
@@ -351,6 +410,123 @@ async fn handle_mcp(body: &str, manager: &SessionManager) -> (u16, String) {
                             },
                             "required": ["message"]
                         }
+                    },
+                    {
+                        "name": "workbook_list",
+                        "description": "List saved workbooks in wmux. Returns each workbook's id, title, subtitle, chart count, row count, and last updated time.",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "workbook_get",
+                        "description": "Fetch a saved workbook spec by id, including rows, columns, filters, metrics, charts, and layout.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string", "description": "Workbook id to fetch." }
+                            },
+                            "required": ["workbook_id"]
+                        }
+                    },
+                    {
+                        "name": "workbook_create",
+                        "description": "Create and persist a workbook spec, then return its id and browser preview URL. After creating, call workbook_open to display it in wmux. Example workbook shape: {\"title\":\"My Dashboard\",\"rows\":[{\"city\":\"Austin\",\"tempF\":91,\"condition\":\"Sunny\"}],\"columns\":[\"city\",\"tempF\",\"condition\"],\"metrics\":[{\"label\":\"Cities\",\"value\":5,\"detail\":\"in dataset\"}],\"charts\":[{\"title\":\"Temp by City\",\"kind\":\"bar\",\"groupBy\":\"city\",\"valueField\":\"tempF\",\"aggregation\":\"avg\",\"sort\":\"desc\"}],\"filters\":[{\"label\":\"Condition\",\"field\":\"condition\",\"kind\":\"select\"}]}. columns may be plain strings or {key,label} objects.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook": {
+                                    "type": "object",
+                                    "description": "Workbook spec. Required: title. Optional: rows (array of objects), columns (array of strings or {key,label} objects), metrics ([{label,value,detail}]), charts ([{title,kind,groupBy,valueField,aggregation,sort,limit}]), filters ([{label,field,kind}])."
+                                }
+                            },
+                            "required": ["workbook"]
+                        }
+                    },
+                    {
+                        "name": "workbook_update",
+                        "description": "Replace an existing workbook spec by id and return the updated workbook.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook": {
+                                    "type": "object",
+                                    "description": "Full workbook spec, including workbook id."
+                                }
+                            },
+                            "required": ["workbook"]
+                        }
+                    },
+                    {
+                        "name": "workbook_delete",
+                        "description": "Delete a saved workbook.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string" }
+                            },
+                            "required": ["workbook_id"]
+                        }
+                    },
+                    {
+                        "name": "workbook_open",
+                        "description": "Open a workbook as a live browser pane inside wmux. If workbook_id is supplied, opens an existing workbook. If a workbook object is supplied, persists it first then opens it. Always call this after workbook_create to make the workbook visible.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string" },
+                                "workbook": { "type": "object" }
+                            }
+                        }
+                    },
+                    {
+                        "name": "workbook_add_chart",
+                        "description": "Append a chart to a workbook's charts array.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string" },
+                                "chart": { "type": "object", "description": "Chart spec with title, groupBy, valueField, aggregation, sort, limit, and filters." }
+                            },
+                            "required": ["workbook_id", "chart"]
+                        }
+                    },
+                    {
+                        "name": "workbook_update_chart",
+                        "description": "Replace a chart inside a workbook by chart id.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string" },
+                                "chart": { "type": "object", "description": "Full chart spec including id." }
+                            },
+                            "required": ["workbook_id", "chart"]
+                        }
+                    },
+                    {
+                        "name": "workbook_remove_chart",
+                        "description": "Remove a chart from a workbook by chart id.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string" },
+                                "chart_id": { "type": "string" }
+                            },
+                            "required": ["workbook_id", "chart_id"]
+                        }
+                    },
+                    {
+                        "name": "workbook_reorder_charts",
+                        "description": "Reorder a workbook's charts with an ordered list of chart ids.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string" },
+                                "chart_ids": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "required": ["workbook_id", "chart_ids"]
+                        }
                     }
                 ]
             })
@@ -358,7 +534,7 @@ async fn handle_mcp(body: &str, manager: &SessionManager) -> (u16, String) {
         "tools/call" => {
             let tool_name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-            match dispatch_tool(tool_name, &args, manager).await {
+            match dispatch_tool(tool_name, &args, manager, app).await {
                 Ok(text) => serde_json::json!({
                     "content": [{"type": "text", "text": text}]
                 }),
@@ -380,6 +556,7 @@ async fn dispatch_tool(
     name: &str,
     args: &serde_json::Value,
     manager: &SessionManager,
+    app: &tauri::AppHandle,
 ) -> Result<String, String> {
     match name {
         "get_blocks" => {
@@ -423,6 +600,127 @@ async fn dispatch_tool(
             serde_json::to_string_pretty(&serde_json::json!({ "sent_to": sent }))
                 .map_err(|e| e.to_string())
         }
+        "workbook_list" => {
+            let store = WorkbookStore::from_app(app)?;
+            serde_json::to_string_pretty(&store.list()?).map_err(|e| e.to_string())
+        }
+        "workbook_get" => {
+            let workbook_id = args["workbook_id"]
+                .as_str()
+                .ok_or_else(|| "workbook_id is required".to_string())?;
+            let store = WorkbookStore::from_app(app)?;
+            serde_json::to_string_pretty(&store.get(workbook_id)?).map_err(|e| e.to_string())
+        }
+        "workbook_create" => {
+            let workbook: WorkbookSpec = serde_json::from_value(args["workbook"].clone())
+                .map_err(|e| e.to_string())?;
+            let store = WorkbookStore::from_app(app)?;
+            let saved = store.upsert(workbook)?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workbook": saved,
+                "preview_url": WorkbookStore::preview_url(&saved.id)
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "workbook_update" => {
+            let workbook: WorkbookSpec = serde_json::from_value(args["workbook"].clone())
+                .map_err(|e| e.to_string())?;
+            let store = WorkbookStore::from_app(app)?;
+            let saved = store.upsert(workbook)?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workbook": saved,
+                "preview_url": WorkbookStore::preview_url(&saved.id)
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "workbook_delete" => {
+            let workbook_id = args["workbook_id"]
+                .as_str()
+                .ok_or_else(|| "workbook_id is required".to_string())?;
+            let store = WorkbookStore::from_app(app)?;
+            store.delete(workbook_id)?;
+            serde_json::to_string_pretty(&serde_json::json!({"deleted": workbook_id}))
+                .map_err(|e| e.to_string())
+        }
+        "workbook_open" => {
+            let store = WorkbookStore::from_app(app)?;
+            let workbook = if let Some(workbook_value) = args.get("workbook") {
+                let workbook: WorkbookSpec = serde_json::from_value(workbook_value.clone())
+                    .map_err(|e| e.to_string())?;
+                store.upsert(workbook)?
+            } else {
+                let workbook_id = args["workbook_id"]
+                    .as_str()
+                    .ok_or_else(|| "workbook_id or workbook is required".to_string())?;
+                store.get(workbook_id)?
+            };
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workbook": workbook,
+                "preview_url": WorkbookStore::preview_url(&workbook.id)
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "workbook_add_chart" => {
+            let workbook_id = args["workbook_id"]
+                .as_str()
+                .ok_or_else(|| "workbook_id is required".to_string())?;
+            let chart: WorkbookChart = serde_json::from_value(args["chart"].clone())
+                .map_err(|e| e.to_string())?;
+            let store = WorkbookStore::from_app(app)?;
+            let saved = store.add_chart(workbook_id, chart)?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workbook": saved,
+                "preview_url": WorkbookStore::preview_url(&saved.id)
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "workbook_update_chart" => {
+            let workbook_id = args["workbook_id"]
+                .as_str()
+                .ok_or_else(|| "workbook_id is required".to_string())?;
+            let chart: WorkbookChart = serde_json::from_value(args["chart"].clone())
+                .map_err(|e| e.to_string())?;
+            let store = WorkbookStore::from_app(app)?;
+            let saved = store.update_chart(workbook_id, chart)?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workbook": saved,
+                "preview_url": WorkbookStore::preview_url(&saved.id)
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "workbook_remove_chart" => {
+            let workbook_id = args["workbook_id"]
+                .as_str()
+                .ok_or_else(|| "workbook_id is required".to_string())?;
+            let chart_id = args["chart_id"]
+                .as_str()
+                .ok_or_else(|| "chart_id is required".to_string())?;
+            let store = WorkbookStore::from_app(app)?;
+            let saved = store.remove_chart(workbook_id, chart_id)?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workbook": saved,
+                "preview_url": WorkbookStore::preview_url(&saved.id)
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "workbook_reorder_charts" => {
+            let workbook_id = args["workbook_id"]
+                .as_str()
+                .ok_or_else(|| "workbook_id is required".to_string())?;
+            let chart_ids = args["chart_ids"]
+                .as_array()
+                .ok_or_else(|| "chart_ids is required".to_string())?
+                .iter()
+                .filter_map(|value| value.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>();
+            let store = WorkbookStore::from_app(app)?;
+            let saved = store.reorder_charts(workbook_id, &chart_ids)?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workbook": saved,
+                "preview_url": WorkbookStore::preview_url(&saved.id)
+            }))
+            .map_err(|e| e.to_string())
+        }
         _ => Err(format!("unknown tool: {}", name)),
     }
 }
@@ -454,6 +752,20 @@ async fn write_response(stream: &mut tokio::net::TcpStream, status: u16, body: &
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+}
+
+async fn write_response_html(stream: &mut tokio::net::TcpStream, status: u16, body: &str) {
+    let reason = status_reason(status);
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n\

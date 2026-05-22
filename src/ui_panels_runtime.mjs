@@ -1,3 +1,5 @@
+import { buildWorkbookHtml } from './workbook_runtime.mjs';
+
 export function createUiPanelsRuntime({
   document,
   invoke,
@@ -261,6 +263,7 @@ export function createUiPanelsRuntime({
         <span>Artifacts</span>
         <div class="artifact-actions">
           <button class="artifact-btn" data-action="capture">Capture current</button>
+          <button class="artifact-btn" data-action="workbook-demo">Workbook demo</button>
           <button class="artifact-btn" data-action="clear">Clear</button>
           <button class="artifact-close" title="Close">✕</button>
         </div>
@@ -278,6 +281,7 @@ export function createUiPanelsRuntime({
       </div>
     `;
     panel.querySelector('[data-action="capture"]').addEventListener('click', () => previewArtifactFromPane());
+    panel.querySelector('[data-action="workbook-demo"]').addEventListener('click', () => openWorkbookDemo().catch((err) => showError(`Could not open workbook: ${err}`)));
     panel.querySelector('[data-action="clear"]').addEventListener('click', () => {
       artifacts.length = 0;
       renderArtifactPanel();
@@ -339,6 +343,38 @@ export function createUiPanelsRuntime({
     } catch (err) {
       showError(`Could not preview artifact: ${err}`);
     }
+  }
+
+  async function openWorkbookPreview(spec = {}, { openInBrowser = true } = {}) {
+    const previewHtml = buildWorkbookHtml(spec);
+    const previewUrl = await invoke('save_artifact_preview', { html: previewHtml });
+    const artifactId = crypto.randomUUID();
+    const artifact = {
+      id: artifactId,
+      paneId: spec.paneId ?? null,
+      tabId: tabs.has(getActiveTabId()) ? getActiveTabId() : null,
+      tabTitle: spec.tabTitle ?? tabs.get(getActiveTabId())?.title ?? 'Tab',
+      sourceLabel: spec.sourceLabel ?? 'Workbook',
+      title: String(spec.title ?? 'Workbook'),
+      kind: 'workbook',
+      html: previewHtml,
+      previewUrl,
+      time: Date.now(),
+    };
+    artifacts.unshift(artifact);
+    if (artifacts.length > 50) artifacts.length = 50;
+    if (openInBrowser) await openArtifactPreview(artifactId);
+    return {
+      id: artifact.id,
+      title: artifact.title,
+      kind: artifact.kind,
+      previewUrl: artifact.previewUrl,
+      tabId: artifact.tabId,
+    };
+  }
+
+  async function openWorkbookDemo(options = {}) {
+    return openWorkbookPreview({ title: 'New Workbook' }, options);
   }
 
   function markTabNotificationsRead(tabId) {
@@ -945,6 +981,8 @@ export function createUiPanelsRuntime({
     escHtml,
     extractHtmlArtifacts,
     openArtifactPreview,
+    openWorkbookPreview,
+    openWorkbookDemo,
     toggleArtifactPanel,
     renderArtifactPanel,
     previewArtifactFromPane,

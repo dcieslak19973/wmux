@@ -29,6 +29,8 @@ export function createAutomationBridge({
   closeTab,
   openBrowserSplitForTab,
   splitPaneWithBrowser,
+  openWorkbookPreview,
+  openWorkbookDemo,
   activateBrowser,
   browserNavigateRelative,
   reloadActiveBrowser,
@@ -96,6 +98,10 @@ export function createAutomationBridge({
       case 'close-browser':
         await windowObject.wmux.browser.close(payload.label);
         return {};
+      case 'open-workbook':
+        return openWorkbookPreview(payload.spec ?? payload.workbook ?? {}, { openInBrowser: payload.openInBrowser !== false });
+      case 'open-workbook-demo':
+        return openWorkbookDemo({ openInBrowser: payload.openInBrowser !== false });
       case 'list-notifications':
         return windowObject.wmux.notifications.list(payload.tabId ?? getActiveTabId());
       case 'publish-notification':
@@ -170,6 +176,10 @@ export function createAutomationBridge({
           active: browser.label === getActiveBrowserLabel(),
         };
       },
+    },
+    workbook: {
+      open: (spec = {}, options = {}) => openWorkbookPreview(spec, options),
+      demo: (options = {}) => openWorkbookDemo(options),
     },
     workspace: {
       list: () => orderedWorkspaceEntries().map((ws) => ({

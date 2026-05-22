@@ -34,17 +34,8 @@ export function createSurfaceRuntime({
   const browserPanes = new Map();
 
   function syncBrowserVisibility() {
-    for (const browser of browserPanes.values()) {
-      const tab = tabs.get(browser.tabId);
-      const visible = Boolean(
-        browser.created
-        && tab
-        && tab.workspaceId === getActiveWorkspaceId()
-        && getActiveTabId() === browser.tabId
-        && browser.browserEl.isConnected,
-      );
-      invoke('set_browser_visible', { label: browser.label, visible }).catch(() => {});
-    }
+    // Browser panes are now <iframe> elements inside the main WebView2.
+    // Visibility is handled entirely by CSS/DOM — no IPC needed.
   }
 
   async function openBrowserSplitForTab(tabId, url = '') {
@@ -55,9 +46,17 @@ export function createSurfaceRuntime({
     await splitPaneWithBrowser(paneId, 'h', { url });
   }
 
+  function normalizeBrowserUrl(url) {
+    const value = String(url ?? '').trim();
+    if (!value) return '';
+    if (/^(?:https?|file|data|about|blob):/i.test(value)) return value;
+    return `https://${value}`;
+  }
+
   function activateBrowser(label) {
     const state = browserPanes.get(label);
     if (!state) return;
+    console.log(`[wmux activateBrowser] t=${Date.now()} label=${label}`);
 
     clearActiveSurface();
     setActiveBrowserLabel(label);
@@ -95,7 +94,7 @@ export function createSurfaceRuntime({
     });
   }
 
-  async function closeBrowserSurface(label, { collapse = true } = {}) {
+  function closeBrowserSurface(label, { collapse = true } = {}) {
     const state = browserPanes.get(label);
     if (!state) return;
 
@@ -107,7 +106,6 @@ export function createSurfaceRuntime({
     if (tab?.zoomedSurfaceEl === state.browserEl) tab.zoomedSurfaceEl = null;
     if (getZoomedSurfaceEl() === state.browserEl) setZoomedSurfaceEl(null);
     if (getActiveBrowserLabel() === label) setActiveBrowserLabel(null);
-    await invoke('close_browser_window', { label }).catch(() => {});
 
     if (collapse) {
       collapsePaneBranch(state.browserEl);
@@ -245,7 +243,7 @@ export function createSurfaceRuntime({
     return label;
   }
 
-  async function createBrowserLeaf(tabId, mountEl, initialState = {}) {
+  function createBrowserLeaf(tabId, mountEl, initialState = {}) {
     const label = `browser-${crypto.randomUUID().slice(0, 8)}`;
     const browserEl = document.createElement('div');
     browserEl.className = 'pane-leaf browser-pane-leaf';
@@ -263,7 +261,8 @@ export function createSurfaceRuntime({
         <button class="browser-btn browser-go" id="bg-${label}">Go</button>
         <button class="browser-btn pane-tb-close" id="bc-${label}" title="Close browser">&#x2715;</button>
       </div>
-      <div class="browser-placeholder">Enter a URL and press Go</div>
+      <div class="browser-placeholder" id="bph-${label}">Enter a URL and press Go</div>
+      <iframe class="browser-iframe" id="bif-${label}" style="display:none;" title="Browser"></iframe>
     `;
     mountEl.appendChild(browserEl);
 
@@ -272,16 +271,16 @@ export function createSurfaceRuntime({
     const fwdBtn = document.getElementById(`bb-fwd-${label}`);
     const reloadBtn = document.getElementById(`bb-reload-${label}`);
     const zoomBtn = document.getElementById(`bb-zoom-${label}`);
-    const placeholderEl = browserEl.querySelector('.browser-placeholder');
+    const placeholderEl = document.getElementById(`bph-${label}`);
+    const iframeEl = document.getElementById(`bif-${label}`);
 
     const browserState = {
       label,
       tabId,
       browserEl,
+      iframeEl,
       history: Array.isArray(initialState.history) ? [...initialState.history] : [],
       historyIndex: Number.isInteger(initialState.historyIndex) ? initialState.historyIndex : -1,
-      created: false,
-      resizeObserver: null,
       currentUrl: '',
     };
     if (browserState.historyIndex >= browserState.history.length) browserState.historyIndex = browserState.history.length - 1;
@@ -298,47 +297,26 @@ export function createSurfaceRuntime({
     };
 
     const navigateTo = (url, { pushHistory = true } = {}) => {
-      let full = url.trim();
+      let full = normalizeBrowserUrl(url);
       if (!full) return;
-      if (!full.startsWith('http://') && !full.startsWith('https://')) full = `https://${full}`;
       urlInput.value = full;
 
-      const run = async () => {
-        if (!browserState.created) {
-          const rect = browserEl.getBoundingClientRect();
-          const barH = 36;
-          await invoke('create_browser_window', {
-            request: {
-              window_label: getWindowLabel(),
-              label,
-              url: full,
-              geometry: {
-                x: Math.round(rect.left),
-                y: Math.round(rect.top + barH),
-                width: Math.max(1, Math.round(rect.width)),
-                height: Math.max(1, Math.round(rect.height - barH)),
-              },
-            },
-          });
-          browserState.created = true;
-          placeholderEl?.remove();
-          syncBrowserVisibility();
-        } else {
-          await invoke('navigate_browser', { label, url: full });
-        }
+      if (iframeEl.style.display === 'none') {
+        // First navigation — show the iframe and hide the placeholder.
+        placeholderEl?.remove();
+        iframeEl.style.display = '';
+      }
+      iframeEl.src = full;
 
-        browserState.currentUrl = full;
-        if (pushHistory) {
-          const nextHistory = browserState.history.slice(0, browserState.historyIndex + 1);
-          if (nextHistory[nextHistory.length - 1] !== full) nextHistory.push(full);
-          browserState.history = nextHistory;
-          browserState.historyIndex = browserState.history.length - 1;
-        }
-        updateNavButtons();
-        onLayoutChanged?.();
-      };
-
-      run().catch((err) => showError(`Could not open browser: ${err}`));
+      browserState.currentUrl = full;
+      if (pushHistory) {
+        const nextHistory = browserState.history.slice(0, browserState.historyIndex + 1);
+        if (nextHistory[nextHistory.length - 1] !== full) nextHistory.push(full);
+        browserState.history = nextHistory;
+        browserState.historyIndex = browserState.history.length - 1;
+      }
+      updateNavButtons();
+      onLayoutChanged?.();
     };
 
     document.getElementById(`bg-${label}`).addEventListener('click', () => navigateTo(urlInput.value));
@@ -362,20 +340,6 @@ export function createSurfaceRuntime({
     zoomBtn.addEventListener('click', () => toggleSurfaceZoom(browserEl));
     document.getElementById(`bc-${label}`).addEventListener('click', async () => closeBrowserSurface(label));
 
-    const browserRO = new ResizeObserver(() => {
-      if (!browserState.created) return;
-      const rect = browserEl.getBoundingClientRect();
-      if (rect.width < 10 || rect.height < 40) return;
-      invoke('set_browser_geometry', {
-        label,
-        x: Math.round(rect.left),
-        y: Math.round(rect.top + 36),
-        width: Math.max(1, Math.round(rect.width)),
-        height: Math.max(1, Math.round(rect.height - 36)),
-      }).catch(() => {});
-    });
-    browserState.resizeObserver = browserRO;
-    browserRO.observe(browserEl);
     browserEl.addEventListener('mousedown', () => activateBrowser(label));
 
     const initialUrl = initialState.url || browserState.currentUrl;
@@ -399,7 +363,7 @@ export function createSurfaceRuntime({
     dividerEl.className = `pane-divider pane-divider-${dir}`;
     dividerEl.addEventListener('mousedown', makeDividerDrag(splitEl, dir));
     splitEl.appendChild(dividerEl);
-    await createBrowserLeaf(pane.tabId, splitEl, initialState);
+    createBrowserLeaf(pane.tabId, splitEl, initialState);
     fitAndResizePane(paneId);
     onLayoutChanged?.();
   }
@@ -441,7 +405,7 @@ export function createSurfaceRuntime({
     if (targetUrl) {
       const urlInput = browser.browserEl.querySelector('.browser-url');
       if (urlInput) urlInput.value = targetUrl;
-      invoke('navigate_browser', { label: browser.label, url: targetUrl }).catch((err) => showError(`Could not navigate browser: ${err}`));
+      if (browser.iframeEl) browser.iframeEl.src = targetUrl;
       browser.currentUrl = targetUrl;
       onLayoutChanged?.();
     }
@@ -450,8 +414,9 @@ export function createSurfaceRuntime({
 
   function reloadActiveBrowser() {
     const browser = browserPanes.get(getActiveBrowserLabel());
-    if (!browser?.currentUrl) return false;
-    invoke('navigate_browser', { label: browser.label, url: browser.currentUrl }).catch((err) => showError(`Could not reload browser: ${err}`));
+    if (!browser?.currentUrl || !browser.iframeEl) return false;
+    try { browser.iframeEl.contentWindow?.location?.reload(); }
+    catch { browser.iframeEl.src = browser.currentUrl; }
     return true;
   }
 

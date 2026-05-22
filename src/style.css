@@ -394,6 +394,14 @@ html, body, #app {
   font-size: 13px;
 }
 
+.browser-iframe {
+  flex: 1;
+  border: none;
+  display: block;
+  background: #0e0e11;
+  min-height: 0;
+}
+
 /* ── Markdown pane ────────────────────────────────────────────────────── */
 .markdown-pane-leaf {
   background: #111318;

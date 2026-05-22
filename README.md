@@ -187,6 +187,17 @@ wmux/
 - `tmux.exe` compatibility shim that covers the practical command/query subset agent harnesses expect for session creation, pane control, listing, capture, focus changes, and metadata queries. Detailed shim command and flag tracking lives in `docs/tmux-shim-compat.md`.
 - Child shells inherit honest terminal capability vars plus minimal tmux-presence env (`TMUX`, `TMUX_PANE`) and wmux-native identifiers (`WMUX`, `WMUX_PANE_ID`) so agent CLIs can detect multiplexer context without spoofing the terminal itself.
 
+## Workbook MCP App
+
+The workbook surface is the easiest way to try the MCP flow end to end:
+
+1. Click the `MCP` toolbar button in a pane and run the pasted `claude mcp add --transport http wmux http://localhost:7766/mcp` command in Claude Code.
+2. Ask Claude to call `workbook_create` or `workbook_open` with a workbook that has rows and at least one chart.
+3. Use the returned `preview_url` in wmux, or click `WKB` to open the built-in workbook demo surface.
+4. Iterate with `workbook_add_chart`, `workbook_update_chart`, `workbook_remove_chart`, and `workbook_reorder_charts`.
+
+See [docs/mcp-workbook-app.md](docs/mcp-workbook-app.md) for the resource shape, tool list, and a sample Claude prompt.
+
 ## Architecture notes
 
 - **ConPTY session lifecycle**: `create_session` → spawns shell via `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` → background thread reads output pipe → broadcasts via `tokio::broadcast` → Tauri emits `terminal-output-{id}` events to WebView.
@@ -203,6 +214,7 @@ For remote tmux specifically, the current contract is one wmux terminal tab equa
 
 - [ ] Widen `tmux.exe` compatibility for additional harness-driven tmux behaviors and edge cases.
 - [ ] Add agent-grade browser automation primitives beyond open/navigate/close and manual browser panes.
+- [ ] Shape the workbook dashboard flow into a full MCP app with persistent workbook resources, multiple charts, and iterative agent edits.
 - [ ] Enrich sidebar metadata with PR/review state, explicit service status, and stronger port attribution.
 - [ ] Add layout import and other state mutation APIs for full external workspace provisioning.
 - [ ] Continue improving restore fidelity for more transient UI state and cross-window coordination.

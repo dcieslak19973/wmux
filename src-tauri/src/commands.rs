@@ -1487,7 +1487,6 @@ pub async fn create_browser_window(app: AppHandle, request: CreateBrowserWindowR
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, GWL_STYLE, WS_EX_NOACTIVATE,
         };
-        let label_for_log = request.label.clone();
         let _ = webview.with_webview(move |wv| unsafe {
             let mut hwnd = HWND::default();
             let _ = wv.controller().ParentWindow(&mut hwnd);
@@ -1502,8 +1501,6 @@ pub async fn create_browser_window(app: AppHandle, request: CreateBrowserWindowR
             SetWindowLongPtrW(hwnd, GWL_STYLE, ws | WS_DISABLED_BIT);
             let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
-            let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            eprintln!("[wmux create_browser_window] t={ts} label={label_for_log} hwnd={hwnd:?} WS_DISABLED set");
         });
     }
 
@@ -1571,7 +1568,6 @@ pub async fn set_browser_focusable(
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, GWL_STYLE, WS_EX_NOACTIVATE,
         };
-        let label_for_log = label.clone();
         webview
             .with_webview(move |wv| {
                 unsafe {
@@ -1590,8 +1586,6 @@ pub async fn set_browser_focusable(
                     let flag = WS_EX_NOACTIVATE.0 as isize;
                     let new_ex = if focusable { ex & !flag } else { ex | flag };
                     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
-                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-                    eprintln!("[wmux set_browser_focusable] t={ts} label={label_for_log} focusable={focusable} hwnd={hwnd:?}");
                 }
             })
             .map_err(|e| e.to_string())?;

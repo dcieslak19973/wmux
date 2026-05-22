@@ -1,4 +1,5 @@
 import { buildWorkbookHtml } from './workbook_runtime.mjs';
+import { makeDockable } from './panel_dock.mjs';
 
 export function createUiPanelsRuntime({
   document,
@@ -294,7 +295,7 @@ export function createUiPanelsRuntime({
         await openArtifactPreview(itemEl.dataset.id);
       });
     });
-    document.getElementById('content').appendChild(panel);
+    makeDockable(panel, panel.querySelector('.artifact-header'), 'artifacts');
   }
 
   async function previewArtifactFromPane(paneId = getActivePaneId()) {
@@ -564,7 +565,7 @@ export function createUiPanelsRuntime({
     });
     tab?.tabEl.classList.remove('has-notif');
     updateTabMeta(tabId);
-    document.getElementById('content').appendChild(panel);
+    makeDockable(panel, panel.querySelector('.notif-header'), 'notif');
   }
 
   function showHistoryPicker() {
@@ -670,7 +671,10 @@ export function createUiPanelsRuntime({
   }
 
   function renderSessionVaultPanel() {
-    document.getElementById('session-vault-panel')?.remove();
+    const existing = document.getElementById('session-vault-panel');
+    if (existing) {
+      existing.remove();
+    }
     if (!sessionVaultPanelVisible) return;
 
     const visibleEntries = filteredSessionVaultEntries();
@@ -756,7 +760,7 @@ export function createUiPanelsRuntime({
       await openSessionVaultEntry(sessionVaultSelectedId);
     });
 
-    document.getElementById('content').appendChild(panel);
+    makeDockable(panel, panel.querySelector('.session-vault-header'), 'session-vault');
   }
 
   async function loadSessionVaultEntry(entryId) {
@@ -820,7 +824,7 @@ export function createUiPanelsRuntime({
     panel.id = 'settings-panel';
     panel.className = 'settings-panel';
     panel.innerHTML = `
-      <div class="settings-header"><span>Settings</span><button class="settings-close" title="Close">&#x2715;</button></div>
+      <div class="settings-header"><span>Settings</span><div class="settings-header-actions"><button class="settings-close" title="Close">&#x2715;</button></div></div>
       <div class="settings-body">
         <div class="settings-group">
           <div class="settings-group-label">Terminal</div>
@@ -849,7 +853,6 @@ export function createUiPanelsRuntime({
         <div class="settings-footer"><button class="settings-btn-apply" id="sp-apply">Apply</button><button class="settings-btn-reset" id="sp-reset">Reset to defaults</button></div>
       </div>
     `;
-    document.body.appendChild(panel);
     const draft = { ...s };
     const fontValEl = panel.querySelector('#sp-font-val');
     const currentVersionEl = panel.querySelector('#sp-update-current');
@@ -960,9 +963,10 @@ export function createUiPanelsRuntime({
     });
     panel.querySelector('.settings-close').addEventListener('click', () => panel.remove());
     panel.addEventListener('keydown', (event) => { if (event.key === 'Escape') panel.remove(); });
+    makeDockable(panel, panel.querySelector('.settings-header'), 'settings');
     setTimeout(() => {
       const onOut = (event) => {
-        if (!panel.contains(event.target)) {
+        if (!panel.contains(event.target) && panel.parentElement?.id !== 'right-dock') {
           panel.remove();
           document.removeEventListener('click', onOut);
         }

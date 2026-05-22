@@ -1,3 +1,5 @@
+import { makeDockable } from './panel_dock.mjs';
+
 export function createActivityLogRuntime({
   panes,
   listPaneSummaries,
@@ -257,7 +259,7 @@ export function createActivityLogRuntime({
       renderList();
     });
 
-    document.getElementById('content').appendChild(panelEl);
+    makeDockable(panelEl, panelEl.querySelector('.al-header'), 'activity-log');
     renderList();
     searchEl.focus();
   }

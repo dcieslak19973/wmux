@@ -36,6 +36,7 @@ import { createSurfaceRuntime } from './surfaces_runtime.mjs';
 import { createPrReviewRuntime } from './pr_review_runtime.mjs';
 import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
 import { createActivityLogRuntime } from './activity_log_runtime.mjs';
+import { createPaneRegistry } from './pane_registry.mjs';
 import {
   createWorkspaceManager,
   DEFAULT_WORKSPACE_THEME_ID,
@@ -94,6 +95,47 @@ let paneAuxRuntime = null;
 
 const workspaces = new Map();
 let activeWorkspaceId = null;
+
+const {
+  activatePane,
+  activateTab,
+  closePane,
+  closeTab,
+  collapsePaneBranch,
+} = createPaneRegistry({
+  tabs,
+  panes,
+  workspaces,
+  invoke,
+  document,
+  getActivePaneId:              () => activePaneId,
+  setActivePaneId:              (id) => { activePaneId = id; },
+  getActiveTabId:               () => activeTabId,
+  setActiveTabId:               (id) => { activeTabId = id; },
+  getActiveWorkspaceId:         () => activeWorkspaceId,
+  getZoomedSurface:             () => zoomedSurfaceEl,
+  setZoomedSurface:             (el) => { zoomedSurfaceEl = el; },
+  getNotifPanelTabId:           () => notifPanelTabId,
+  setNotifPanelTabId:           (id) => { notifPanelTabId = id; },
+  getRemoteTmuxInspectorState:  () => remoteTmuxInspectorState,
+  clearActiveSurface,
+  setPaneRing,
+  markPaneNotificationsRead,
+  fitAndResizePane,
+  setTabRing,
+  markTabNotificationsRead,
+  updateTabMeta,
+  syncBrowserVisibility,
+  markLayoutDirty,
+  getTabSurfaceElementByPath,
+  activateSurfaceElement,
+  refreshRemoteTmuxTabHealth,
+  saveSessionVaultEntryForPane,
+  closeRemoteTmuxInspector,
+  closeBrowserSurface,
+  closeMarkdownSurface,
+  updateTabNumbers,
+});
 
 const DEFAULT_UPDATE_MANIFEST_URL = 'https://github.com/dcieslak19973/wmux/releases/latest/download/latest.json';
 const DEFAULT_UPDATE_PUBKEY = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU3QzBGQzkzRTAyQUI5RkIKUldUN3VTcmdrL3pBVjVjcmE1dDRqNFFQbkZERFJ3MXk2bjhvN0FYNFJmZzZLaitkdFc5NlRCMXAK';
@@ -1416,7 +1458,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn" data-action="markdown" title="Open markdown pane">MD</button>
     <button class="pane-tb-btn" data-action="artifact" title="Preview HTML artifact from output">HTML</button>
     <button class="pane-tb-btn" data-action="workbook" title="Open interactive workbook app">WKB</button>
-    <button class="pane-tb-btn" data-action="zoom" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up shell integration">&#x26a1;</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code setup command for wmux MCP">MCP</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-hooks" data-action="hooks" title="Install Claude Code hooks for live agent state">HK</button>' : ''}
@@ -1430,7 +1471,6 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.querySelector('[data-action="markdown"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithMarkdown(sessionId, 'h'); });
   toolbarEl.querySelector('[data-action="artifact"]').addEventListener('click', (e) => { e.stopPropagation(); previewArtifactFromPane(sessionId); });
   toolbarEl.querySelector('[data-action="workbook"]').addEventListener('click', (e) => { e.stopPropagation(); panelsRuntime?.openWorkbookDemo?.().catch((err) => showError(`Could not open workbook: ${err}`)); });
-  toolbarEl.querySelector('[data-action="zoom"]').addEventListener('click', (e) => { e.stopPropagation(); toggleSurfaceZoom(leafEl); });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   if (isBlocksCapable) {
     const blocksBtn = toolbarEl.querySelector('[data-action="blocks"]');
@@ -1826,35 +1866,6 @@ function makeDividerDrag(splitEl, dir) {
   };
 }
 
-// Activate a pane
-
-function activatePane(paneId) {
-  const pane = panes.get(paneId);
-  if (!pane) return;
-
-  clearActiveSurface();
-  activePaneId = paneId;
-  pane.domEl.classList.add('active-pane');
-  pane.tbFlash?.();
-  const tab = tabs.get(pane.tabId);
-  if (tab) tab.lastActiveSurfaceEl = pane.domEl;
-  setPaneRing(paneId, false);
-  markPaneNotificationsRead(pane.tabId, paneId);
-  markLayoutDirty();
-
-  if (pane.tabId !== activeTabId) {
-    activateTab(pane.tabId);
-    return;
-  }
-
-  syncBrowserVisibility();
-  requestAnimationFrame(() => {
-    fitAndResizePane(paneId);
-    pane.terminal.focus();
-    if (tab) setTabRing(tab, false);
-  });
-}
-
 function activateBrowser(label) {
   return surfaceRuntime?.activateBrowser(label);
 }
@@ -1865,163 +1876,6 @@ function activateMarkdown(label) {
 
 function activatePrReview(label) {
   return prReviewRuntime?.activatePrReview(label);
-}
-
-// Activate a tab
-
-function activateTab(tabId) {
-  if (activeTabId && activeTabId !== tabId) {
-    const prev = tabs.get(activeTabId);
-    if (prev) {
-      prev.contentEl.classList.remove('visible');
-      prev.tabEl.classList.remove('active');
-    }
-  }
-
-  activeTabId = tabId;
-  const tab = tabs.get(tabId);
-  if (!tab) return;
-  const workspace = workspaces.get(tab.workspaceId);
-  if (workspace) workspace.lastActiveTabId = tabId;
-
-  tab.contentEl.classList.add('visible');
-  tab.tabEl.classList.add('active');
-  setTabRing(tab, false);
-  markTabNotificationsRead(tabId);
-  updateTabMeta(tabId);
-  syncBrowserVisibility();
-  markLayoutDirty();
-
-  requestAnimationFrame(() => {
-    const target = (activePaneId && tab.paneIds.has(activePaneId))
-      ? activePaneId
-      : [...tab.paneIds][0];
-    if (target) activatePane(target);
-    if (tab.pendingRestoreUi) {
-      const { activeSurfacePath, zoomedSurfacePath } = tab.pendingRestoreUi;
-      tab.pendingRestoreUi = null;
-      const surfaceEl = getTabSurfaceElementByPath(tab, activeSurfacePath);
-      if (surfaceEl) activateSurfaceElement(surfaceEl);
-      const zoomEl = getTabSurfaceElementByPath(tab, zoomedSurfacePath);
-      if (zoomEl) {
-        tab.contentEl.classList.add('zoom-mode');
-        zoomEl.classList.add('zoomed-pane');
-        tab.zoomedSurfaceEl = zoomEl;
-        zoomedSurfaceEl = zoomEl;
-      }
-    }
-    syncBrowserVisibility();
-    void refreshRemoteTmuxTabHealth(tabId);
-  });
-}
-
-// Close a pane
-
-function collapsePaneBranch(leafEl) {
-  if (!leafEl) return;
-
-  let branchEl = leafEl;
-  let parentEl = leafEl.parentElement;
-
-  while (parentEl && !parentEl.classList.contains('pane-split')) {
-    branchEl = parentEl;
-    parentEl = parentEl.parentElement;
-  }
-
-  if (parentEl && parentEl.classList.contains('pane-split')) {
-    const sibling = [...parentEl.children].find(
-      c => c !== branchEl && !c.classList.contains('pane-divider'),
-    );
-    if (sibling) {
-      let promote = sibling;
-      if (!sibling.classList.contains('pane-leaf') && !sibling.classList.contains('pane-split')) {
-        const inner = [...sibling.children].find(c => !c.classList.contains('pane-divider'));
-        if (inner) promote = inner;
-      }
-      promote.style.flex = '';
-      parentEl.parentElement.replaceChild(promote, parentEl);
-      return;
-    }
-  }
-
-  leafEl.remove();
-}
-
-async function closePane(paneId) {
-  const pane = panes.get(paneId);
-  if (!pane) return;
-
-  const tab = tabs.get(pane.tabId);
-  if (!tab || tab.paneIds.size <= 1) {
-    await closeTab(pane.tabId);
-    return;
-  }
-
-  await saveSessionVaultEntryForPane(paneId, { reason: 'pane-close' });
-  await _destroyPane(paneId);
-  collapsePaneBranch(pane.domEl);
-
-  if (activePaneId === paneId) {
-    const remaining = [...tab.paneIds];
-    if (remaining.length > 0) activatePane(remaining[remaining.length - 1]);
-  }
-
-  // Re-fit all remaining panes after the DOM has settled.
-  requestAnimationFrame(() => {
-    for (const pid of [...tab.paneIds]) fitAndResizePane(pid);
-  });
-  markLayoutDirty();
-}
-
-// Close an entire tab
-
-async function closeTab(tabId, skipWorkspaceCheck = false) {
-  const tab = tabs.get(tabId);
-  if (!tab) return;
-  if (remoteTmuxInspectorState?.tabId === tabId) closeRemoteTmuxInspector();
-  const workspace = workspaces.get(tab.workspaceId);
-
-  for (const browserEl of [...tab.contentEl.querySelectorAll('.browser-pane-leaf')]) {
-    const label = browserEl.dataset.browserLabel;
-    if (label) await closeBrowserSurface(label, { collapse: false });
-  }
-
-  for (const markdownEl of [...tab.contentEl.querySelectorAll('.markdown-pane-leaf')]) {
-    const label = markdownEl.dataset.markdownLabel;
-    if (label) closeMarkdownSurface(label, { collapse: false });
-  }
-
-  for (const paneId of [...tab.paneIds]) {
-    await saveSessionVaultEntryForPane(paneId, { reason: 'tab-close' });
-    await _destroyPane(paneId);
-  }
-
-  tab.contentEl.remove();
-  tab.tabEl.remove();
-  tabs.delete(tabId);
-  if (notifPanelTabId === tabId) notifPanelTabId = null;
-  if (workspace?.lastActiveTabId === tabId) {
-    const replacement = [...tabs.values()].find(t => t.workspaceId === tab.workspaceId);
-    workspace.lastActiveTabId = replacement?.tabId ?? null;
-  }
-
-  if (activeTabId === tabId) {
-    activeTabId  = null;
-    activePaneId = null;
-    // Find another tab in same workspace
-    const remaining = [...tabs.values()].filter(
-      t => t.workspaceId === activeWorkspaceId,
-    );
-    if (remaining.length > 0) {
-      activateTab(remaining[remaining.length - 1].tabId);
-    } else {
-      document.body.classList.remove('has-tabs');
-    }
-  }
-
-  updateTabNumbers();
-  syncBrowserVisibility();
-  markLayoutDirty();
 }
 
 async function probeRemoteTmuxMetadata(tabId, sessionId, target) {
@@ -2574,23 +2428,6 @@ async function openRemoteTmuxWorkspaceFromProfile(target) {
   renderWorkspaceBar();
   switchWorkspace(workspaceId);
   return createTab(normalized);
-}
-
-async function _destroyPane(paneId) {
-  const pane = panes.get(paneId);
-  if (!pane) return;
-  pane.unlisten();
-  pane.resizeObserver.disconnect();
-  pane.terminal.dispose();
-  const tab = tabs.get(pane.tabId);
-  if (tab) {
-    tab.paneIds.delete(paneId);
-    if (tab.lastActiveSurfaceEl === pane.domEl) tab.lastActiveSurfaceEl = null;
-    if (tab.zoomedSurfaceEl === pane.domEl) tab.zoomedSurfaceEl = null;
-  }
-  if (zoomedSurfaceEl === pane.domEl) zoomedSurfaceEl = null;
-  panes.delete(paneId);
-  try { await invoke('close_session', { id: paneId }); } catch { /* already dead */ }
 }
 
 async function closeBrowserSurface(label, { collapse = true } = {}) {
@@ -3871,7 +3708,6 @@ document.addEventListener('keydown', (e) => {
   }
 
   if (ctrl && alt && key.toLowerCase() === 'n') { e.preventDefault(); createWorkspace(); return; }
-  if (ctrl && alt && key === 'Enter') { e.preventDefault(); toggleSurfaceZoom(getCurrentSurfaceElement()); return; }
   if (alt && ctrl && key === 'ArrowLeft') { e.preventDefault(); focusAdjacentSurface('left'); return; }
   if (alt && ctrl && key === 'ArrowRight') { e.preventDefault(); focusAdjacentSurface('right'); return; }
   if (alt && ctrl && key === 'ArrowUp') { e.preventDefault(); focusAdjacentSurface('up'); return; }

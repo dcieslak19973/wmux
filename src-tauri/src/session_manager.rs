@@ -417,6 +417,7 @@ fn append_wslenv_value(existing: Option<String>, key: &str) -> String {
 struct SessionEntry {
     session: Arc<ConPtySession>,
     label: String,
+    target: ShellTarget,
     /// Rolling raw-byte output buffer (last 256 KB) for `capture-pane` support.
     output_buf: Arc<Mutex<Vec<u8>>>,
     /// OSC 133 block history for agent queries.
@@ -427,6 +428,7 @@ impl Clone for SessionEntry {
     fn clone(&self) -> Self {
         SessionEntry {
             session: self.session.clone(),
+            target: self.target.clone(),
             label: self.label.clone(),
             output_buf: self.output_buf.clone(),
             block_store: self.block_store.clone(),
@@ -600,7 +602,7 @@ impl SessionManager {
 
         self.sessions.lock().await.insert(
             id.clone(),
-            SessionEntry { session: Arc::new(session), label: label.clone(), output_buf, block_store },
+            SessionEntry { session: Arc::new(session), label: label.clone(), target, output_buf, block_store },
         );
         Ok((id, label))
     }
@@ -627,6 +629,10 @@ impl SessionManager {
 
     pub async fn get(&self, id: &str) -> Option<Arc<ConPtySession>> {
         self.sessions.lock().await.get(id).map(|e| e.session.clone())
+    }
+
+    pub async fn get_target(&self, id: &str) -> Option<ShellTarget> {
+        self.sessions.lock().await.get(id).map(|e| e.target.clone())
     }
 
     pub async fn get_block_store(&self, id: &str) -> Option<Arc<Mutex<BlockStore>>> {

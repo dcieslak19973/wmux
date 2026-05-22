@@ -129,7 +129,7 @@ export function createUiPanelsRuntime({
     if (!copied) throw new Error('clipboard write not available');
   }
 
-  function showUrlBanner(sessionId, url, isOauth) {
+  function showUrlBanner(sessionId, tabId, url, isOauth) {
     const pane = panes.get(sessionId);
     if (!pane) return;
     const banner = document.createElement('div');
@@ -151,7 +151,18 @@ export function createUiPanelsRuntime({
       try { await copyTextToClipboard(url); } catch (err) { showError(`Could not copy URL: ${err}`); }
     });
     banner.querySelector('.url-banner-open').addEventListener('click', async () => {
-      try { await invoke('open_url', { url }); } catch (err) { showError(`Could not open URL: ${err}`); }
+      const btn = banner.querySelector('.url-banner-open');
+      btn.disabled = true;
+      btn.textContent = 'Opening…';
+      try {
+        const resolved = await invoke('resolve_localhost_url', { paneId: sessionId, url });
+        await openBrowserSplitForTab(tabId, resolved);
+        banner.remove();
+      } catch (err) {
+        showError(`Could not open URL: ${err}`);
+        btn.disabled = false;
+        btn.textContent = 'Open in browser';
+      }
     });
     banner.querySelector('.url-banner-close').addEventListener('click', () => banner.remove());
     pane.domEl.appendChild(banner);

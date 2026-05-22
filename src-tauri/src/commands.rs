@@ -1,6 +1,6 @@
 /// Tauri IPC command handlers — the bridge between the WebView frontend
 /// and the Rust ConPTY session manager.
-use crate::{osc_parser::{self, OscEvent}, session_manager::{BlockStore, ShellTarget, TermBlock, WslDistro}, url_detector, FrontendControlBridge, SessionManager};
+use crate::{osc_parser::{self, OscEvent}, session_manager::{BlockStore, ShellTarget, TermBlock, WslDistro}, tunnel_manager::TunnelManager, url_detector, FrontendControlBridge, SessionManager};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -868,8 +868,10 @@ pub async fn get_blocks(
 #[tauri::command]
 pub async fn close_session(
     manager: State<'_, SessionManager>,
+    tunnels: State<'_, TunnelManager>,
     id: String,
 ) -> Result<(), String> {
+    tunnels.kill_for_pane(&id).await;
     manager.close(&id).await;
     Ok(())
 }
@@ -918,6 +920,24 @@ pub async fn open_url(url: String) -> Result<(), String> {
         return Err(format!("Refused to open non-localhost or malformed URL: {url}"));
     }
     opener::open_browser(&url).map_err(|e| e.to_string())
+}
+
+/// Resolve a localhost URL for a given pane, creating an SSH or WSL port-forward
+/// tunnel if needed.  Returns the URL to open in the wmux browser (remapped to
+/// the forwarded local port for SSH/WSL, unchanged for local sessions).
+#[tauri::command]
+pub async fn resolve_localhost_url(
+    pane_id: String,
+    url: String,
+    manager: State<'_, SessionManager>,
+    tunnels: State<'_, TunnelManager>,
+) -> Result<String, String> {
+    if !url_detector::is_safe_to_open(&url) {
+        return Err(format!("not a localhost URL: {url}"));
+    }
+    let target = manager.get_target(&pane_id).await
+        .ok_or_else(|| format!("session not found: {pane_id}"))?;
+    tunnels.resolve(&pane_id, &target, &url).await
 }
 
 /// Read plain text from the system clipboard.

@@ -4,6 +4,7 @@ mod conpty;
 mod http_server;
 mod ipc_server;
 mod osc_parser;
+mod workbook;
 mod session_manager;
 mod url_detector;
 
@@ -50,6 +51,9 @@ pub fn run() {
             commands::read_text_file,
             commands::create_app_window,
             commands::create_browser_window,
+            commands::focus_app_window,
+            commands::focus_main_webview,
+            commands::set_browser_focusable,
             commands::navigate_browser,
             commands::set_browser_visible,
             commands::set_browser_geometry,

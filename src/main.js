@@ -975,6 +975,16 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
   term.open(terminalHostEl);
   fitAddon.fit();
+  // Log focus changes on the xterm textarea to diagnose keyboard-focus theft.
+  {
+    const ta = term.textarea;
+    if (ta) {
+      ta.addEventListener('focus', () =>
+        console.log(`[wmux FOCUS IN] t=${Date.now()} textarea focused`));
+      ta.addEventListener('blur', (e) =>
+        console.log(`[wmux FOCUS OUT] t=${Date.now()} textarea blurred → relatedTarget=${e.relatedTarget?.tagName}#${e.relatedTarget?.id}.${[...((e.relatedTarget?.classList) ?? [])].join('.')} activeElement=${document.activeElement?.tagName}#${document.activeElement?.id}`));
+    }
+  }
   const initialCols = term.cols || DEFAULT_COLS;
   const initialRows = term.rows || DEFAULT_ROWS;
 
@@ -1052,7 +1062,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   term.onData(async (data) => {
     cancelRestoreReplay();
     try { await invoke('write_to_session', { id: sessionId, data }); }
-    catch (err) { console.warn('write_to_session error:', err); }
+    catch (err) { console.warn('[wmux terminal] write_to_session error:', err); }
     // Track commands typed for history picker.
     for (const ch of data) {
       if (escapeSequenceState === 1) {
@@ -1389,9 +1399,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn" data-action="browser" title="Open browser pane">&#x25a6;</button>
     <button class="pane-tb-btn" data-action="markdown" title="Open markdown pane">MD</button>
     <button class="pane-tb-btn" data-action="artifact" title="Preview HTML artifact from output">HTML</button>
+    <button class="pane-tb-btn" data-action="workbook" title="Open interactive workbook app">WKB</button>
     <button class="pane-tb-btn" data-action="zoom" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up shell integration">&#x26a1;</button>' : ''}
-    ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code MCP setup command">MCP</button>' : ''}
+    ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code setup command for wmux MCP">MCP</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-hooks" data-action="hooks" title="Install Claude Code hooks for live agent state">HK</button>' : ''}
     <button class="pane-tb-btn pane-tb-agent" data-action="agent" title="Set preferred AI agent for this pane">AI</button>
     <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
@@ -1402,6 +1413,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.querySelector('[data-action="browser"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithBrowser(sessionId, 'h'); });
   toolbarEl.querySelector('[data-action="markdown"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithMarkdown(sessionId, 'h'); });
   toolbarEl.querySelector('[data-action="artifact"]').addEventListener('click', (e) => { e.stopPropagation(); previewArtifactFromPane(sessionId); });
+  toolbarEl.querySelector('[data-action="workbook"]').addEventListener('click', (e) => { e.stopPropagation(); panelsRuntime?.openWorkbookDemo?.().catch((err) => showError(`Could not open workbook: ${err}`)); });
   toolbarEl.querySelector('[data-action="zoom"]').addEventListener('click', (e) => { e.stopPropagation(); toggleSurfaceZoom(leafEl); });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   if (isBlocksCapable) {
@@ -1440,7 +1452,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     // Local panes use PowerShell where $env:WMUX_API_BASE syntax differs — hardcode the port.
     // WSL and SSH panes use bash, so $WMUX_API_BASE expands to the right IP/port automatically.
     const mcpUrl = isWsl || isSsh ? '$WMUX_API_BASE/mcp' : 'http://localhost:7766/mcp';
-    const mcpCmd = `claude mcp add wmux --transport http --url ${mcpUrl}`;
+    const mcpCmd = `claude mcp add --transport http wmux ${mcpUrl}`;
     mcpBtn.title = `Paste: ${mcpCmd}`;
     mcpBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1757,6 +1769,7 @@ function activatePane(paneId) {
     return;
   }
 
+  syncBrowserVisibility();
   requestAnimationFrame(() => {
     fitAndResizePane(paneId);
     pane.terminal.focus();
@@ -3466,6 +3479,35 @@ agentSidebarRuntime = createAgentSidebarRuntime({
 void listen('agent-hook-event', (event) => {
   agentSidebarRuntime?.handleHookEvent(event.payload);
   activityLogRuntime?.onHookEvent(event.payload);
+  // When Claude calls workbook_open via MCP, auto-open the returned preview URL in a browser pane.
+  const { hook_event, tool, tool_response, tool_result, pane_id } = event.payload ?? {};
+  if (hook_event === 'PostToolUse' && tool?.endsWith('workbook_open')) {
+    try {
+      const raw = tool_response ?? tool_result;
+      // Claude Code may send tool_response as:
+      //   {content: [{type:'text', text:'{"preview_url":"..."}'}]}  — MCP standard
+      //   [{type:'text', text:'...'}]                               — bare array
+      //   '{"preview_url":"..."}'                                   — plain string
+      //   {output: '...'}  /  {text: '...'}                        — legacy shapes
+      let text = null;
+      if (typeof raw === 'string') {
+        text = raw;
+      } else if (Array.isArray(raw)) {
+        text = raw[0]?.text ?? raw[0]?.output ?? null;
+      } else if (raw && typeof raw === 'object') {
+        const content = raw.content ?? raw.output ?? raw.result ?? raw.text;
+        if (typeof content === 'string') text = content;
+        else if (Array.isArray(content)) text = content[0]?.text ?? content[0]?.output ?? null;
+        else if (content == null) text = null;
+      }
+      const parsed = JSON.parse(text ?? '{}');
+      const preview_url = parsed.preview_url;
+      if (preview_url) {
+        const tabId = panes.get(pane_id)?.tabId ?? activeTabId;
+        openBrowserSplitForTab(tabId, preview_url).catch(() => {});
+      }
+    } catch (_) { /* malformed response — ignore */ }
+  }
 });
 
 activityLogRuntime = createActivityLogRuntime({
@@ -3935,6 +3977,8 @@ const automationBridge = createAutomationBridge({
   closeTab,
   openBrowserSplitForTab,
   splitPaneWithBrowser,
+  openWorkbookPreview: (...args) => panelsRuntime?.openWorkbookPreview(...args),
+  openWorkbookDemo: (...args) => panelsRuntime?.openWorkbookDemo(...args),
   activateBrowser,
   browserNavigateRelative,
   reloadActiveBrowser,

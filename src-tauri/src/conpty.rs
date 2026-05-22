@@ -98,9 +98,9 @@ impl ConPtySession {
             let mut attr_list_size: usize = 0;
             // First call: query required size.
             let _ = InitializeProcThreadAttributeList(
-                windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST::default(),
+                None,
                 1,
-                0,
+                None,
                 &mut attr_list_size,
             );
 
@@ -109,7 +109,7 @@ impl ConPtySession {
                 attr_list_buf.as_mut_ptr() as *mut _,
             );
 
-            InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_list_size)
+            InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_list_size)
                 .context("InitializeProcThreadAttributeList failed")?;
 
             UpdateProcThreadAttribute(
@@ -157,7 +157,7 @@ impl ConPtySession {
 
             CreateProcessW(
                 None,
-                windows::core::PWSTR(cmdline_w.as_mut_ptr()),
+                Some(windows::core::PWSTR(cmdline_w.as_mut_ptr())),
                 None,
                 None,
                 false,

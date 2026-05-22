@@ -56,7 +56,6 @@ export function createSurfaceRuntime({
   function activateBrowser(label) {
     const state = browserPanes.get(label);
     if (!state) return;
-    console.log(`[wmux activateBrowser] t=${Date.now()} label=${label}`);
 
     clearActiveSurface();
     setActiveBrowserLabel(label);

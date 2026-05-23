@@ -1547,14 +1547,18 @@ pub async fn spawn_browser_helper(
         // Auto-detect consults WPAD / system proxy config like Chrome does.
         // No-op when no proxy is configured.
         .arg("--proxy-auto-detect")
-        // --disable-quic: Google specifically prefers QUIC over UDP/443.
-        // Some networks block outbound UDP to external hosts; in those
-        // environments QUIC attempts fail and the fallback to TCP doesn't
-        // always succeed cleanly in embedded CEF. Forcing TCP-only is a
-        // pragmatic workaround that matches Chromium's behavior when QUIC
-        // is disabled via policy. Hypothesis test for the google.com
-        // failure mode reported in PR #22.
-        .arg("--disable-quic")
+        // --disable-gpu / --disable-gpu-compositing: CEF's GPU subprocess
+        // crashes repeatedly with STATUS_BREAKPOINT (exit_code=-2147483645)
+        // when embedded as a child of the wmux window. After 3+ crashes
+        // Chromium falls back to software rendering, but for complex
+        // JS-heavy pages (e.g. google.com) the software fallback can render
+        // as blank — making the page LOOK like a connection error even
+        // though network loaded fine. Disable GPU outright so we skip the
+        // crashing subprocess and use software rendering from the start.
+        // Trades animation smoothness for reliability — acceptable while
+        // the actual GPU-sandbox-in-embedded-context issue is unsolved.
+        .arg("--disable-gpu")
+        .arg("--disable-gpu-compositing")
         // --enable-logging=stderr: capture Chromium's net + ipc errors to
         // stderr instead of the default debug.log. Gives us actionable
         // diagnostics when something goes wrong, at the cost of some

@@ -38,6 +38,7 @@ impl BrowserContentPending {
         Self::default()
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     async fn register(&self, request_id: String) -> oneshot::Receiver<String> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(request_id, tx);
@@ -50,6 +51,7 @@ impl BrowserContentPending {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     async fn cancel(&self, request_id: &str) {
         self.pending.lock().await.remove(request_id);
     }
@@ -666,7 +668,7 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                     },
                     {
                         "name": "browser_read_content",
-                        "description": "Read the visible text (or raw HTML) of the page currently loaded in a browser pane. Works by evaluating a script inside the webview that posts the page content back to the wmux API. Works reliably for http:// pages and localhost dev servers. May time out on https:// pages with a strict Content-Security-Policy connect-src directive — in that case, fetch the URL directly instead.",
+                        "description": "Read the visible text (or raw HTML) of the page currently loaded in a browser pane. Returns { url, title, content }. On Windows, uses WebView2's ExecuteScript channel — CSP-immune, works on any page including HTTPS sites.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -940,34 +942,95 @@ async fn dispatch_tool(
                 .get_webview(label)
                 .ok_or_else(|| format!("browser pane '{}' not found", label))?;
 
-            let request_id = uuid::Uuid::new_v4().to_string();
-            let pending = app.state::<BrowserContentPending>();
-            let rx = pending.register(request_id.clone()).await;
-
             let js_extract = if format == "html" {
                 "document.documentElement.outerHTML.slice(0, 400000)"
             } else {
                 "(document.body ? document.body.innerText : document.documentElement.textContent || '').slice(0, 200000)"
             };
 
-            let js = format!(
-                r#"(function(){{try{{var c={extract};fetch('http://localhost:{port}/browser-content?request_id={rid}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:location.href,title:document.title,content:c}})}}).catch(function(){{}});}}catch(e){{}}}})()"#,
-                extract = js_extract,
-                port = PORT,
-                rid = request_id,
-            );
+            // Windows: use WebView2's ExecuteScript channel. The script result is
+            // returned directly to a Rust callback — no network hop, fully
+            // CSP-immune, works on any page including HTTPS sites.
+            //
+            // TODO(mac): replace with WKScriptMessageHandler + objc2 when adding
+            // macOS support. Register a handler name (e.g. "wmuxContent") on the
+            // WKUserContentController, then the JS side becomes:
+            //   window.webkit.messageHandlers.wmuxContent.postMessage({requestId, url, title, content})
+            // Receive it in the handler and complete the channel from there.
+            #[cfg(target_os = "windows")]
+            {
+                use webview2_com::ExecuteScriptCompletedHandler;
+                use windows::core::HSTRING;
 
-            win.eval(&js).map_err(|e| e.to_string())?;
+                let js = format!(
+                    "(function(){{ return {{ url: location.href, title: document.title, content: ({}) }}; }})()",
+                    js_extract,
+                );
 
-            match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
-                Ok(Ok(body)) => Ok(body),
-                Ok(Err(_)) => Err("browser content channel dropped".to_string()),
-                Err(_) => {
-                    pending.cancel(&request_id).await;
-                    Err(format!(
-                        "timed out reading content from browser pane '{}' — the page may have a restrictive Content-Security-Policy",
+                let (tx, rx) = oneshot::channel::<Result<String, String>>();
+
+                win.with_webview(move |wv| unsafe {
+                    let webview = match wv.controller().CoreWebView2() {
+                        Ok(wv) => wv,
+                        Err(_) => return,
+                    };
+                    let _ = webview.ExecuteScript(
+                        &HSTRING::from(js.as_str()),
+                        &ExecuteScriptCompletedHandler::create(Box::new(move |error, result| {
+                            let _ = tx.send(if error.is_ok() {
+                                Ok(result)
+                            } else {
+                                Err(format!("script error: {:?}", error))
+                            });
+                            Ok(())
+                        })),
+                    );
+                })
+                .map_err(|e| e.to_string())?;
+
+                match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+                    Ok(Ok(Ok(content))) => Ok(content),
+                    Ok(Ok(Err(e))) => Err(e),
+                    Ok(Err(_)) => Err(format!(
+                        "failed to read content from browser pane '{}' — page may not be loaded yet",
                         label
-                    ))
+                    )),
+                    Err(_) => Err(format!(
+                        "timed out reading content from browser pane '{}' — ensure a page is loaded",
+                        label
+                    )),
+                }
+            }
+
+            // Non-Windows fallback: JS posts page text back via HTTP. Subject to
+            // CSP connect-src restrictions on HTTPS pages. Replace with a
+            // platform-native approach (e.g. WKScriptMessageHandler on macOS)
+            // when adding support for other operating systems.
+            #[cfg(not(target_os = "windows"))]
+            {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                let pending = app.state::<BrowserContentPending>();
+                let rx = pending.register(request_id.clone()).await;
+
+                let js = format!(
+                    r#"(function(){{try{{var c={extract};fetch('http://localhost:{port}/browser-content?request_id={rid}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:location.href,title:document.title,content:c}})}}).catch(function(){{}});}}catch(e){{}}}})()"#,
+                    extract = js_extract,
+                    port = PORT,
+                    rid = request_id,
+                );
+
+                win.eval(&js).map_err(|e| e.to_string())?;
+
+                match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+                    Ok(Ok(body)) => Ok(body),
+                    Ok(Err(_)) => Err("browser content channel dropped".to_string()),
+                    Err(_) => {
+                        pending.cancel(&request_id).await;
+                        Err(format!(
+                            "timed out reading content from browser pane '{}' — the page may have a restrictive Content-Security-Policy connect-src directive",
+                            label
+                        ))
+                    }
                 }
             }
         }

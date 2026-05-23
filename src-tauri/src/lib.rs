@@ -10,6 +10,7 @@ mod session_manager;
 mod url_detector;
 
 pub use control_bridge::FrontendControlBridge;
+pub use http_server::BrowserContentPending;
 pub use session_manager::{SessionManager, ShellTarget};
 pub use tunnel_manager::TunnelManager;
 
@@ -23,12 +24,14 @@ pub fn run() {
     let session_manager = SessionManager::new();
     let control_bridge = FrontendControlBridge::new();
     let tunnel_manager = TunnelManager::new();
+    let browser_content_pending = BrowserContentPending::new();
 
     tauri::Builder::default()
         .plugin(UpdaterPluginBuilder::new().build())
         .manage(session_manager)
         .manage(control_bridge)
         .manage(tunnel_manager)
+        .manage(browser_content_pending)
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
             commands::probe_remote_tmux_metadata,

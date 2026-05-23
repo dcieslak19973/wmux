@@ -13,10 +13,51 @@
 ///   POST /mcp                                   — MCP JSON-RPC 2.0 (Streamable HTTP transport)
 use crate::session_manager::AgentHookState;
 use crate::workbook::{render_workbook_html, WorkbookChart, WorkbookSpec, WorkbookStore};
-use crate::SessionManager;
+use crate::{FrontendControlBridge, SessionManager};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::{oneshot, Mutex};
+
+// ---------------------------------------------------------------------------
+// Browser content read-back state
+// ---------------------------------------------------------------------------
+
+/// Tracks in-flight `browser_read_content` MCP requests. The JS eval'd into
+/// the browser webview posts the page text to `POST /browser-content`, which
+/// completes the waiting oneshot channel.
+#[derive(Clone, Default)]
+pub struct BrowserContentPending {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
+}
+
+impl BrowserContentPending {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    async fn register(&self, request_id: String) -> oneshot::Receiver<String> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(request_id, tx);
+        rx
+    }
+
+    async fn deliver(&self, request_id: &str, content: String) {
+        if let Some(tx) = self.pending.lock().await.remove(request_id) {
+            let _ = tx.send(content);
+        }
+    }
+
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    async fn cancel(&self, request_id: &str) {
+        self.pending.lock().await.remove(request_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 const INFO_JSON: &str = r#"{
   "name": "wmux",
@@ -62,7 +103,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -228,6 +269,36 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app:
             }
             let _ = app.emit("agent-hook-event", payload);
             write_response(&mut stream, 200, r#"{"ok":true}"#).await;
+        }
+        ("POST", "/browser-content") => {
+            // Callback endpoint: JS eval'd in a browser webview posts page text here.
+            // Read the full body, honoring Content-Length for payloads > initial buffer.
+            let params = parse_query(query);
+            let request_id = params.get("request_id").cloned().unwrap_or_default();
+            if request_id.is_empty() {
+                write_response_no_body(&mut stream, 400).await;
+                return;
+            }
+            let content_length: usize = headers
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|l| l.split(':').nth(1)?.trim().parse().ok())
+                .unwrap_or(0);
+            let body_start = (header_end + 4).min(n);
+            let mut body_bytes = req_bytes[body_start..n].to_vec();
+            const MAX_CONTENT: usize = 512 * 1024;
+            while body_bytes.len() < content_length.min(MAX_CONTENT) {
+                let mut chunk = vec![0u8; 65536];
+                match stream.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(k) => body_bytes.extend_from_slice(&chunk[..k]),
+                    Err(_) => break,
+                }
+            }
+            let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
+            let pending = app.state::<BrowserContentPending>();
+            pending.deliver(&request_id, body_str).await;
+            write_response_no_body(&mut stream, 204).await;
         }
         ("POST", "/mcp") => {
             // If \r\n\r\n was absent (truncated request), body_start clamps to n → empty body.
@@ -527,6 +598,85 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                             },
                             "required": ["workbook_id", "chart_ids"]
                         }
+                    },
+                    {
+                        "name": "browser_list",
+                        "description": "List all open browser panes in wmux. Optionally filter by tab. Returns label, tabId, url, history, historyIndex, and active flag for each pane.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tab_id": { "type": "string", "description": "Optional tab ID to filter browser panes. Omit to list all." }
+                            }
+                        }
+                    },
+                    {
+                        "name": "browser_open",
+                        "description": "Open a URL in a new browser split pane in wmux. Returns the new pane's label and state.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "url": { "type": "string", "description": "URL to open." },
+                                "tab_id": { "type": "string", "description": "Tab to open the browser pane in. Defaults to the active tab." }
+                            },
+                            "required": ["url"]
+                        }
+                    },
+                    {
+                        "name": "browser_navigate",
+                        "description": "Navigate an existing browser pane to a new URL. Returns the updated pane state.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label (from browser_list or browser_open)." },
+                                "url": { "type": "string", "description": "URL to navigate to." }
+                            },
+                            "required": ["label", "url"]
+                        }
+                    },
+                    {
+                        "name": "browser_back",
+                        "description": "Navigate back in a browser pane's history.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label." }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    {
+                        "name": "browser_forward",
+                        "description": "Navigate forward in a browser pane's history.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label." }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    {
+                        "name": "browser_close",
+                        "description": "Close a browser pane in wmux.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label to close." }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    {
+                        "name": "browser_read_content",
+                        "description": "Read the visible text (or raw HTML) of the page currently loaded in a browser pane. Returns { url, title, content }. On Windows, uses WebView2's ExecuteScript channel — CSP-immune, works on any page including HTTPS sites.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Browser pane label (from browser_list or browser_open)." },
+                                "format": { "type": "string", "enum": ["text", "html"], "description": "Return innerText (default) or full outerHTML." }
+                            },
+                            "required": ["label"]
+                        }
                     }
                 ]
             })
@@ -534,7 +684,8 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
         "tools/call" => {
             let tool_name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-            match dispatch_tool(tool_name, &args, manager, app).await {
+            let bridge = app.state::<FrontendControlBridge>();
+            match dispatch_tool(tool_name, &args, manager, app, &bridge).await {
                 Ok(text) => serde_json::json!({
                     "content": [{"type": "text", "text": text}]
                 }),
@@ -557,6 +708,7 @@ async fn dispatch_tool(
     args: &serde_json::Value,
     manager: &SessionManager,
     app: &tauri::AppHandle,
+    bridge: &FrontendControlBridge,
 ) -> Result<String, String> {
     match name {
         "get_blocks" => {
@@ -720,6 +872,167 @@ async fn dispatch_tool(
                 "preview_url": WorkbookStore::preview_url(&saved.id)
             }))
             .map_err(|e| e.to_string())
+        }
+        "browser_list" => {
+            let tab_id = args.get("tab_id").and_then(|v| v.as_str());
+            let payload = match tab_id {
+                Some(id) => serde_json::json!({ "tabId": id }),
+                None => serde_json::Value::Null,
+            };
+            let result = bridge.request(app, "list-browsers", payload).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_open" => {
+            let url = args["url"]
+                .as_str()
+                .ok_or_else(|| "url is required".to_string())?;
+            let mut payload = serde_json::json!({ "url": url });
+            if let Some(tab_id) = args.get("tab_id").and_then(|v| v.as_str()) {
+                payload["tabId"] = serde_json::json!(tab_id);
+            }
+            let result = bridge.request(app, "open-browser", payload).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_navigate" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let url = args["url"]
+                .as_str()
+                .ok_or_else(|| "url is required".to_string())?;
+            let result = bridge
+                .request(app, "navigate-browser", serde_json::json!({ "label": label, "url": url }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_back" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let result = bridge
+                .request(app, "browser-back", serde_json::json!({ "label": label }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_forward" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let result = bridge
+                .request(app, "browser-forward", serde_json::json!({ "label": label }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_close" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let result = bridge
+                .request(app, "close-browser", serde_json::json!({ "label": label }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "browser_read_content" => {
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let format = args.get("format").and_then(|v| v.as_str()).unwrap_or("text");
+
+            let win = app
+                .get_webview(label)
+                .ok_or_else(|| format!("browser pane '{}' not found", label))?;
+
+            let js_extract = if format == "html" {
+                "document.documentElement.outerHTML.slice(0, 400000)"
+            } else {
+                "(document.body ? document.body.innerText : document.documentElement.textContent || '').slice(0, 200000)"
+            };
+
+            // Windows: use WebView2's ExecuteScript channel. The script result is
+            // returned directly to a Rust callback — no network hop, fully
+            // CSP-immune, works on any page including HTTPS sites.
+            //
+            // TODO(mac): replace with WKScriptMessageHandler + objc2 when adding
+            // macOS support. Register a handler name (e.g. "wmuxContent") on the
+            // WKUserContentController, then the JS side becomes:
+            //   window.webkit.messageHandlers.wmuxContent.postMessage({requestId, url, title, content})
+            // Receive it in the handler and complete the channel from there.
+            #[cfg(target_os = "windows")]
+            {
+                use webview2_com::ExecuteScriptCompletedHandler;
+                use windows::core::HSTRING;
+
+                let js = format!(
+                    "(function(){{ return {{ url: location.href, title: document.title, content: ({}) }}; }})()",
+                    js_extract,
+                );
+
+                let (tx, rx) = oneshot::channel::<Result<String, String>>();
+
+                win.with_webview(move |wv| unsafe {
+                    let webview = match wv.controller().CoreWebView2() {
+                        Ok(wv) => wv,
+                        Err(_) => return,
+                    };
+                    let _ = webview.ExecuteScript(
+                        &HSTRING::from(js.as_str()),
+                        &ExecuteScriptCompletedHandler::create(Box::new(move |error, result| {
+                            let _ = tx.send(if error.is_ok() {
+                                Ok(result)
+                            } else {
+                                Err(format!("script error: {:?}", error))
+                            });
+                            Ok(())
+                        })),
+                    );
+                })
+                .map_err(|e| e.to_string())?;
+
+                match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+                    Ok(Ok(Ok(content))) => Ok(content),
+                    Ok(Ok(Err(e))) => Err(e),
+                    Ok(Err(_)) => Err(format!(
+                        "failed to read content from browser pane '{}' — page may not be loaded yet",
+                        label
+                    )),
+                    Err(_) => Err(format!(
+                        "timed out reading content from browser pane '{}' — ensure a page is loaded",
+                        label
+                    )),
+                }
+            }
+
+            // Non-Windows fallback: JS posts page text back via HTTP. Subject to
+            // CSP connect-src restrictions on HTTPS pages. Replace with a
+            // platform-native approach (e.g. WKScriptMessageHandler on macOS)
+            // when adding support for other operating systems.
+            #[cfg(not(target_os = "windows"))]
+            {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                let pending = app.state::<BrowserContentPending>();
+                let rx = pending.register(request_id.clone()).await;
+
+                let js = format!(
+                    r#"(function(){{try{{var c={extract};fetch('http://localhost:{port}/browser-content?request_id={rid}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:location.href,title:document.title,content:c}})}}).catch(function(){{}});}}catch(e){{}}}})()"#,
+                    extract = js_extract,
+                    port = PORT,
+                    rid = request_id,
+                );
+
+                win.eval(&js).map_err(|e| e.to_string())?;
+
+                match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+                    Ok(Ok(body)) => Ok(body),
+                    Ok(Err(_)) => Err("browser content channel dropped".to_string()),
+                    Err(_) => {
+                        pending.cancel(&request_id).await;
+                        Err(format!(
+                            "timed out reading content from browser pane '{}' — the page may have a restrictive Content-Security-Policy connect-src directive",
+                            label
+                        ))
+                    }
+                }
+            }
         }
         _ => Err(format!("unknown tool: {}", name)),
     }

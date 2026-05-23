@@ -210,6 +210,10 @@ That matters for users who are not willing to wait for every agent tool to add f
 
 ## Where wmux is still weaker
 
+### 0. Git worktree isolation (roadmap gap)
+
+Neither cmux nor wmux currently gives each parallel agent its own git worktree. This matters more now that multi-agent workflows are the norm — without worktree isolation, agents running in parallel write to the same checkout and step on each other. Tools like mux (coder) and zed now treat per-agent worktree isolation as a core primitive. wmux has this on the roadmap; cmux does not yet list it publicly, but the gap will close industry-wide quickly.
+
 ### 1. It still feels less settled
 
 wmux has improved, but it is still easier to imagine edge cases in:

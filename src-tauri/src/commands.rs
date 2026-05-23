@@ -1540,13 +1540,26 @@ pub async fn spawn_browser_helper(
         .arg(format!("--parent-hwnd={parent_hwnd}"))
         .arg(format!("--url={url}"))
         .arg(format!("--user-data-dir={user_data_dir}"))
-        // Chromium switches (consumed by CEF before our --url/--parent-hwnd):
-        // CEF defaults to direct connection (no proxy), but Chrome defaults to
-        // reading Windows system proxy settings. On corporate networks this
-        // means CEF can't reach hosts that require going through the firm's
-        // proxy, surfacing as ERR_CONNECTION_REFUSED. --proxy-auto-detect
-        // tells CEF to consult WPAD / system proxy config like Chrome does.
+        // Chromium switches (consumed by CEF before our --url/--parent-hwnd).
+        //
+        // --proxy-auto-detect: CEF defaults to direct connection. On corporate
+        // networks that require a proxy this surfaces as ERR_CONNECTION_REFUSED.
+        // Auto-detect consults WPAD / system proxy config like Chrome does.
+        // No-op when no proxy is configured.
         .arg("--proxy-auto-detect")
+        // --disable-quic: Google specifically prefers QUIC over UDP/443.
+        // Some networks block outbound UDP to external hosts; in those
+        // environments QUIC attempts fail and the fallback to TCP doesn't
+        // always succeed cleanly in embedded CEF. Forcing TCP-only is a
+        // pragmatic workaround that matches Chromium's behavior when QUIC
+        // is disabled via policy. Hypothesis test for the google.com
+        // failure mode reported in PR #22.
+        .arg("--disable-quic")
+        // --enable-logging=stderr: capture Chromium's net + ipc errors to
+        // stderr instead of the default debug.log. Gives us actionable
+        // diagnostics when something goes wrong, at the cost of some
+        // log noise. Pair with --vmodule for finer control.
+        .arg("--enable-logging=stderr")
         .spawn()
         .map_err(|e| format!("failed to spawn browser helper: {e}"))?;
 

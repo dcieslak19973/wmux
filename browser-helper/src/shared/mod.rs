@@ -52,8 +52,24 @@ pub fn run_main(main_args: &MainArgs, cmd_line: &CommandLine, sandbox_info: *mut
 
     let mut app = simple_app::SimpleApp::new();
 
+    // Optional per-launch isolation: when wmux spawns this helper for a pane,
+    // it can pass `--user-data-dir=<path>` so each helper has its own cache /
+    // cookies / lock file. Without it, multiple helper instances (or a crashed
+    // one followed by a fresh one) collide on the default CEF data dir and
+    // the second launch panics with `initialize() == 0`.
+    let user_data_dir =
+        CefString::from(&cmd_line.switch_value(Some(&CefString::from("user-data-dir"))))
+            .to_string();
+    let root_cache_path = if user_data_dir.is_empty() {
+        CefString::default()
+    } else {
+        println!("using --user-data-dir={user_data_dir}");
+        CefString::from(user_data_dir.as_str())
+    };
+
     let settings = Settings {
         no_sandbox: !cfg!(feature = "sandbox") as _,
+        root_cache_path,
         ..Default::default()
     };
     assert_eq!(

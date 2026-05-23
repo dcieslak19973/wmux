@@ -147,8 +147,41 @@ wrap_browser_process_handler! {
             };
             let url = CefString::from(url);
 
-            // Views is enabled by default (add `--use-native` to disable).
-            let use_views = command_line.has_switch(Some(&CefString::from("use-native"))) != 0;
+            // Optional embedding hook for wmux: `--parent-hwnd=<decimal>` makes
+            // the CEF browser a Win32 *child* of the given HWND via
+            // `WindowInfo::set_as_child`. Used by wmux to host this helper
+            // inside a pane. When set we force the native (non-Views) path
+            // because Views creates its own Chromium-internal Window that
+            // doesn't compose with external parent HWNDs.
+            let parent_hwnd: Option<usize> = {
+                let s = CefString::from(
+                    &command_line.switch_value(Some(&CefString::from("parent-hwnd"))),
+                )
+                .to_string();
+                if s.is_empty() {
+                    None
+                } else {
+                    match s.parse::<usize>() {
+                        Ok(v) => {
+                            println!("using --parent-hwnd={v}");
+                            Some(v)
+                        }
+                        Err(e) => {
+                            eprintln!("invalid --parent-hwnd={s:?}: {e}");
+                            None
+                        }
+                    }
+                }
+            };
+
+            // Match cefsimple's existing semantics (kept as-is — note the comment
+            // here in the upstream source says "Views is enabled by default"
+            // but the code below actually defaults to NATIVE; we don't fix
+            // that during this spike). Force native unconditionally when
+            // `--parent-hwnd` is given because Views' Chromium-internal Window
+            // can't be reparented to an external HWND.
+            let use_views = parent_hwnd.is_none()
+                && command_line.has_switch(Some(&CefString::from("use-native"))) != 0;
 
             // If using Views create the browser using the Views framework, otherwise
             // create the browser using the native platform framework.
@@ -194,7 +227,22 @@ wrap_browser_process_handler! {
                 };
 
                 #[cfg(target_os = "windows")]
-                let window_info = window_info.set_as_popup(Default::default(), "cefsimple");
+                let window_info = if let Some(parent_hwnd_value) = parent_hwnd {
+                    // Embedded path: become a Win32 child window of wmux's pane
+                    // HWND. The initial bounds are a placeholder — wmux is
+                    // expected to drive geometry via IPC (TODO) so the window
+                    // matches the pane rect as it resizes.
+                    //
+                    // cef-rs models HWND as a tuple struct around an opaque
+                    // *mut HWND__ — construct one from the raw HWND value the
+                    // caller passed on the command line.
+                    let parent = cef::sys::HWND(parent_hwnd_value as *mut cef::sys::HWND__);
+                    let bounds = Rect { x: 0, y: 0, width: 800, height: 600 };
+                    window_info.set_as_child(parent, &bounds)
+                } else {
+                    // Standalone path (spike default + manual testing).
+                    window_info.set_as_popup(Default::default(), "wmux-browser-helper")
+                };
 
                 let mut client = self.default_client();
                 browser_host_create_browser(

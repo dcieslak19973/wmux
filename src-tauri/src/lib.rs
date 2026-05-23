@@ -19,7 +19,7 @@ use tauri_plugin_updater::Builder as UpdaterPluginBuilder;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let session_manager = SessionManager::new();
     let control_bridge = FrontendControlBridge::new();
@@ -42,6 +42,7 @@ pub fn run() {
             commands::list_sessions,
             commands::resize_session,
             commands::open_url,
+            commands::open_external_url,
             commands::resolve_localhost_url,
             commands::read_clipboard_text,
             commands::list_wsl_distros,

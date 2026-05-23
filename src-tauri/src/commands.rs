@@ -1524,7 +1524,19 @@ pub async fn spawn_browser_helper(
         ));
     }
 
+    // CEF locates its resource files (`*.pak`, `icudtl.dat`, `locales/`)
+    // relative to the *current working directory* in addition to the
+    // executable directory. When wmux spawns the helper from the project
+    // root (e.g. via `npm run tauri dev`), inheriting that CWD can cause
+    // CEF to silently fall back to a degraded mode where HTTPS to some
+    // hosts fails ("connection refused" or similar). Force CWD to where
+    // the helper binary and CEF runtime files live.
+    let helper_dir = helper_path
+        .parent()
+        .ok_or_else(|| "helper path has no parent dir".to_string())?;
+
     let child = std::process::Command::new(&helper_path)
+        .current_dir(helper_dir)
         .arg(format!("--parent-hwnd={parent_hwnd}"))
         .arg(format!("--url={url}"))
         .arg(format!("--user-data-dir={user_data_dir}"))

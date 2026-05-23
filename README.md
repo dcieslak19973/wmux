@@ -37,7 +37,20 @@ $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";"
 
 # 6. Tauri CLI
 cargo install tauri-cli --version "^2" --locked
+
+# 7. CMake + Ninja (required to build the out-of-process CEF browser helper).
+#    These have no winget user-scope install path, so we use scoop —
+#    it runs in user mode without admin elevation.
+Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+scoop install cmake ninja
 ```
+
+> CMake + Ninja are needed by `cef-rs` (the Tauri-team CEF binding) to compile
+> CEF's C++ wrapper when building the `browser-helper` workspace member. If
+> you're only working on the Tauri frontend / `src-tauri` crate, you can skip
+> step 7 — but then `cargo build` at the workspace root will fail on the
+> helper crate. Build just the main app with
+> `cargo build --package wmux` (or `npm run tauri dev`) to skip the helper.
 
 ## Development
 

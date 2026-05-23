@@ -1,0 +1,57 @@
+[package]
+name = "wmux-browser-helper"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+# Out-of-process CEF browser helper for wmux.
+#
+# Spawned by the main wmux process to host a Chromium browser in its own
+# Win32 message pump, isolating the browser pane's focus events from the
+# main webview's ConPTY session. Communicates with wmux over a named pipe
+# (TODO once basic window works).
+#
+# The Rust source under `src/` is forked from cef-rs's `cefsimple` example
+# (Apache/MIT, see LICENSE-* in https://github.com/tauri-apps/cef-rs). We
+# will diverge once we add wmux IPC and Win32 SetParent embedding; for now
+# the goal is parity with cefsimple as a foundation.
+#
+# cef-rs is pulled from git because v148.1.0 (2026-05-14) is recent and
+# the matching crates.io release flow may still be in flight. Switch to a
+# crates.io version once stable.
+
+[[bin]]
+name = "wmux-browser-helper"
+path = "src/main.rs"
+
+[[bin]]
+# CEF's multi-process architecture: this binary is launched by the main
+# helper to host the renderer / GPU / utility subprocesses. cef-rs's
+# `package.metadata.cef.bundle.helper_name` below tells the bundling
+# tool which name to use when copying it into a CEF-aware bundle.
+name = "wmux-browser-helper-subprocess"
+path = "src/bin/wmux_browser_helper_subprocess.rs"
+
+[package.metadata.cef.bundle]
+helper_name = "wmux-browser-helper-subprocess"
+resources_path = "resources"
+
+[features]
+# Sandbox intentionally NOT in the default feature set. CEF sandbox on
+# Windows requires a bootstrap.exe wrapper (see cefsimple main.rs). For
+# the spike we want the simplest run path; sandbox + bootstrap.exe is a
+# separate hardening step.
+default = []
+sandbox = ["cef/sandbox"]
+
+[dependencies]
+cef = { git = "https://github.com/tauri-apps/cef-rs.git", features = ["build-util"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"

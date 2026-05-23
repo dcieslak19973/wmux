@@ -922,6 +922,20 @@ pub async fn open_url(url: String) -> Result<(), String> {
     opener::open_browser(&url).map_err(|e| e.to_string())
 }
 
+/// Open an arbitrary URL in the system default browser.
+///
+/// Unlike `open_url`, this accepts any http(s) URL — intended for the browser
+/// pane's "open externally" button, where the user explicitly drives the
+/// action. NOT safe to call from terminal-URL-detection paths (use `open_url`
+/// for that — it restricts to localhost as a phishing/malware guard).
+#[tauri::command]
+pub async fn open_external_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!("Refused to open non-http(s) URL: {url}"));
+    }
+    opener::open_browser(&url).map_err(|e| e.to_string())
+}
+
 /// Resolve a localhost URL for a given pane, creating an SSH or WSL port-forward
 /// tunnel if needed.  Returns the URL to open in the wmux browser (remapped to
 /// the forwarded local port for SSH/WSL, unchanged for local sessions).
@@ -1483,22 +1497,24 @@ pub async fn create_browser_window(app: AppHandle, request: CreateBrowserWindowR
     // explicitly activates the browser pane.
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, GWL_STYLE, WS_EX_NOACTIVATE,
         };
-        let _ = webview.with_webview(move |wv| unsafe {
+        let _ = webview.with_webview(|wv| unsafe {
+            use windows::Win32::Foundation::HWND;
             let mut hwnd = HWND::default();
             let _ = wv.controller().ParentWindow(&mut hwnd);
-            // Disable keyboard/mouse input routing on this HWND by setting WS_DISABLED.
-            // Windows will not deliver SetFocus() to a disabled window or any of its
-            // children, stopping WebView2's async-init focus steal before it happens.
-            // (Equivalent to EnableWindow(hwnd, FALSE) but avoids a windows-0.61
-            // feature-flag import issue with BOOL / EnableWindow.)
-            // WS_DISABLED = 0x08000000, GWL_STYLE = -16
+            // WS_DISABLED: Windows will not deliver SetFocus() to a disabled
+            // window or any of its children — this is the only reliable way to
+            // block the Chromium-internal focus steal that happens during
+            // WebView2 navigation (the steal occurs at the Chrome_WidgetWin
+            // child HWND level, which never surfaces as a controller GotFocus
+            // event).  set_browser_focusable(true) removes this bit when the
+            // user explicitly activates the browser pane.
             const WS_DISABLED_BIT: isize = 0x0800_0000;
             let ws = GetWindowLongPtrW(hwnd, GWL_STYLE);
             SetWindowLongPtrW(hwnd, GWL_STYLE, ws | WS_DISABLED_BIT);
+            // WS_EX_NOACTIVATE: belt-and-suspenders for click-activation.
             let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
         });
@@ -1547,17 +1563,40 @@ pub async fn focus_main_webview(app: AppHandle, window_label: String) -> Result<
 
 /// Allow or prevent a browser webview from taking keyboard focus.
 ///
-/// Child webviews (created with `window.add_child`) are `Webview`, not
-/// `WebviewWindow`, so `set_focusable` is not available on them.  Instead we
-/// reach into the Win32 layer via `with_webview` and toggle `WS_EX_NOACTIVATE`
-/// on the WebView2 host HWND directly.  On other platforms we fall back to the
-/// `WebviewWindow::set_focusable` path (best-effort).
+/// `focusable=false`: called when a terminal or other surface becomes active.
+///   Reclaims OS keyboard focus to the main webview first, then sets
+///   WS_DISABLED + WS_EX_NOACTIVATE on the browser HWND so neither WebView2
+///   navigation nor the Chromium render HWND can steal focus until the user
+///   explicitly activates the browser again.
+///
+/// `focusable=true`: called when the user activates the browser pane.
+///   Removes WS_DISABLED + WS_EX_NOACTIVATE so clicks and keyboard events
+///   reach the browser content.
 #[tauri::command]
 pub async fn set_browser_focusable(
     app: AppHandle,
     label: String,
     focusable: bool,
+    window_label: String,
 ) -> Result<(), String> {
+    // When disabling, reclaim focus to the main webview BEFORE setting
+    // WS_DISABLED.  If the browser currently has OS focus, setting WS_DISABLED
+    // while it holds focus would leave the keyboard in a dead state.
+    #[cfg(target_os = "windows")]
+    if !focusable {
+        if let Some(main_wv) = app.get_webview(&window_label) {
+            let _ = main_wv.with_webview(|mv| unsafe {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+                let mut h = HWND::default();
+                let _ = mv.controller().ParentWindow(&mut h);
+                let _ = SetFocus(Some(h));
+                #[allow(clippy::missing_transmute_annotations)]
+                let _ = mv.controller().MoveFocus(std::mem::transmute(0i32));
+            });
+        }
+    }
+
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| format!("browser webview '{label}' not found"))?;
@@ -1569,24 +1608,17 @@ pub async fn set_browser_focusable(
             GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, GWL_STYLE, WS_EX_NOACTIVATE,
         };
         webview
-            .with_webview(move |wv| {
-                unsafe {
-                    let mut hwnd = HWND::default();
-                    let _ = wv.controller().ParentWindow(&mut hwnd);
-                    // Toggle WS_DISABLED on the browser container HWND.
-                    // A window with WS_DISABLED (or a disabled ancestor) cannot
-                    // receive OS keyboard focus — SetFocus() calls targeting it
-                    // or any child are silently dropped by Windows.
-                    // WS_DISABLED = 0x08000000, GWL_STYLE = -16
-                    const WS_DISABLED_BIT: isize = 0x0800_0000;
-                    let ws = GetWindowLongPtrW(hwnd, GWL_STYLE);
-                    let new_ws = if focusable { ws & !WS_DISABLED_BIT } else { ws | WS_DISABLED_BIT };
-                    SetWindowLongPtrW(hwnd, GWL_STYLE, new_ws);
-                    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                    let flag = WS_EX_NOACTIVATE.0 as isize;
-                    let new_ex = if focusable { ex & !flag } else { ex | flag };
-                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
-                }
+            .with_webview(move |wv| unsafe {
+                let mut hwnd = HWND::default();
+                let _ = wv.controller().ParentWindow(&mut hwnd);
+                const WS_DISABLED_BIT: isize = 0x0800_0000;
+                let ws = GetWindowLongPtrW(hwnd, GWL_STYLE);
+                let new_ws = if focusable { ws & !WS_DISABLED_BIT } else { ws | WS_DISABLED_BIT };
+                SetWindowLongPtrW(hwnd, GWL_STYLE, new_ws);
+                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                let flag = WS_EX_NOACTIVATE.0 as isize;
+                let new_ex = if focusable { ex & !flag } else { ex | flag };
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
             })
             .map_err(|e| e.to_string())?;
     }
@@ -1624,34 +1656,44 @@ pub async fn set_browser_visible(
 
 /// Reposition and resize a browser WebviewWindow (logical coords).
 ///
-/// Pass `window_label` and `restore_focus: true` when a terminal pane is
-/// active.  WebView2 on Windows can steal focus when its host HWND is
-/// repositioned; calling `set_focus` on the parent window immediately after
-/// counteracts that.
+/// Primary prevention: bracket every resize with `SetIsVisible(false/true)` so
+/// that `put_Bounds` fires while the WebView2 controller is hidden and cannot
+/// grab OS keyboard focus.  Reactive fallback: arm the per-pane GotFocus guard
+/// when `restore_focus=true`; if WebView2 still steals, the handler bounces
+/// focus back to the main webview immediately.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn set_browser_geometry(
     app: AppHandle,
     label: String,
-    window_label: String,
     x: i32,
     y: i32,
     width: u32,
     height: u32,
-    restore_focus: bool,
 ) -> Result<(), String> {
     let win = app
         .get_webview(&label)
         .ok_or_else(|| format!("browser webview '{label}' not found"))?;
+
+    // Primary prevention: hide the controller so put_Bounds fires while
+    // WebView2 is invisible and cannot grab OS keyboard focus.
+    // WS_DISABLED (set by set_browser_focusable) is the backstop when the
+    // browser is inactive; this bracket handles the case when it is active.
+    #[cfg(target_os = "windows")]
+    let _ = win.with_webview(|wv| unsafe {
+        let _ = wv.controller().SetIsVisible(false);
+    });
+
     win.set_position(tauri::LogicalPosition::new(x as f64, y as f64))
         .map_err(|e| e.to_string())?;
     win.set_size(tauri::LogicalSize::new(width as f64, height as f64))
         .map_err(|e| e.to_string())?;
-    if restore_focus {
-        if let Some(window) = app.get_window(&window_label) {
-            let _ = window.set_focus();
-        }
-    }
+
+    // Restore visibility before the next frame renders.
+    #[cfg(target_os = "windows")]
+    let _ = win.with_webview(|wv| unsafe {
+        let _ = wv.controller().SetIsVisible(true);
+    });
+
     Ok(())
 }
 

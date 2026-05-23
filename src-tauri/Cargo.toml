@@ -1,6 +1,6 @@
 [package]
 name = "wmux"
-version = "0.0.8"
+version = "0.0.10"
 edition = "2021"
 default-run = "wmux"
 
@@ -41,6 +41,7 @@ windows = { version = "0.61", features = [
   "Win32_Security",
   "Win32_System_Pipes",
   "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
 ] }
 webview2-com = "0.38"
 clipboard-win = "5"

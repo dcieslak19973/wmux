@@ -142,7 +142,10 @@ export function createAutomationBridge({
       navigate: async (label, url) => {
         const browser = browserPanes.get(label);
         if (!browser) throw new Error(`Browser '${label}' not found`);
-        await invoke('navigate_browser', { label, url });
+        if (browser.iframeEl) {
+          if (browser.iframeEl.style.display === 'none') browser.iframeEl.style.display = '';
+          browser.iframeEl.src = url;
+        }
         browser.currentUrl = url;
         browser.history = browser.history.slice(0, browser.historyIndex + 1);
         browser.history.push(url);

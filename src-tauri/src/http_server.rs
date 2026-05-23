@@ -933,6 +933,65 @@ async fn dispatch_tool(
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
         "browser_read_content" => {
+            // KNOWN BROKEN as of 2026-05-23: the browser pane was reverted from a
+            // child WebView2 (`add_child`) back to a same-document <iframe> in
+            // surfaces_runtime.mjs because the child WebView2 wedged the adjacent
+            // terminal's ConPTY pipeline after page load via a focus-event storm
+            // (WriteFile succeeded but bash stopped echoing after the first byte).
+            //
+            // Consequences for this tool:
+            //   * `app.get_webview(label)` no longer resolves — there is no child
+            //     webview registered with that label, just an <iframe> element
+            //     inside the main webview.
+            //   * Even if we routed through the main webview, the iframe is
+            //     same-origin-policy-bound — cross-origin pages (anything on the
+            //     real internet) refuse `iframe.contentDocument` reads.
+            //
+            // Path forward when re-enabling: either (a) move the read to a JS
+            // bridge that postMessages out of the iframe (only works for pages
+            // that cooperate or origins we control), or (b) Rust-side fetch the
+            // URL ourselves and return the body (loses any client-side rendering
+            // state — likely good enough for static pages). The previous
+            // ExecuteScript-on-child-WebView2 approach is not viable until the
+            // ConPTY wedge is fixed at the Windows/WebView2 layer.
+            //
+            // Upstream issues to watch — if any of these get resolved, the
+            // child-WebView2 path may become viable again:
+            //
+            //   WebView2 (Microsoft):
+            //     - First-navigation focus steal:
+            //         https://github.com/MicrosoftEdge/WebView2Feedback/issues/862
+            //     - WebView steals focus from newly started process:
+            //         https://github.com/MicrosoftEdge/WebView2Feedback/issues/1526
+            //     - WebView2 breaks window message processing (closest match in
+            //       vocabulary to our ConPTY wedge):
+            //         https://github.com/MicrosoftEdge/WebView2Feedback/issues/2707
+            //     - "Failed to unregister class Chrome_WidgetWin_0" on shutdown
+            //       (we see this in stderr — Chromium-internal cleanup leak):
+            //         https://github.com/MicrosoftEdge/WebView2Feedback/issues/1762
+            //     - WebView2 v134 focus regression (Microsoft Q&A):
+            //         https://learn.microsoft.com/en-us/answers/questions/2224688/webview2-version-134-focus-issues
+            //
+            //   Tauri (wraps WebView2 via wry):
+            //     - add_child broken in 2.0.5:
+            //         https://github.com/tauri-apps/tauri/issues/11452
+            //     - V2 child webview discussion / docs request:
+            //         https://github.com/tauri-apps/tauri/issues/10079
+            //     - Crash with same Chrome_WidgetWin_0 error:
+            //         https://github.com/tauri-apps/tauri/issues/7606
+            //
+            //   Wails (independent corroboration of the shutdown error):
+            //     - V2 / Failed to unregister class Chrome_WidgetWin_0:
+            //         https://github.com/wailsapp/wails/issues/866
+            //
+            // Our specific symptom — "child WebView2 page load wedges a sibling
+            // ConPTY session so the shell echoes the first byte then goes silent
+            // while WriteFile keeps succeeding" — does not appear publicly filed
+            // anywhere as of 2026-05-23. If we want this fixed upstream, the
+            // right destination is WebView2Feedback (not Tauri — we proved the
+            // wedge is below the Tauri layer). A minimal repro would be a bare
+            // Win32 app with a ConPTY + a child WebView2 loading google.com,
+            // testing whether WSL is incidental.
             let label = args["label"]
                 .as_str()
                 .ok_or_else(|| "label is required".to_string())?;

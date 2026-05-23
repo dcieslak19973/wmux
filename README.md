@@ -219,3 +219,4 @@ For remote tmux specifically, the current contract is one wmux terminal tab equa
 - [ ] Add layout import and other state mutation APIs for full external workspace provisioning.
 - [ ] Continue improving restore fidelity for more transient UI state and cross-window coordination.
 - [ ] Replace xterm.js renderer with Ghostty/wgpu terminal for GPU acceleration
+- [ ] Git worktree isolation — give each parallel agent its own git worktree so multiple agents can work on separate branches simultaneously without interfering with each other's working tree.

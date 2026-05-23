@@ -34,7 +34,7 @@ export function createSurfaceRuntime({
   const browserPanes = new Map();
 
   function syncBrowserVisibility() {
-    // Browser panes are now <iframe> elements inside the main WebView2.
+    // Browser panes are <iframe> elements inside the main WebView2.
     // Visibility is handled entirely by CSS/DOM — no IPC needed.
   }
 
@@ -97,7 +97,6 @@ export function createSurfaceRuntime({
     const state = browserPanes.get(label);
     if (!state) return;
 
-    state.resizeObserver?.disconnect();
     browserPanes.delete(label);
     const tab = tabs.get(state.tabId);
     tab?.browserLabels?.delete(label);
@@ -258,6 +257,7 @@ export function createSurfaceRuntime({
         <button class="browser-btn" id="bb-zoom-${label}" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
         <input class="browser-url" id="bu-${label}" placeholder="Enter URL…" spellcheck="false" />
         <button class="browser-btn browser-go" id="bg-${label}">Go</button>
+        <button class="browser-btn" id="bb-ext-${label}" title="Open this URL in your system's default browser. Use this for sites like Google, GitHub, or Twitter that refuse to load inside the embedded pane (they send X-Frame-Options or frame-busting JS to block iframes).">&#x2197;</button>
         <button class="browser-btn pane-tb-close" id="bc-${label}" title="Close browser">&#x2715;</button>
       </div>
       <div class="browser-placeholder" id="bph-${label}">Enter a URL and press Go</div>
@@ -296,7 +296,7 @@ export function createSurfaceRuntime({
     };
 
     const navigateTo = (url, { pushHistory = true } = {}) => {
-      let full = normalizeBrowserUrl(url);
+      const full = normalizeBrowserUrl(url);
       if (!full) return;
       urlInput.value = full;
 
@@ -337,7 +337,13 @@ export function createSurfaceRuntime({
       if (currentUrl) navigateTo(currentUrl, { pushHistory: false });
     });
     zoomBtn.addEventListener('click', () => toggleSurfaceZoom(browserEl));
-    document.getElementById(`bc-${label}`).addEventListener('click', async () => closeBrowserSurface(label));
+    document.getElementById(`bb-ext-${label}`).addEventListener('click', () => {
+      const target = (urlInput.value || browserState.currentUrl || '').trim();
+      const full = normalizeBrowserUrl(target);
+      if (!full) return;
+      invoke('open_external_url', { url: full }).catch((err) => showError(`Could not open externally: ${err}`));
+    });
+    document.getElementById(`bc-${label}`).addEventListener('click', () => closeBrowserSurface(label));
 
     browserEl.addEventListener('mousedown', () => activateBrowser(label));
 

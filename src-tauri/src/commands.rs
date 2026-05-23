@@ -1540,6 +1540,13 @@ pub async fn spawn_browser_helper(
         .arg(format!("--parent-hwnd={parent_hwnd}"))
         .arg(format!("--url={url}"))
         .arg(format!("--user-data-dir={user_data_dir}"))
+        // Chromium switches (consumed by CEF before our --url/--parent-hwnd):
+        // CEF defaults to direct connection (no proxy), but Chrome defaults to
+        // reading Windows system proxy settings. On corporate networks this
+        // means CEF can't reach hosts that require going through the firm's
+        // proxy, surfacing as ERR_CONNECTION_REFUSED. --proxy-auto-detect
+        // tells CEF to consult WPAD / system proxy config like Chrome does.
+        .arg("--proxy-auto-detect")
         .spawn()
         .map_err(|e| format!("failed to spawn browser helper: {e}"))?;
 

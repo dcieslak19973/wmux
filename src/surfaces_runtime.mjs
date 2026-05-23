@@ -257,6 +257,7 @@ export function createSurfaceRuntime({
         <button class="browser-btn" id="bb-zoom-${label}" title="Toggle zoom (Ctrl+Alt+Enter)">&#x2922;</button>
         <input class="browser-url" id="bu-${label}" placeholder="Enter URL…" spellcheck="false" />
         <button class="browser-btn browser-go" id="bg-${label}">Go</button>
+        <button class="browser-btn" id="bb-cef-${label}" title="EXPERIMENTAL — spawn the out-of-process CEF browser helper with the URL bar contents. The helper opens as a Win32 child of the wmux window at a fixed default position (top-left, 800×600). Real geometry sync + navigation come with the IPC layer (Phase 3 of PR #22). Use this to validate the CEF embedding path; daily use should still go through Go (iframe) or ↗ (external).">CEF</button>
         <button class="browser-btn" id="bb-ext-${label}" title="Open this URL in your system's default browser. Use this for sites like Google, GitHub, or Twitter that refuse to load inside the embedded pane (they send X-Frame-Options or frame-busting JS to block iframes).">&#x2197;</button>
         <button class="browser-btn pane-tb-close" id="bc-${label}" title="Close browser">&#x2715;</button>
       </div>
@@ -337,6 +338,17 @@ export function createSurfaceRuntime({
       if (currentUrl) navigateTo(currentUrl, { pushHistory: false });
     });
     zoomBtn.addEventListener('click', () => toggleSurfaceZoom(browserEl));
+    document.getElementById(`bb-cef-${label}`).addEventListener('click', () => {
+      // EXPERIMENTAL: see the button's title attribute. Spawns the
+      // out-of-process CEF helper parented to the wmux window. Phase 3 will
+      // replace the "spawn fresh on every click" flow with named-pipe IPC
+      // that drives a long-lived helper.
+      const target = (urlInput.value || browserState.currentUrl || '').trim();
+      const full = normalizeBrowserUrl(target) || 'https://www.google.com/';
+      invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
+        .then((pid) => console.log(`[cef] spawned helper pid=${pid} url=${full}`))
+        .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
+    });
     document.getElementById(`bb-ext-${label}`).addEventListener('click', () => {
       const target = (urlInput.value || browserState.currentUrl || '').trim();
       const full = normalizeBrowserUrl(target);

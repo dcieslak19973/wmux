@@ -1462,6 +1462,84 @@ fn uuid_short() -> String {
     format!("{:08x}", n)
 }
 
+/// Spawn the out-of-process CEF browser helper, parented to the given wmux
+/// window. The helper appears as a Win32 child of the main webview's HWND so
+/// its focus events stay inside the helper's own message pump and can't wedge
+/// our ConPTY sessions the way an in-process child WebView2 did.
+///
+/// Spike-phase contract: caller supplies a starting URL; the helper renders it
+/// at a fixed initial position inside the parent window. Future work (separate
+/// PR) adds named-pipe IPC for runtime navigate / geometry / close, replacing
+/// "kill and respawn" with proper control.
+///
+/// Returns the helper's PID so the caller can track it for cleanup.
+#[tauri::command]
+pub async fn spawn_browser_helper(
+    app: AppHandle,
+    window_label: String,
+    url: String,
+) -> Result<u32, String> {
+    let window = app
+        .get_window(&window_label)
+        .ok_or_else(|| format!("window '{}' not found", window_label))?;
+
+    // The helper expects a Win32 HWND value for --parent-hwnd. We use the
+    // wmux native window HWND (Tauri main window) as the parent. The CEF
+    // child window will appear inside that HWND at a fixed default position;
+    // real geometry sync waits for the IPC layer.
+    #[cfg(target_os = "windows")]
+    let parent_hwnd: usize = {
+        let hwnd = window
+            .hwnd()
+            .map_err(|e| format!("could not get parent HWND: {e}"))?;
+        // tauri's HWND wraps a *mut c_void; cast to usize for command-line.
+        hwnd.0 as usize
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let parent_hwnd: usize = 0; // Stub: helper only useful on Windows currently.
+
+    // Per-helper isolated user data dir so multiple panes / restarts don't
+    // collide on Chromium's lock file.
+    let user_data_dir = std::env::temp_dir()
+        .join(format!("wmux-browser-helper-{}", uuid_short()))
+        .to_string_lossy()
+        .into_owned();
+
+    // Locate the helper binary. In dev (`cargo run` from src-tauri or
+    // workspace root) it sits at `target/debug/wmux-browser-helper.exe`
+    // beside the wmux binary. In a packaged build it'll be bundled
+    // adjacent to wmux.exe via the MSI installer (TODO once Phase 5 lands).
+    let helper_path = std::env::current_exe()
+        .map_err(|e| format!("could not locate current exe: {e}"))?
+        .parent()
+        .ok_or_else(|| "current exe has no parent dir".to_string())?
+        .join(if cfg!(windows) { "wmux-browser-helper.exe" } else { "wmux-browser-helper" });
+
+    if !helper_path.exists() {
+        return Err(format!(
+            "wmux-browser-helper binary not found at {}. \
+             Build with `cargo build --package wmux-browser-helper` first.",
+            helper_path.display()
+        ));
+    }
+
+    let child = std::process::Command::new(&helper_path)
+        .arg(format!("--parent-hwnd={parent_hwnd}"))
+        .arg(format!("--url={url}"))
+        .arg(format!("--user-data-dir={user_data_dir}"))
+        .spawn()
+        .map_err(|e| format!("failed to spawn browser helper: {e}"))?;
+
+    let pid = child.id();
+    // std::process::Child does NOT kill the process on drop — the helper
+    // keeps running independently after we return. Proper tracking (so
+    // callers can kill helpers on pane close) is a Phase 3/4 follow-up.
+    drop(child);
+
+    Ok(pid)
+}
+
 /// Create a borderless browser WebviewWindow positioned at the given screen coords.
 #[tauri::command]
 pub async fn create_browser_window(app: AppHandle, request: CreateBrowserWindowRequest) -> Result<(), String> {

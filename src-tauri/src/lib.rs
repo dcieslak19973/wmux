@@ -43,6 +43,7 @@ pub fn run() {
             commands::resize_session,
             commands::open_url,
             commands::open_external_url,
+            commands::spawn_browser_helper,
             commands::resolve_localhost_url,
             commands::read_clipboard_text,
             commands::list_wsl_distros,

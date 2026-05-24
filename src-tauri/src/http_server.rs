@@ -601,12 +601,20 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                     },
                     {
                         "name": "browser_list",
-                        "description": "List all open browser panes in wmux. Optionally filter by tab. Returns label, tabId, url, history, historyIndex, and active flag for each pane.",
+                        "description": "List all open browser panes in wmux. Optionally filter by tab. Returns label, tabId, url, history, historyIndex, and active flag for each pane. NOTE: This lists iframe-based browser panes only. For out-of-process CEF helper windows (driveable via Chrome DevTools Protocol), use cef_helper_list instead.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "tab_id": { "type": "string", "description": "Optional tab ID to filter browser panes. Omit to list all." }
                             }
+                        }
+                    },
+                    {
+                        "name": "cef_helper_list",
+                        "description": "List the out-of-process CEF browser helpers currently registered. Each helper is a standalone Chromium window launched by the wmux frontend (via the 'CEF' button on a browser pane) or by the spike spawn path. Helpers are driveable via Chrome DevTools Protocol on their advertised cdp_port; use the label with browser_read_content to extract page text/HTML. Helpers do NOT appear in browser_list output (that tool lists iframe panes).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
                         }
                     },
                     {
@@ -881,6 +889,12 @@ async fn dispatch_tool(
             };
             let result = bridge.request(app, "list-browsers", payload).await?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "cef_helper_list" => {
+            // Read straight from BrowserHelpers state — no IPC to JS needed.
+            let helpers = app.state::<crate::BrowserHelpers>();
+            let entries = helpers.snapshot();
+            serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
         }
         "browser_open" => {
             let url = args["url"]

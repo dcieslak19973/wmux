@@ -103,7 +103,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, list_workspaces, switch_workspace, new_workspace, close_workspace, list_tabs, create_tab, focus_tab, close_tab, move_tab, list_panes, split_pane, focus_pane, close_pane, get_layout, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -483,6 +483,147 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                         }
                     },
                     {
+                        "name": "list_workspaces",
+                        "description": "List all workspaces in wmux. Each entry has id, name, pinned, themeId, themeLabel, active, tabCount. A workspace is a container of tabs; you can have multiple workspaces with separate sets of tabs/panes (e.g. project A vs project B).",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "switch_workspace",
+                        "description": "Switch wmux to a different workspace. The previously-active workspace's tabs become hidden; the target workspace's tabs become visible.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workspace_id": { "type": "string", "description": "Workspace id from list_workspaces." }
+                            },
+                            "required": ["workspace_id"]
+                        }
+                    },
+                    {
+                        "name": "new_workspace",
+                        "description": "Create a new workspace. Returns the new workspace's record. The new workspace becomes active automatically.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "Optional name (default: 'Workspace N')." }
+                            }
+                        }
+                    },
+                    {
+                        "name": "close_workspace",
+                        "description": "Close a workspace and all its tabs/panes. The user is not prompted — this is destructive. Prefer closing tabs individually if unsure.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workspace_id": { "type": "string", "description": "Workspace id to close." }
+                            },
+                            "required": ["workspace_id"]
+                        }
+                    },
+                    {
+                        "name": "list_tabs",
+                        "description": "List tabs. Returns each tab's tabId, title, workspaceId, paneIds, and the active flag. By default lists tabs in every workspace; pass workspace_id to filter.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workspace_id": { "type": "string", "description": "Optional workspace id to filter. Omit for all workspaces." }
+                            }
+                        }
+                    },
+                    {
+                        "name": "create_tab",
+                        "description": "Create a new tab. Returns the new tab's record. If workspace_id is omitted, opens in the active workspace. Target controls what shell/agent runs in the tab's first pane.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workspace_id": { "type": "string", "description": "Optional workspace id. Defaults to active." },
+                                "target": { "type": "object", "description": "Optional target spec describing what to run (e.g. {kind: 'local'} or {kind: 'wsl', distro: 'Ubuntu'}). Defaults to the wmux 'new tab' default." }
+                            }
+                        }
+                    },
+                    {
+                        "name": "focus_tab",
+                        "description": "Activate (focus) a tab. If the tab lives in a different workspace, wmux switches to that workspace first.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tab_id": { "type": "string", "description": "Tab id from list_tabs." }
+                            },
+                            "required": ["tab_id"]
+                        }
+                    },
+                    {
+                        "name": "close_tab",
+                        "description": "Close a tab. All its panes are terminated. Not prompted.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tab_id": { "type": "string", "description": "Tab id to close." }
+                            },
+                            "required": ["tab_id"]
+                        }
+                    },
+                    {
+                        "name": "move_tab",
+                        "description": "Move a tab to a different workspace. Useful for organizing experiments into their own workspace after they outgrow a shared one.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tab_id": { "type": "string", "description": "Tab id to move." },
+                                "workspace_id": { "type": "string", "description": "Destination workspace id." }
+                            },
+                            "required": ["tab_id", "workspace_id"]
+                        }
+                    },
+                    {
+                        "name": "list_panes",
+                        "description": "List panes. Returns each pane's paneId, tabId, sessionId, label, and active flag. Pass tab_id to filter to one tab. Note: pane sessionId is the same value as list_agents.pane_id — these are the IDs to use with ask_agent, get_blocks, etc.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tab_id": { "type": "string", "description": "Optional tab id to filter. Omit for all panes across all tabs." }
+                            }
+                        }
+                    },
+                    {
+                        "name": "split_pane",
+                        "description": "Split a pane horizontally or vertically, creating a new sibling pane with a default terminal target. Returns the new pane's record. To split with a browser pane instead, use browser_open with kind:\"iframe\".",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pane_id": { "type": "string", "description": "Pane to split (the new pane appears beside it)." },
+                                "direction": { "type": "string", "enum": ["h", "v"], "description": "h splits left/right; v splits top/bottom. Default v." }
+                            },
+                            "required": ["pane_id"]
+                        }
+                    },
+                    {
+                        "name": "focus_pane",
+                        "description": "Activate (focus) a pane. Switches workspace + tab if needed.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pane_id": { "type": "string", "description": "Pane id from list_panes." }
+                            },
+                            "required": ["pane_id"]
+                        }
+                    },
+                    {
+                        "name": "close_pane",
+                        "description": "Close a pane. The PTY is terminated. If it's the last pane in its tab, the tab closes too.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pane_id": { "type": "string", "description": "Pane id to close." }
+                            },
+                            "required": ["pane_id"]
+                        }
+                    },
+                    {
+                        "name": "get_layout",
+                        "description": "Export the current wmux layout as JSON — every workspace, tab, and pane. Useful for an agent to understand the full structural state at a glance, or to save/restore layouts.",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
                         "name": "workbook_list",
                         "description": "List saved workbooks in wmux. Returns each workbook's id, title, subtitle, chart count, row count, and last updated time.",
                         "inputSchema": { "type": "object", "properties": {} }
@@ -810,6 +951,129 @@ async fn dispatch_tool(
             let sent = manager.broadcast(message, exclude).await;
             serde_json::to_string_pretty(&serde_json::json!({ "sent_to": sent }))
                 .map_err(|e| e.to_string())
+        }
+        // ── Structural tools (workspaces, tabs, panes) ─────────────────
+        // Each is a thin bridge wrapper. The JS-side automation bridge in
+        // automation_bridge.mjs already implements every action; we just
+        // expose them as MCP tools with explicit input schemas.
+        "list_workspaces" => {
+            let result = bridge.request(app, "list-workspaces", serde_json::Value::Null).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "switch_workspace" => {
+            let workspace_id = args["workspace_id"]
+                .as_str()
+                .ok_or_else(|| "workspace_id is required".to_string())?;
+            let result = bridge
+                .request(app, "switch-workspace", serde_json::json!({ "workspaceId": workspace_id }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "new_workspace" => {
+            let mut payload = serde_json::json!({});
+            if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                payload["name"] = serde_json::json!(name);
+            }
+            let result = bridge.request(app, "create-workspace", payload).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "close_workspace" => {
+            let workspace_id = args["workspace_id"]
+                .as_str()
+                .ok_or_else(|| "workspace_id is required".to_string())?;
+            let result = bridge
+                .request(app, "close-workspace", serde_json::json!({ "workspaceId": workspace_id }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "list_tabs" => {
+            let mut payload = serde_json::json!({});
+            if let Some(ws) = args.get("workspace_id").and_then(|v| v.as_str()) {
+                payload["workspaceId"] = serde_json::json!(ws);
+            }
+            let result = bridge.request(app, "list-tabs", payload).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "create_tab" => {
+            let mut payload = serde_json::json!({});
+            if let Some(ws) = args.get("workspace_id").and_then(|v| v.as_str()) {
+                payload["workspaceId"] = serde_json::json!(ws);
+            }
+            if let Some(target) = args.get("target") {
+                payload["target"] = target.clone();
+            }
+            let result = bridge.request(app, "create-tab", payload).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "focus_tab" => {
+            let tab_id = args["tab_id"]
+                .as_str()
+                .ok_or_else(|| "tab_id is required".to_string())?;
+            let result = bridge
+                .request(app, "focus-tab", serde_json::json!({ "tabId": tab_id }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "close_tab" => {
+            let tab_id = args["tab_id"]
+                .as_str()
+                .ok_or_else(|| "tab_id is required".to_string())?;
+            let result = bridge
+                .request(app, "close-tab", serde_json::json!({ "tabId": tab_id }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "move_tab" => {
+            let tab_id = args["tab_id"]
+                .as_str()
+                .ok_or_else(|| "tab_id is required".to_string())?;
+            let workspace_id = args["workspace_id"]
+                .as_str()
+                .ok_or_else(|| "workspace_id is required".to_string())?;
+            let result = bridge
+                .request(app, "move-tab", serde_json::json!({ "tabId": tab_id, "workspaceId": workspace_id }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "list_panes" => {
+            let mut payload = serde_json::json!({});
+            if let Some(tab_id) = args.get("tab_id").and_then(|v| v.as_str()) {
+                payload["tabId"] = serde_json::json!(tab_id);
+            }
+            let result = bridge.request(app, "list-panes", payload).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "split_pane" => {
+            let pane_id = args["pane_id"]
+                .as_str()
+                .ok_or_else(|| "pane_id is required".to_string())?;
+            let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("v");
+            let result = bridge
+                .request(app, "split-pane", serde_json::json!({ "paneId": pane_id, "direction": direction }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "focus_pane" => {
+            let pane_id = args["pane_id"]
+                .as_str()
+                .ok_or_else(|| "pane_id is required".to_string())?;
+            let result = bridge
+                .request(app, "focus-pane", serde_json::json!({ "paneId": pane_id }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "close_pane" => {
+            let pane_id = args["pane_id"]
+                .as_str()
+                .ok_or_else(|| "pane_id is required".to_string())?;
+            let result = bridge
+                .request(app, "close-pane", serde_json::json!({ "paneId": pane_id }))
+                .await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        "get_layout" => {
+            let result = bridge.request(app, "get-layout", serde_json::Value::Null).await?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
         "workbook_list" => {
             let store = WorkbookStore::from_app(app)?;

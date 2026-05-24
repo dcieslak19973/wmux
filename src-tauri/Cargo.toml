@@ -30,6 +30,10 @@ env_logger = "0.11"
 opener = "0.7"
 url = "2"
 reqwest = { version = "0.12", features = ["json"] }
+# CDP (Chrome DevTools Protocol) WebSocket client used by browser_read_content
+# to evaluate JS in the out-of-process CEF helper window. See http_server.rs.
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

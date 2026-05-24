@@ -409,8 +409,21 @@ export function createSurfaceRuntime({
       }
 
       invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
-        .then((pid) => {
-          console.log(`%c[cef] HELPER SPAWNED pid=${pid} url=${full}`, 'color:#fff;background:#4ade80;padding:2px 6px;border-radius:3px;font-weight:bold');
+        .then((spawned) => {
+          // spawned now returns { label, pid, cdp_port }
+          browserState.cefLabel = spawned.label;
+          browserState.cefPort = spawned.cdp_port;
+          console.log(
+            `%c[cef] HELPER SPAWNED label=${spawned.label} pid=${spawned.pid} cdp_port=${spawned.cdp_port} url=${full}`,
+            'color:#fff;background:#4ade80;padding:2px 6px;border-radius:3px;font-weight:bold',
+          );
+          // Surface the label in the in-pane indicator so the user can copy it
+          // into a browser_read_content MCP call.
+          const indicator = browserEl.querySelector('.cef-active-indicator');
+          if (indicator) {
+            indicator.innerHTML += `<br><br><code style="color:#4ade80">CEF label: ${spawned.label}</code><br>`
+              + `<code style="color:#4ade80">CDP: http://localhost:${spawned.cdp_port}/json</code>`;
+          }
           btn.style.background = '#4ade80';
         })
         .catch((err) => {

@@ -109,20 +109,30 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
     } catch {
       return;
     }
+    // Log everything except screencast frames (those would flood). Truncate
+    // anything with a `data` field (base64 blobs) so the console stays
+    // readable.
+    if (msg.method !== 'Page.screencastFrame') {
+      const trimmed = JSON.stringify(msg, (k, v) =>
+        k === 'data' && typeof v === 'string' && v.length > 60
+          ? v.slice(0, 60) + '…'
+          : v);
+      console.debug('[cef-embed] <- CDP', trimmed);
+    }
     if (msg.method === 'Page.screencastFrame') {
       onFrame(msg.params);
     } else if (msg.id && msg.error) {
-      // Surface CDP request errors — these are silent killers otherwise.
       console.warn('[cef-embed] CDP error', msg);
     }
   });
-
-  ws.addEventListener('error', () => {
+  ws.addEventListener('error', (e) => {
+    console.warn('[cef-embed] WebSocket error', e);
     status.textContent = 'WebSocket error — CDP connection lost';
     status.style.color = '#ef4444';
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (e) => {
+    console.warn('[cef-embed] WebSocket closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
     if (!container.isConnected) return; // dispose path
     status.textContent = 'CDP disconnected';
     status.style.color = '#9ca3af';
@@ -130,7 +140,10 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
 
   function sendCdp(method, params) {
     if (ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ id: nextRequestId++, method, params: params ?? {} }));
+    const id = nextRequestId++;
+    const payload = { id, method, params: params ?? {} };
+    console.debug('[cef-embed] -> CDP', payload);
+    ws.send(JSON.stringify(payload));
   }
 
   function onFrame({ data, sessionId, metadata }) {

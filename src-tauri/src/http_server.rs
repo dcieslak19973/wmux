@@ -685,6 +685,56 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                             },
                             "required": ["label"]
                         }
+                    },
+                    {
+                        "name": "browser_get_url",
+                        "description": "Return the current URL + title of a CEF helper page. Cheap 'where am I' lookup that skips body-text extraction. Useful for confirming where a navigate landed.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "CEF helper label (from cef_helper_list)." }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    {
+                        "name": "browser_evaluate",
+                        "description": "Run an arbitrary JS expression inside a CEF helper page via Chrome DevTools Protocol Runtime.evaluate. Returns the raw CDP result object — preserves type metadata (string vs number vs object) and exception details. Set await_promise=true for async expressions like `await fetch(...)`.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "CEF helper label (from cef_helper_list)." },
+                                "expression": { "type": "string", "description": "JS expression to evaluate. Last expression's value is returned." },
+                                "await_promise": { "type": "boolean", "description": "If true, await a Promise returned by the expression. Default false." }
+                            },
+                            "required": ["label", "expression"]
+                        }
+                    },
+                    {
+                        "name": "browser_screenshot",
+                        "description": "Capture a PNG screenshot of the current CEF helper page via CDP Page.captureScreenshot. Writes the file to <app data dir>/screenshots/<uuid>.png and returns { label, path, bytes, full_page }. Set full_page=true to capture beyond the viewport.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "CEF helper label (from cef_helper_list)." },
+                                "full_page": { "type": "boolean", "description": "Capture the full scrollable page (default: viewport only)." }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    {
+                        "name": "browser_click",
+                        "description": "Dispatch a mouse click at (x, y) viewport coordinates in a CEF helper page via CDP Input.dispatchMouseEvent. Sends both mousePressed and mouseReleased so the page registers a real click (links, buttons, form controls all activate). Use browser_screenshot first to find coordinates.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "CEF helper label (from cef_helper_list)." },
+                                "x": { "type": "number", "description": "Viewport X coordinate (pixels, 0 = left edge)." },
+                                "y": { "type": "number", "description": "Viewport Y coordinate (pixels, 0 = top edge)." },
+                                "button": { "type": "string", "enum": ["left", "middle", "right"], "description": "Mouse button (default: left)." }
+                            },
+                            "required": ["label", "x", "y"]
+                        }
                     }
                 ]
             })
@@ -914,10 +964,26 @@ async fn dispatch_tool(
             let url = args["url"]
                 .as_str()
                 .ok_or_else(|| "url is required".to_string())?;
-            let result = bridge
-                .request(app, "navigate-browser", serde_json::json!({ "label": label, "url": url }))
-                .await?;
-            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+            // Dispatch by label type: a CEF helper goes via CDP (own process,
+            // can't be reached through the JS bridge); an iframe pane goes
+            // through the existing bridge path. The two label namespaces don't
+            // overlap (helpers don't appear in browser_list, iframes don't
+            // appear in cef_helper_list), so registry lookup is unambiguous.
+            let helpers = app.state::<crate::BrowserHelpers>();
+            if let Some(helper) = helpers.get(label) {
+                cdp_navigate(helper.cdp_port, url).await?;
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "label": label,
+                    "kind": "cef_helper",
+                    "url": url,
+                }))
+                .map_err(|e| e.to_string())
+            } else {
+                let result = bridge
+                    .request(app, "navigate-browser", serde_json::json!({ "label": label, "url": url }))
+                    .await?;
+                serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+            }
         }
         "browser_back" => {
             let label = args["label"]
@@ -981,6 +1047,107 @@ async fn dispatch_tool(
             };
 
             cdp_read_content(port, js_extract).await
+        }
+        "browser_get_url" => {
+            // Cheap "where are we" lookup. Same shape as browser_read_content
+            // but skips the body-text extract — useful when an agent navigates
+            // and just wants to confirm where it landed.
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let port = resolve_helper_port(app, label)?;
+            cdp_read_content(port, "''").await
+        }
+        "browser_evaluate" => {
+            // Runs an arbitrary JS expression in the CEF helper page. Useful
+            // for "click that button I can see via screenshot", "scroll
+            // halfway down", or scraping anything Runtime.evaluate can reach.
+            // Returns the CDP `result` object so callers see type info (string
+            // vs number vs object) and exceptions verbatim.
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let expression = args["expression"]
+                .as_str()
+                .ok_or_else(|| "expression is required".to_string())?;
+            let await_promise = args
+                .get("await_promise")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let port = resolve_helper_port(app, label)?;
+            let value = cdp_evaluate(port, expression, await_promise).await?;
+            serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+        }
+        "browser_screenshot" => {
+            // Capture a PNG. Saved to <app data dir>/screenshots/<uuid>.png
+            // and the absolute path is returned to the caller. Agents that
+            // need the bytes can read the file; we avoid blowing up MCP
+            // responses with multi-MB base64 strings.
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let full_page = args
+                .get("full_page")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let port = resolve_helper_port(app, label)?;
+            let png = cdp_screenshot(port, full_page).await?;
+            use tauri::Manager;
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| e.to_string())?
+                .join("screenshots");
+            std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+            let filename = format!("{}.png", uuid::Uuid::new_v4());
+            let path = data_dir.join(&filename);
+            std::fs::write(&path, &png).map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "label": label,
+                "path": path.to_string_lossy(),
+                "bytes": png.len(),
+                "full_page": full_page,
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "browser_click" => {
+            // Single click at (x, y) in viewport coordinates. CDP requires
+            // separate mousePressed + mouseReleased events to register as a
+            // real click. clickCount=1 makes it a normal click (not double).
+            let label = args["label"]
+                .as_str()
+                .ok_or_else(|| "label is required".to_string())?;
+            let x = args["x"]
+                .as_f64()
+                .ok_or_else(|| "x is required (number)".to_string())?;
+            let y = args["y"]
+                .as_f64()
+                .ok_or_else(|| "y is required (number)".to_string())?;
+            let button = args.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+            let port = resolve_helper_port(app, label)?;
+            let mut ws = cdp_open_page_ws(port).await?;
+            for event_type in &["mousePressed", "mouseReleased"] {
+                cdp_call(
+                    &mut ws,
+                    "Input.dispatchMouseEvent",
+                    serde_json::json!({
+                        "type": event_type,
+                        "x": x,
+                        "y": y,
+                        "button": button,
+                        "clickCount": 1,
+                    }),
+                    5,
+                )
+                .await?;
+            }
+            serde_json::to_string_pretty(&serde_json::json!({
+                "label": label,
+                "x": x,
+                "y": y,
+                "button": button,
+            }))
+            .map_err(|e| e.to_string())
         }
         _ => Err(format!("unknown tool: {}", name)),
     }
@@ -1143,6 +1310,62 @@ async fn cdp_read_content(port: u16, js_extract: &str) -> Result<String, String>
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| format!("CDP response missing /result/value: {}", result))
+}
+
+/// Evaluate an arbitrary JS expression in the CEF helper. `await_promise`
+/// allows the caller to await async expressions (`fetch(...).then(...)`).
+/// Returns the `result.result` object from `Runtime.evaluate` — exception
+/// info or value, with type metadata preserved so the MCP caller can
+/// distinguish e.g. number vs string.
+async fn cdp_evaluate(
+    port: u16,
+    expression: &str,
+    await_promise: bool,
+) -> Result<serde_json::Value, String> {
+    let mut ws = cdp_open_page_ws(port).await?;
+    let result = cdp_call(
+        &mut ws,
+        "Runtime.evaluate",
+        serde_json::json!({
+            "expression": expression,
+            "returnByValue": true,
+            "awaitPromise": await_promise,
+        }),
+        30,
+    )
+    .await?;
+    Ok(result
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
+}
+
+/// Capture a PNG screenshot of the helper's current page. Returns the raw
+/// PNG bytes (CDP returns base64; we decode for the caller).
+async fn cdp_screenshot(port: u16, full_page: bool) -> Result<Vec<u8>, String> {
+    let mut ws = cdp_open_page_ws(port).await?;
+    let mut params = serde_json::json!({ "format": "png" });
+    if full_page {
+        params["captureBeyondViewport"] = serde_json::json!(true);
+    }
+    let result = cdp_call(&mut ws, "Page.captureScreenshot", params, 30).await?;
+    let b64 = result
+        .get("data")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("CDP screenshot missing /data: {}", result))?;
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("base64 decode of screenshot failed: {e}"))
+}
+
+/// Resolve a CEF-helper label to its CDP port, or a clear error.
+fn resolve_helper_port(app: &tauri::AppHandle, label: &str) -> Result<u16, String> {
+    let helpers = app.state::<crate::BrowserHelpers>();
+    helpers
+        .get(label)
+        .map(|h| h.cdp_port)
+        .ok_or_else(|| format!("CEF helper '{}' not found — call cef_helper_list to see available helpers", label))
 }
 
 fn json_rpc_ok(id: serde_json::Value, result: serde_json::Value) -> String {

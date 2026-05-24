@@ -1448,6 +1448,103 @@ fn uuid_short() -> String {
     format!("{:08x}", n)
 }
 
+/// Determine whether a URL can safely be loaded inside a wmux iframe pane,
+/// purely from its HTTP response headers.
+///
+/// Returns:
+///   - `Ok(true)`  — no header forbids embedding; iframe is worth trying.
+///   - `Ok(false)` — `X-Frame-Options` or `Content-Security-Policy: frame-ancestors`
+///                   indicate framing is blocked.
+///
+/// Used by the browser pane's auto-routing: before setting `iframe.src`, the
+/// frontend calls this; on `false` it activates CEF mode for the pane and
+/// loads the URL in an out-of-process helper instead.
+///
+/// Caveats:
+///   - Only catches *header-based* embedding blocks. Sites that allow iframes
+///     in headers but use JavaScript frame-busting (e.g. `top.location =
+///     window.location`) will still load into the iframe and escape at
+///     runtime. That requires a separate detector (beforeunload interception)
+///     not implemented here.
+///   - HEAD requests sometimes 405; falls back to a 1-byte GET via Range.
+///   - Network errors are returned as `Ok(true)` — we prefer to try iframe
+///     and let the user see whatever error rather than block on a flaky
+///     pre-check.
+#[tauri::command]
+pub async fn check_iframe_compatible(url: String) -> Result<bool, String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        // Non-http URLs (file://, data:, about:) are always iframe-able.
+        return Ok(true);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        // Don't follow redirects automatically — we want to inspect the
+        // headers wherever they're declared, but a redirect chain that
+        // eventually allows framing should still be considered OK. For now
+        // the simple behavior (check the first response) is acceptable.
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Try HEAD first, fall back to a 1-byte GET if the server rejects HEAD.
+    let mut resp = match client.head(&url).send().await {
+        Ok(r) if r.status().is_success() => Some(r),
+        _ => None,
+    };
+    if resp.is_none() {
+        resp = client
+            .get(&url)
+            .header("Range", "bytes=0-0")
+            .send()
+            .await
+            .ok();
+    }
+    let Some(resp) = resp else {
+        // Couldn't reach the URL. Don't pre-emptively block iframe — let
+        // the user see whatever happens.
+        return Ok(true);
+    };
+
+    let headers = resp.headers();
+
+    // X-Frame-Options DENY / SAMEORIGIN → blocked.
+    if let Some(xfo) = headers
+        .get("x-frame-options")
+        .and_then(|v| v.to_str().ok())
+    {
+        let xfo = xfo.trim().to_ascii_lowercase();
+        if xfo == "deny" || xfo.starts_with("sameorigin") {
+            return Ok(false);
+        }
+        // "ALLOW-FROM <uri>" is deprecated and unlikely to allow our origin,
+        // so treat any other XFO value as blocked too.
+        if !xfo.is_empty() {
+            return Ok(false);
+        }
+    }
+
+    // CSP frame-ancestors: 'none' or 'self' block us. Wildcard or specific
+    // origins matching wmux are unlikely; if the directive exists and isn't
+    // *, treat as blocked.
+    for csp in headers.get_all("content-security-policy").iter() {
+        let Some(s) = csp.to_str().ok() else { continue };
+        for directive in s.split(';') {
+            let d = directive.trim().to_ascii_lowercase();
+            if let Some(rest) = d.strip_prefix("frame-ancestors") {
+                let rest = rest.trim();
+                // `frame-ancestors *` → allow all.
+                if rest == "*" {
+                    return Ok(true);
+                }
+                // Anything else (none, self, specific origins) → block.
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
 /// Spawn the out-of-process CEF browser helper as a top-level Chromium window.
 ///
 /// Each helper is launched with `--remote-debugging-port=<free port>` so the

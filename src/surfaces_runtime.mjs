@@ -308,56 +308,64 @@ export function createSurfaceRuntime({
       fwdBtn.disabled = browserState.historyIndex < 0 || browserState.historyIndex >= browserState.history.length - 1;
     };
 
+    // Switch this pane into CEF mode and load `full` via the helper. Idempotent
+    // for cefActive=true; reuses the helper via CDP navigate when one exists,
+    // falls back to a fresh spawn if the navigate fails. Removes the iframe
+    // and shows the in-pane indicator on first activation. Called by:
+    //   - the 🌐 button click handler
+    //   - navigateTo's pre-load header-check when the URL refuses iframe
+    //   - navigateTo's cefActive branch when the user navigates again
+    const cefHelperForPane = (full) => {
+      const firstActivation = !browserState.cefActive;
+      browserState.cefActive = true;
+
+      if (firstActivation) {
+        try { iframeEl.remove?.(); } catch (_) {}
+        placeholderEl?.remove?.();
+        if (!browserEl.querySelector('.cef-active-indicator')) {
+          const indicator = document.createElement('div');
+          indicator.className = 'cef-active-indicator';
+          indicator.style.cssText = 'padding:16px;color:#9ca3af;font-size:12px;line-height:1.5';
+          indicator.innerHTML = '<strong style="color:#7c6af7">CEF helper active for this pane.</strong><br>'
+            + 'The page is rendered in a separate top-level Chromium window — it should appear next to wmux.<br><br>'
+            + '<em>Embedding the CEF window <strong>inside</strong> the pane requires off-screen rendering '
+            + '(CEF renders to a pixel buffer, we paint it on a canvas via IPC). Deferred to Phase 3+.</em>';
+          browserEl.appendChild(indicator);
+        }
+      }
+
+      const recordSpawn = (spawned) => {
+        browserState.cefLabel = spawned.label;
+        browserState.cefPort = spawned.cdp_port;
+        const ind = browserEl.querySelector('.cef-active-indicator');
+        if (ind && !ind.dataset.labeled) {
+          ind.dataset.labeled = '1';
+          ind.innerHTML += `<br><br><code style="color:#4ade80">CEF label: ${spawned.label}</code><br>`
+            + `<code style="color:#4ade80">CDP: http://localhost:${spawned.cdp_port}/json</code>`;
+        }
+      };
+
+      const spawnFresh = () => {
+        invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
+          .then(recordSpawn)
+          .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
+      };
+
+      if (browserState.cefLabel) {
+        invoke('navigate_browser_helper', { label: browserState.cefLabel, url: full })
+          .catch(() => {
+            browserState.cefLabel = null;
+            spawnFresh();
+          });
+      } else {
+        spawnFresh();
+      }
+    };
+
     const navigateTo = (url, { pushHistory = true } = {}) => {
       const full = normalizeBrowserUrl(url);
       if (!full) return;
       urlInput.value = full;
-
-      // When CEF mode is active for this pane, route Enter/Go through
-      // the helper instead of the iframe. If a helper already exists,
-      // navigate it via CDP rather than spawning a fresh fleet. If the
-      // existing helper has been killed externally (user closed the
-      // window), the navigate call will fail and we fall back to a
-      // fresh spawn.
-      if (browserState.cefActive) {
-        if (browserState.cefLabel) {
-          invoke('navigate_browser_helper', { label: browserState.cefLabel, url: full })
-            .catch(() => {
-              // Helper went away — spawn a fresh one.
-              browserState.cefLabel = null;
-              invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
-                .then((spawned) => {
-                  browserState.cefLabel = spawned.label;
-                  browserState.cefPort = spawned.cdp_port;
-                })
-                .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
-            });
-        } else {
-          invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
-            .then((spawned) => {
-              browserState.cefLabel = spawned.label;
-              browserState.cefPort = spawned.cdp_port;
-            })
-            .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
-        }
-        browserState.currentUrl = full;
-        if (pushHistory) {
-          const nextHistory = browserState.history.slice(0, browserState.historyIndex + 1);
-          if (nextHistory[nextHistory.length - 1] !== full) nextHistory.push(full);
-          browserState.history = nextHistory;
-          browserState.historyIndex = browserState.history.length - 1;
-        }
-        updateNavButtons();
-        onLayoutChanged?.();
-        return;
-      }
-
-      if (iframeEl.style.display === 'none') {
-        // First navigation — show the iframe and hide the placeholder.
-        placeholderEl?.remove();
-        iframeEl.style.display = '';
-      }
-      iframeEl.src = full;
 
       browserState.currentUrl = full;
       if (pushHistory) {
@@ -368,6 +376,34 @@ export function createSurfaceRuntime({
       }
       updateNavButtons();
       onLayoutChanged?.();
+
+      // Already in CEF mode → straight to the helper.
+      if (browserState.cefActive) {
+        cefHelperForPane(full);
+        return;
+      }
+
+      // Iframe path: kick off the load optimistically, then in parallel ask
+      // Rust whether the URL refuses iframe embedding via X-Frame-Options /
+      // CSP frame-ancestors. If it does, switch the pane to CEF mode mid-flight
+      // so the user never has to manually click 🌐 for a site that was never
+      // going to load. Sites that allow iframe pay zero added latency.
+      if (iframeEl.style.display === 'none') {
+        placeholderEl?.remove();
+        iframeEl.style.display = '';
+      }
+      iframeEl.src = full;
+
+      invoke('check_iframe_compatible', { url: full })
+        .then((compatible) => {
+          if (compatible) return;
+          // Header-based block detected — auto-switch.
+          cefHelperForPane(full);
+        })
+        .catch(() => {
+          // Network error during the check — leave the iframe alone, the
+          // user will see whatever the iframe shows.
+        });
     };
 
     document.getElementById(`bg-${label}`).addEventListener('click', () => navigateTo(urlInput.value));
@@ -390,71 +426,13 @@ export function createSurfaceRuntime({
     });
     zoomBtn.addEventListener('click', () => toggleSurfaceZoom(browserEl));
     document.getElementById(`bb-cef-${label}`).addEventListener('click', () => {
-      // EXPERIMENTAL: see the button's title attribute. Activates CEF
-      // mode for this pane — the iframe is destroyed and all future
-      // navigation routes through the out-of-process CEF helper. Phase 3
-      // will replace the "spawn fresh on every click" flow with named-pipe
-      // IPC that drives a long-lived helper.
+      // Explicit user opt-in to CEF mode for this pane. Same path that
+      // navigateTo takes when its header check returns "iframe blocked";
+      // delegated to cefHelperForPane to keep the activation logic in one
+      // place.
       const target = (urlInput.value || browserState.currentUrl || '').trim();
       const full = normalizeBrowserUrl(target) || 'https://www.google.com/';
-
-      // Lock out the iframe path so Enter/Go go to CEF instead.
-      browserState.cefActive = true;
-
-      // Physically remove the iframe so it can't be re-shown by anything,
-      // including a stale navigateTo or browser internals. The pane
-      // content area will then show the indicator below; the actual page
-      // renders in a separate top-level Chromium window. Phase 3+ replaces
-      // the standalone window with an OSR-composited surface inside the
-      // pane.
-      try { iframeEl.remove?.(); } catch (_) {}
-      placeholderEl?.remove?.();
-
-      // Replace placeholder with a clear "CEF active" indicator so the
-      // pane content area shows actionable info rather than going blank.
-      let indicator = browserEl.querySelector('.cef-active-indicator');
-      if (!indicator) {
-        indicator = document.createElement('div');
-        indicator.className = 'cef-active-indicator';
-        indicator.style.cssText = 'padding:16px;color:#9ca3af;font-size:12px;line-height:1.5';
-        indicator.innerHTML = '<strong style="color:#7c6af7">CEF helper active for this pane.</strong><br>'
-          + 'The page is rendered in a separate top-level Chromium window — it should appear next to wmux.<br><br>'
-          + '<em>Embedding the CEF window <strong>inside</strong> the pane requires off-screen rendering '
-          + '(CEF renders to a pixel buffer, we paint it on a canvas via IPC). Deferred to Phase 3+.</em>';
-        browserEl.appendChild(indicator);
-      }
-
-      // If a helper already exists for this pane, navigate it via CDP
-      // instead of spawning a fresh fleet.
-      if (browserState.cefLabel) {
-        invoke('navigate_browser_helper', { label: browserState.cefLabel, url: full })
-          .catch(() => {
-            // Existing helper went away — spawn fresh.
-            browserState.cefLabel = null;
-            spawnFreshHelper();
-          });
-        return;
-      }
-      spawnFreshHelper();
-
-      function spawnFreshHelper() {
-        invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
-          .then((spawned) => {
-            browserState.cefLabel = spawned.label;
-            browserState.cefPort = spawned.cdp_port;
-            // Surface the label / CDP port in the indicator so the user
-            // can copy them into manual MCP calls. MCP agents discover
-            // the same info via the cef_helper_list tool.
-            const ind = browserEl.querySelector('.cef-active-indicator');
-            if (ind) {
-              ind.innerHTML += `<br><br><code style="color:#4ade80">CEF label: ${spawned.label}</code><br>`
-                + `<code style="color:#4ade80">CDP: http://localhost:${spawned.cdp_port}/json</code>`;
-            }
-          })
-          .catch((err) => {
-            showError(`Could not spawn CEF helper: ${err}`);
-          });
-      }
+      cefHelperForPane(full);
     });
     document.getElementById(`bc-${label}`).addEventListener('click', () => closeBrowserSurface(label));
 

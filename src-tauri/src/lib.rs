@@ -46,6 +46,7 @@ pub fn run() {
             commands::list_sessions,
             commands::resize_session,
             commands::open_url,
+            commands::check_iframe_compatible,
             commands::spawn_browser_helper,
             commands::kill_browser_helper,
             commands::navigate_browser_helper,

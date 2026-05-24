@@ -140,19 +140,10 @@ export async function createCefEmbeddedSurface(mountEl, url) {
     } catch {
       return;
     }
-    // Log everything except screencast frames (those would flood). Truncate
-    // anything with a `data` field (base64 blobs) so the console stays
-    // readable.
-    if (msg.method !== 'Page.screencastFrame') {
-      const trimmed = JSON.stringify(msg, (k, v) =>
-        k === 'data' && typeof v === 'string' && v.length > 60
-          ? v.slice(0, 60) + '…'
-          : v);
-      console.debug('[cef-embed] <- CDP', trimmed);
-    }
     if (msg.method === 'Page.screencastFrame') {
       onFrame(msg.params);
     } else if (msg.id && msg.error) {
+      // Surface CDP request errors — silent killers otherwise.
       console.warn('[cef-embed] CDP error', msg);
     }
   });
@@ -171,10 +162,7 @@ export async function createCefEmbeddedSurface(mountEl, url) {
 
   function sendCdp(method, params) {
     if (ws.readyState !== WebSocket.OPEN) return;
-    const id = nextRequestId++;
-    const payload = { id, method, params: params ?? {} };
-    console.debug('[cef-embed] -> CDP', payload);
-    ws.send(JSON.stringify(payload));
+    ws.send(JSON.stringify({ id: nextRequestId++, method, params: params ?? {} }));
   }
 
   function onFrame({ data, sessionId, metadata }) {

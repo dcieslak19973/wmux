@@ -103,7 +103,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Default mode exposes a single `wmux_eval` tool (Code Mode) that runs JS scripts orchestrating ~44 wmux operations as bound globals — see the tool description for the binding catalog. Set WMUX_MCP_MODE=full to expose all underlying tools individually (get_blocks, list_sessions, list_agents, ask_agent, broadcast, list/switch/new/close_workspace, list/create/focus/close/move_tab, list/split/focus/close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, workbook_*, browser_*, cef_helper_list). Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Default mode exposes two tools: `wmux_eval` (runs JS orchestration scripts with ~44 wmux operations bound as globals) and `wmux_search` (lists/searches bindings with full schemas). Set WMUX_MCP_MODE=full to expose every underlying tool individually (get_blocks, list_sessions, list_agents, ask_agent, broadcast, list/switch/new/close_workspace, list/create/focus/close/move_tab, list/split/focus/close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, workbook_*, browser_*, cef_helper_list). Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -399,8 +399,57 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
             })
         }
         "tools/list" => {
-            let full = serde_json::json!({
-                "tools": [
+            let tools = all_mcp_tools();
+            // Code Mode is the default: show wmux_eval (orchestration entry
+            // point) + wmux_search (discovery). All other tools are still
+            // callable via the wmux_eval JS sandbox where they're bound as
+            // global functions. Set WMUX_MCP_MODE=full to expose every
+            // underlying tool individually — useful for agents that
+            // struggle with code generation, or for one-off discrete calls.
+            let mode = std::env::var("WMUX_MCP_MODE").unwrap_or_default();
+            let filtered: Vec<serde_json::Value> = if mode == "full" {
+                tools
+            } else {
+                tools
+                    .into_iter()
+                    .filter(|t| {
+                        matches!(
+                            t.get("name").and_then(|n| n.as_str()),
+                            Some("wmux_eval") | Some("wmux_search")
+                        )
+                    })
+                    .collect()
+            };
+            serde_json::json!({ "tools": filtered })
+        }
+        "tools/call" => {
+            let tool_name = params["name"].as_str().unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+            let bridge = app.state::<FrontendControlBridge>();
+            match dispatch_tool(tool_name, &args, manager, app, &bridge).await {
+                Ok(text) => serde_json::json!({
+                    "content": [{"type": "text", "text": text}]
+                }),
+                Err(msg) => serde_json::json!({
+                    "content": [{"type": "text", "text": msg}],
+                    "isError": true
+                }),
+            }
+        }
+        _ => {
+            return (200, json_rpc_error(id, -32601, "Method not found"));
+        }
+    };
+
+    (200, json_rpc_ok(id, result))
+}
+
+/// Canonical list of every MCP tool wmux exposes. Single source of truth for
+/// `tools/list` and `wmux_search`. Tools are returned in registration order;
+/// `tools/list` may filter (e.g. Code Mode default returns only wmux_eval +
+/// wmux_search).
+fn all_mcp_tools() -> Vec<serde_json::Value> {
+    serde_json::json!([
                     {
                         "name": "get_blocks",
                         "description": "Get recent completed command blocks for a wmux terminal pane. Returns each command that was run, its plain-text output (ANSI codes stripped), exit code, and timestamps. Use $WMUX_PANE_ID as session_id to query the pane you are running inside.",
@@ -654,7 +703,7 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                     },
                     {
                         "name": "wmux_eval",
-                        "description": "Run a JavaScript script that orchestrates wmux. Every wmux tool is exposed as a synchronous global function inside the sandbox; this is the *only* tool you need by default. Each binding takes one optional object argument (the MCP input shape) and returns the parsed JSON result. Throws on tool error. The script's final expression is returned as JSON. Default 90s, max 5 min. No `await` — sync API.\n\nBINDINGS:\n• Sessions/agents: get_blocks({session_id, limit?}), list_sessions(), list_agents(), ask_agent({pane_id, message, timeout_secs?, silence_secs?}), broadcast({message, exclude_pane_id?})\n• Workspaces: list_workspaces(), switch_workspace({workspace_id}), new_workspace({name?}), close_workspace({workspace_id})\n• Tabs: list_tabs({workspace_id?}), create_tab({workspace_id?, target?}), focus_tab({tab_id}), close_tab({tab_id}), move_tab({tab_id, workspace_id})\n• Panes: list_panes({tab_id?}), split_pane({pane_id, direction}), focus_pane({pane_id}), close_pane({pane_id}), get_layout()\n• Pane I/O: pane_send_text({pane_id, text, append_enter?}), pane_send_keys({pane_id, keys}), pane_read_screen({pane_id, lines?})\n• Browser: browser_list({tab_id?}), browser_open({url, kind?, tab_id?}), browser_navigate({label, url}), browser_back/forward/close({label}), browser_read_content({label, format?}), browser_get_url({label}), browser_evaluate({label, expression, await_promise?}), browser_screenshot({label, full_page?}), browser_click({label, x, y, button?}), cef_helper_list()\n• Workbook: workbook_list(), workbook_get/create/update/delete/open/add_chart/update_chart/remove_chart/reorder_charts({...})\n\nEXAMPLE:\n  const ws = new_workspace({name:'exp-1'});\n  const t = create_tab({workspace_id: ws.id});\n  split_pane({pane_id: t.paneIds[0], direction:'h'});\n  return list_panes({tab_id: t.tabId});\n\nSet WMUX_MCP_MODE=full to expose every tool individually instead.",
+                        "description": "Run a JavaScript script that orchestrates wmux. Every wmux tool is exposed as a synchronous global function inside the sandbox. Each binding takes one optional object argument (the MCP input shape) and returns the parsed JSON result. Throws on tool error. The script's final expression is returned as JSON. Default 90s, max 5 min. No `await` — sync API.\n\nFor discovery, call `wmux_search` (the other top-level MCP tool) with no args to list every binding with its full inputSchema, or with `query` to filter by keyword.\n\nBINDINGS:\n• Sessions/agents: get_blocks({session_id, limit?}), list_sessions(), list_agents(), ask_agent({pane_id, message, timeout_secs?, silence_secs?}), broadcast({message, exclude_pane_id?})\n• Workspaces: list_workspaces(), switch_workspace({workspace_id}), new_workspace({name?}), close_workspace({workspace_id})\n• Tabs: list_tabs({workspace_id?}), create_tab({workspace_id?, target?}), focus_tab({tab_id}), close_tab({tab_id}), move_tab({tab_id, workspace_id})\n• Panes: list_panes({tab_id?}), split_pane({pane_id, direction}), focus_pane({pane_id}), close_pane({pane_id}), get_layout()\n• Pane I/O: pane_send_text({pane_id, text, append_enter?}), pane_send_keys({pane_id, keys}), pane_read_screen({pane_id, lines?})\n• Browser: browser_list({tab_id?}), browser_open({url, kind?, tab_id?}), browser_navigate({label, url}), browser_back/forward/close({label}), browser_read_content({label, format?}), browser_get_url({label}), browser_evaluate({label, expression, await_promise?}), browser_screenshot({label, full_page?}), browser_click({label, x, y, button?}), cef_helper_list()\n• Workbook: workbook_list(), workbook_get/create/update/delete/open/add_chart/update_chart/remove_chart/reorder_charts({...})\n\nEXAMPLE:\n  const ws = new_workspace({name:'exp-1'});\n  const t = create_tab({workspace_id: ws.id});\n  split_pane({pane_id: t.paneIds[0], direction:'h'});\n  return list_panes({tab_id: t.tabId});\n\nSet WMUX_MCP_MODE=full to expose every tool individually instead.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -930,45 +979,21 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                             },
                             "required": ["label", "x", "y"]
                         }
+                    },
+                    {
+                        "name": "wmux_search",
+                        "description": "Discovery for Code Mode. Search the catalog of wmux bindings (the tools callable from inside a wmux_eval script). Returns matching tools with their full inputSchema. Pass an empty query (or omit it) to list everything.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string", "description": "Case-insensitive substring filter against tool name + description. Examples: \"workspace\", \"split\", \"browser screenshot\". Omit to list all bindings." }
+                            }
+                        }
                     }
-                ]
-            });
-            // Code Mode is the default: show only `wmux_eval` (which has all
-            // the bindings documented in its description). Set
-            // WMUX_MCP_MODE=full to expose every underlying tool individually
-            // — useful for agents that struggle with code generation, or
-            // for one-off discrete tool calls during debugging.
-            let mode = std::env::var("WMUX_MCP_MODE").unwrap_or_default();
-            if mode != "full" {
-                let mut filtered = full.clone();
-                if let Some(tools) = filtered.get_mut("tools").and_then(|v| v.as_array_mut()) {
-                    tools.retain(|t| t.get("name").and_then(|n| n.as_str()) == Some("wmux_eval"));
-                }
-                filtered
-            } else {
-                full
-            }
-        }
-        "tools/call" => {
-            let tool_name = params["name"].as_str().unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-            let bridge = app.state::<FrontendControlBridge>();
-            match dispatch_tool(tool_name, &args, manager, app, &bridge).await {
-                Ok(text) => serde_json::json!({
-                    "content": [{"type": "text", "text": text}]
-                }),
-                Err(msg) => serde_json::json!({
-                    "content": [{"type": "text", "text": msg}],
-                    "isError": true
-                }),
-            }
-        }
-        _ => {
-            return (200, json_rpc_error(id, -32601, "Method not found"));
-        }
-    };
-
-    (200, json_rpc_ok(id, result))
+    ])
+    .as_array()
+    .cloned()
+    .unwrap_or_default()
 }
 
 pub async fn dispatch_tool(
@@ -1143,9 +1168,54 @@ pub async fn dispatch_tool(
             let result = bridge.request(app, "get-layout", serde_json::Value::Null).await?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
-        // ── Code Mode (spike) ──────────────────────────────────────────
-        // Runs an agent-supplied JS script with hand-picked MCP tools bound
-        // as global functions. See code_mode.rs for the bindings list.
+        // ── Code Mode discovery + execution ─────────────────────────────
+        "wmux_search" => {
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            let bound: std::collections::HashSet<&str> =
+                crate::code_mode::BOUND_TOOLS.iter().copied().collect();
+            let matches: Vec<serde_json::Value> = all_mcp_tools()
+                .into_iter()
+                .filter(|tool| {
+                    // Skip wmux_eval and wmux_search themselves — they're MCP
+                    // entry points, not script bindings.
+                    let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    name != "wmux_eval" && name != "wmux_search"
+                })
+                .filter(|tool| {
+                    if query.is_empty() {
+                        return true;
+                    }
+                    let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let desc = tool.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                    name.to_lowercase().contains(&query)
+                        || desc.to_lowercase().contains(&query)
+                })
+                .map(|tool| {
+                    let name = tool
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    serde_json::json!({
+                        "name": name,
+                        "callable_in_script": bound.contains(name.as_str()),
+                        "description": tool.get("description").cloned().unwrap_or(serde_json::Value::Null),
+                        "inputSchema": tool.get("inputSchema").cloned().unwrap_or(serde_json::Value::Null),
+                    })
+                })
+                .collect();
+            serde_json::to_string_pretty(&serde_json::json!({
+                "query": query,
+                "match_count": matches.len(),
+                "tools": matches,
+            }))
+            .map_err(|e| e.to_string())
+        }
         "wmux_eval" => {
             let script = args["script"]
                 .as_str()

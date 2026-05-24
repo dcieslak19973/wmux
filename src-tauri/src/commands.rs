@@ -1489,21 +1489,6 @@ pub async fn spawn_browser_helper(
     // / OSR sync) but the spike spawns the helper as a top-level window.
     let _ = (&app, &window_label);
 
-    // Pick a free localhost port for Chromium DevTools Protocol. We bind
-    // briefly to a 0-port to let the OS allocate, then drop the listener so
-    // CEF can bind to the same port immediately. Race window is small enough
-    // not to matter for the spike.
-    let cdp_port: u16 = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| format!("could not allocate CDP port: {e}"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| format!("could not read CDP port: {e}"))?
-            .port();
-        drop(listener);
-        port
-    };
-
     // Helper label = short uuid. Becomes the key in BrowserHelpers state.
     let label = format!("cef-helper-{}", uuid_short());
 
@@ -1554,10 +1539,18 @@ pub async fn spawn_browser_helper(
         .current_dir(helper_dir)
         .arg(format!("--url={url}"))
         .arg(format!("--user-data-dir={user_data_dir}"))
-        // --remote-debugging-port=N exposes the Chrome DevTools Protocol
-        // over HTTP+WebSocket on localhost:N. Used by `browser_read_content`
-        // (and future MCP tools) to drive the helper from wmux's Rust side.
-        .arg(format!("--remote-debugging-port={cdp_port}"))
+        // --remote-debugging-port=0 lets Chromium pick a free port itself —
+        // we previously tried picking the port in Rust via TcpListener bind
+        // + drop, but the TCP TIME_WAIT race could leave CEF unable to bind
+        // the requested port, silently falling back to a different one (so
+        // our registry had stale info). With port=0, Chromium writes the
+        // chosen port to <user_data_dir>/DevToolsActivePort which we read
+        // after spawn. Mirrors how Puppeteer / Playwright discover the port.
+        .arg("--remote-debugging-port=0")
+        // --remote-allow-origins=* permits localhost CDP clients (us)
+        // without the CORS check Chromium 109+ added by default. Without
+        // this CDP responds but refuses the upgrade-to-WebSocket.
+        .arg("--remote-allow-origins=*")
         // Chromium switches (consumed by CEF before our --url/--parent-hwnd).
         //
         // --proxy-auto-detect: CEF defaults to direct connection. On corporate
@@ -1590,6 +1583,31 @@ pub async fn spawn_browser_helper(
     // keeps running independently after we return. Proper tracking (so
     // callers can kill helpers on pane close) is a Phase 3/4 follow-up.
     drop(child);
+
+    // Discover the actual CDP port Chromium picked by reading the
+    // DevToolsActivePort file it writes into the user_data_dir on startup.
+    // First line of the file is the decimal port number. (Second line is
+    // the browser-target WebSocket path — we don't need it.)
+    let active_port_path = std::path::Path::new(&user_data_dir).join("DevToolsActivePort");
+    let cdp_port: u16 = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&active_port_path) {
+                if let Some(first_line) = contents.lines().next() {
+                    if let Ok(p) = first_line.trim().parse::<u16>() {
+                        break p;
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for {} (helper may have failed to start CDP)",
+                    active_port_path.display()
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
 
     helpers.register(
         label.clone(),

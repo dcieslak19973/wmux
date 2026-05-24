@@ -922,20 +922,6 @@ pub async fn open_url(url: String) -> Result<(), String> {
     opener::open_browser(&url).map_err(|e| e.to_string())
 }
 
-/// Open an arbitrary URL in the system default browser.
-///
-/// Unlike `open_url`, this accepts any http(s) URL — intended for the browser
-/// pane's "open externally" button, where the user explicitly drives the
-/// action. NOT safe to call from terminal-URL-detection paths (use `open_url`
-/// for that — it restricts to localhost as a phishing/malware guard).
-#[tauri::command]
-pub async fn open_external_url(url: String) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(format!("Refused to open non-http(s) URL: {url}"));
-    }
-    opener::open_browser(&url).map_err(|e| e.to_string())
-}
-
 /// Resolve a localhost URL for a given pane, creating an SSH or WSL port-forward
 /// tunnel if needed.  Returns the URL to open in the wmux browser (remapped to
 /// the forwarded local port for SSH/WSL, unchanged for local sessions).

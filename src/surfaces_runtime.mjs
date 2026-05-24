@@ -265,7 +265,6 @@ export function createSurfaceRuntime({
         <input class="browser-url" id="bu-${label}" placeholder="Enter URL…" spellcheck="false" />
         <button class="browser-btn browser-go" id="bg-${label}">Go</button>
         <button class="browser-btn" id="bb-cef-${label}" title="Open the URL in a real Chromium browser (out-of-process CEF helper). Use this for: (1) sites that block iframe embedding (Google, GitHub, Twitter, etc.), (2) making the page readable by MCP agents via Chrome DevTools Protocol — agents can discover helpers with cef_helper_list and read content with browser_read_content. The helper window appears separately from wmux (in-pane visual embedding requires off-screen rendering, not yet shipped). Once activated, Enter and Go in this pane also route through CEF.">&#x1f310;</button>
-        <button class="browser-btn" id="bb-ext-${label}" title="Open this URL in your system's default browser. Use this for sites like Google, GitHub, or Twitter that refuse to load inside the embedded pane (they send X-Frame-Options or frame-busting JS to block iframes).">&#x2197;</button>
         <button class="browser-btn pane-tb-close" id="bc-${label}" title="Close browser">&#x2715;</button>
       </div>
       <div class="browser-placeholder" id="bph-${label}">Enter a URL and press Go</div>
@@ -456,12 +455,6 @@ export function createSurfaceRuntime({
             showError(`Could not spawn CEF helper: ${err}`);
           });
       }
-    });
-    document.getElementById(`bb-ext-${label}`).addEventListener('click', () => {
-      const target = (urlInput.value || browserState.currentUrl || '').trim();
-      const full = normalizeBrowserUrl(target);
-      if (!full) return;
-      invoke('open_external_url', { url: full }).catch((err) => showError(`Could not open externally: ${err}`));
     });
     document.getElementById(`bc-${label}`).addEventListener('click', () => closeBrowserSurface(label));
 

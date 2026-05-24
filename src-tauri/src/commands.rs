@@ -1462,42 +1462,50 @@ fn uuid_short() -> String {
     format!("{:08x}", n)
 }
 
-/// Spawn the out-of-process CEF browser helper, parented to the given wmux
-/// window. The helper appears as a Win32 child of the main webview's HWND so
-/// its focus events stay inside the helper's own message pump and can't wedge
-/// our ConPTY sessions the way an in-process child WebView2 did.
+/// Spawn the out-of-process CEF browser helper as a top-level Chromium window.
 ///
-/// Spike-phase contract: caller supplies a starting URL; the helper renders it
-/// at a fixed initial position inside the parent window. Future work (separate
-/// PR) adds named-pipe IPC for runtime navigate / geometry / close, replacing
-/// "kill and respawn" with proper control.
+/// Each helper is launched with `--remote-debugging-port=<free port>` so the
+/// MCP `browser_read_content` tool (and future automation) can drive its
+/// content via the Chrome DevTools Protocol over HTTP+WebSocket. The
+/// (label → port) mapping is registered into `BrowserHelpers` Tauri state.
 ///
-/// Returns the helper's PID so the caller can track it for cleanup.
+/// Returns the helper's auto-generated label. Callers should remember the
+/// label and pass it to any MCP / CDP-routed operations.
+#[derive(serde::Serialize)]
+pub struct SpawnedHelper {
+    pub label: String,
+    pub pid: u32,
+    pub cdp_port: u16,
+}
+
 #[tauri::command]
 pub async fn spawn_browser_helper(
     app: AppHandle,
+    helpers: tauri::State<'_, crate::BrowserHelpers>,
     window_label: String,
     url: String,
-) -> Result<u32, String> {
-    let window = app
-        .get_window(&window_label)
-        .ok_or_else(|| format!("window '{}' not found", window_label))?;
+) -> Result<SpawnedHelper, String> {
+    // window_label is retained in the signature for future use (e.g. SetParent
+    // / OSR sync) but the spike spawns the helper as a top-level window.
+    let _ = (&app, &window_label);
 
-    // The helper expects a Win32 HWND value for --parent-hwnd. We use the
-    // wmux native window HWND (Tauri main window) as the parent. The CEF
-    // child window will appear inside that HWND at a fixed default position;
-    // real geometry sync waits for the IPC layer.
-    #[cfg(target_os = "windows")]
-    let parent_hwnd: usize = {
-        let hwnd = window
-            .hwnd()
-            .map_err(|e| format!("could not get parent HWND: {e}"))?;
-        // tauri's HWND wraps a *mut c_void; cast to usize for command-line.
-        hwnd.0 as usize
+    // Pick a free localhost port for Chromium DevTools Protocol. We bind
+    // briefly to a 0-port to let the OS allocate, then drop the listener so
+    // CEF can bind to the same port immediately. Race window is small enough
+    // not to matter for the spike.
+    let cdp_port: u16 = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| format!("could not allocate CDP port: {e}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("could not read CDP port: {e}"))?
+            .port();
+        drop(listener);
+        port
     };
 
-    #[cfg(not(target_os = "windows"))]
-    let parent_hwnd: usize = 0; // Stub: helper only useful on Windows currently.
+    // Helper label = short uuid. Becomes the key in BrowserHelpers state.
+    let label = format!("cef-helper-{}", uuid_short());
 
     // Per-helper isolated user data dir so multiple panes / restarts don't
     // collide on Chromium's lock file.
@@ -1536,26 +1544,20 @@ pub async fn spawn_browser_helper(
         .ok_or_else(|| "helper path has no parent dir".to_string())?;
 
     // SPIKE FINDING: passing --parent-hwnd to make CEF a Win32 child of
-    // wmux's HWND triggers Chromium compositor errors of the form
-    //   "Source has different root than target: source chain=
-    //    [WebContentsViewAura]-[NativeViewHostAuraClip],
-    //    target chain=[ContentsWebView]"
-    // Chromium's compositor refuses to attach CEF's render layer when the
-    // parent HWND isn't in its own view tree. The page renders to memory
-    // (Google's JS runs, console.log fires) but never reaches pixels.
-    //
-    // Real fix is off-screen rendering (OSR): CEF renders to a pixel
-    // buffer, we receive it over IPC and paint into a <canvas> ourselves.
-    // That's Phase 3+ work. For now, spawn the helper as a top-level
-    // Chromium window (no --parent-hwnd) so the page is actually visible —
-    // proves the architecture works end-to-end and unblocks user testing.
-    // The parent_hwnd is still computed above; it'll be useful when we
-    // wire up SetParent post-creation or move to OSR.
-    let _ = parent_hwnd; // suppress unused-warning while embedding is disabled
+    // wmux's HWND triggered Chromium compositor errors ("Source has
+    // different root than target: source chain=[WebContentsViewAura]…"),
+    // because Chromium refuses to attach CEF's render layer when the
+    // parent HWND isn't in its own view tree. Embedding inside the pane
+    // requires off-screen rendering (Phase 3+). For now the helper opens
+    // as a top-level Chromium window.
     let child = std::process::Command::new(&helper_path)
         .current_dir(helper_dir)
         .arg(format!("--url={url}"))
         .arg(format!("--user-data-dir={user_data_dir}"))
+        // --remote-debugging-port=N exposes the Chrome DevTools Protocol
+        // over HTTP+WebSocket on localhost:N. Used by `browser_read_content`
+        // (and future MCP tools) to drive the helper from wmux's Rust side.
+        .arg(format!("--remote-debugging-port={cdp_port}"))
         // Chromium switches (consumed by CEF before our --url/--parent-hwnd).
         //
         // --proxy-auto-detect: CEF defaults to direct connection. On corporate
@@ -1589,7 +1591,19 @@ pub async fn spawn_browser_helper(
     // callers can kill helpers on pane close) is a Phase 3/4 follow-up.
     drop(child);
 
-    Ok(pid)
+    helpers.register(
+        label.clone(),
+        crate::HelperInfo {
+            pid,
+            cdp_port,
+        },
+    );
+
+    Ok(SpawnedHelper {
+        label,
+        pid,
+        cdp_port,
+    })
 }
 
 /// Create a borderless browser WebviewWindow positioned at the given screen coords.

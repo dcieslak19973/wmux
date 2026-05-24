@@ -17,10 +17,21 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct HelperInfo {
     pub pid: u32,
     pub cdp_port: u16,
+}
+
+/// Snapshot row returned by `BrowserHelpers::snapshot()`. Carries the label
+/// alongside the info so callers (notably the `cef_helper_list` MCP tool)
+/// get a flat JSON-friendly shape.
+#[derive(Debug, serde::Serialize)]
+pub struct HelperEntry {
+    pub label: String,
+    pub pid: u32,
+    pub cdp_port: u16,
+    pub cdp_url: String,
 }
 
 #[derive(Default, Clone)]
@@ -39,5 +50,20 @@ impl BrowserHelpers {
 
     pub fn get(&self, label: &str) -> Option<HelperInfo> {
         self.inner.lock().unwrap().get(label).cloned()
+    }
+
+    /// Flat list of all registered helpers, JSON-serializable.
+    pub fn snapshot(&self) -> Vec<HelperEntry> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(label, info)| HelperEntry {
+                label: label.clone(),
+                pid: info.pid,
+                cdp_port: info.cdp_port,
+                cdp_url: format!("http://127.0.0.1:{}/json", info.cdp_port),
+            })
+            .collect()
     }
 }

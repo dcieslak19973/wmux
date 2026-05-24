@@ -103,7 +103,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Default mode exposes two tools: `wmux_eval` (runs JS orchestration scripts with ~44 wmux operations bound as globals) and `wmux_search` (lists/searches bindings with full schemas). Set WMUX_MCP_MODE=full to expose every underlying tool individually (get_blocks, list_sessions, list_agents, ask_agent, broadcast, list/switch/new/close_workspace, list/create/focus/close/move_tab, list/split/focus/close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, workbook_*, browser_*, cef_helper_list). Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Default mode exposes Code Mode entry points (`wmux_eval` for JS orchestration scripts, `wmux_search` for binding discovery) PLUS workbook_* tools as top-level MCP tools (workbook ops don't fit the sandbox; the rest of the ~34 operations are bound as JS globals inside wmux_eval). Set WMUX_MCP_MODE=full to expose every underlying tool individually (get_blocks, list_sessions, list_agents, ask_agent, broadcast, list/switch/new/close_workspace, list/create/focus/close/move_tab, list/split/focus/close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, browser_*, cef_helper_list). Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -410,13 +410,20 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
             let filtered: Vec<serde_json::Value> = if mode == "full" {
                 tools
             } else {
+                // Default (Code Mode): hide anything the wmux_eval sandbox
+                // can handle (i.e. everything in BOUND_TOOLS), since those
+                // are reachable as JS globals from inside a script. What
+                // remains: wmux_eval + wmux_search (the entry points) plus
+                // anything we deliberately exclude from binding (today:
+                // workbook_*, which doesn't behave correctly from a
+                // headless sandbox).
+                let bound: std::collections::HashSet<&str> =
+                    crate::code_mode::BOUND_TOOLS.iter().copied().collect();
                 tools
                     .into_iter()
                     .filter(|t| {
-                        matches!(
-                            t.get("name").and_then(|n| n.as_str()),
-                            Some("wmux_eval") | Some("wmux_search")
-                        )
+                        let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        !bound.contains(name)
                     })
                     .collect()
             };
@@ -703,7 +710,7 @@ fn all_mcp_tools() -> Vec<serde_json::Value> {
                     },
                     {
                         "name": "wmux_eval",
-                        "description": "Run a JavaScript script that orchestrates wmux. Every wmux tool is exposed as a synchronous global function inside the sandbox. Each binding takes one optional object argument (the MCP input shape) and returns the parsed JSON result. Throws on tool error. The script's final expression is returned as JSON. Default 90s, max 5 min. No `await` — sync API.\n\nFor discovery, call `wmux_search` (the other top-level MCP tool) with no args to list every binding with its full inputSchema, or with `query` to filter by keyword.\n\nBINDINGS:\n• Sessions/agents: get_blocks({session_id, limit?}), list_sessions(), list_agents(), ask_agent({pane_id, message, timeout_secs?, silence_secs?}), broadcast({message, exclude_pane_id?})\n• Workspaces: list_workspaces(), switch_workspace({workspace_id}), new_workspace({name?}), close_workspace({workspace_id})\n• Tabs: list_tabs({workspace_id?}), create_tab({workspace_id?, target?}), focus_tab({tab_id}), close_tab({tab_id}), move_tab({tab_id, workspace_id})\n• Panes: list_panes({tab_id?}), split_pane({pane_id, direction}), focus_pane({pane_id}), close_pane({pane_id}), get_layout()\n• Pane I/O: pane_send_text({pane_id, text, append_enter?}), pane_send_keys({pane_id, keys}), pane_read_screen({pane_id, lines?})\n• Browser: browser_list({tab_id?}), browser_open({url, kind?, tab_id?}), browser_navigate({label, url}), browser_back/forward/close({label}), browser_read_content({label, format?}), browser_get_url({label}), browser_evaluate({label, expression, await_promise?}), browser_screenshot({label, full_page?}), browser_click({label, x, y, button?}), cef_helper_list()\n\nWorkbook ops are NOT available in Code Mode — set WMUX_MCP_MODE=full to use workbook_list / workbook_open / etc. directly via MCP.\n\nEXAMPLE:\n  const ws = new_workspace({name:'exp-1'});\n  const t = create_tab({workspace_id: ws.id});\n  split_pane({pane_id: t.paneIds[0], direction:'h'});\n  return list_panes({tab_id: t.tabId});\n\nSet WMUX_MCP_MODE=full to expose every tool individually instead.",
+                        "description": "Run a JavaScript script that orchestrates wmux. Every wmux tool is exposed as a synchronous global function inside the sandbox. Each binding takes one optional object argument (the MCP input shape) and returns the parsed JSON result. Throws on tool error. The script's final expression is returned as JSON. Default 90s, max 5 min. No `await` — sync API.\n\nFor discovery, call `wmux_search` (the other top-level MCP tool) with no args to list every binding with its full inputSchema, or with `query` to filter by keyword.\n\nBINDINGS:\n• Sessions/agents: get_blocks({session_id, limit?}), list_sessions(), list_agents(), ask_agent({pane_id, message, timeout_secs?, silence_secs?}), broadcast({message, exclude_pane_id?})\n• Workspaces: list_workspaces(), switch_workspace({workspace_id}), new_workspace({name?}), close_workspace({workspace_id})\n• Tabs: list_tabs({workspace_id?}), create_tab({workspace_id?, target?}), focus_tab({tab_id}), close_tab({tab_id}), move_tab({tab_id, workspace_id})\n• Panes: list_panes({tab_id?}), split_pane({pane_id, direction}), focus_pane({pane_id}), close_pane({pane_id}), get_layout()\n• Pane I/O: pane_send_text({pane_id, text, append_enter?}), pane_send_keys({pane_id, keys}), pane_read_screen({pane_id, lines?})\n• Browser: browser_list({tab_id?}), browser_open({url, kind?, tab_id?}), browser_navigate({label, url}), browser_back/forward/close({label}), browser_read_content({label, format?}), browser_get_url({label}), browser_evaluate({label, expression, await_promise?}), browser_screenshot({label, full_page?}), browser_click({label, x, y, button?}), cef_helper_list()\n\nWorkbook ops are NOT callable from inside this script. They're exposed as separate top-level MCP tools (workbook_list, workbook_open, etc.) — call those directly via the normal MCP tool-call path.\n\nEXAMPLE:\n  const ws = new_workspace({name:'exp-1'});\n  const t = create_tab({workspace_id: ws.id});\n  split_pane({pane_id: t.paneIds[0], direction:'h'});\n  return list_panes({tab_id: t.tabId});\n\nSet WMUX_MCP_MODE=full to expose every tool individually instead.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {

@@ -283,9 +283,10 @@ export async function createCefEmbeddedSurface(mountEl, url) {
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     const pt = eventToPagePoint(e);
-    // CDP expects deltaX/deltaY in CSS pixels. Browser wheel events are in
-    // pixels by default (deltaMode=0); for line-mode (1) and page-mode (2)
-    // we apply rough multipliers — enough for the v1 spike.
+    // CDP and JS WheelEvent use the same sign convention: positive deltaY
+    // means "scroll content down" (= reveal content below). Browser wheel
+    // events are in pixels by default (deltaMode=0); for line-mode (1) and
+    // page-mode (2) we apply rough multipliers — enough for the v1 spike.
     let dx = e.deltaX;
     let dy = e.deltaY;
     if (e.deltaMode === 1) { dx *= 16; dy *= 16; }
@@ -294,8 +295,8 @@ export async function createCefEmbeddedSurface(mountEl, url) {
       type: 'mouseWheel',
       x: pt.x,
       y: pt.y,
-      deltaX: -dx,
-      deltaY: -dy,
+      deltaX: dx,
+      deltaY: dy,
       modifiers: mouseEventModifiers(e),
     });
   }, { passive: false });

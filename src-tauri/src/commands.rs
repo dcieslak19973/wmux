@@ -979,6 +979,107 @@ pub async fn load_layout(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+pub async fn get_keybindings_path(app: AppHandle) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(data_dir.join("keybindings.json").to_string_lossy().into_owned())
+}
+
+/// Load the user's keybinding overrides from the app data directory.
+/// Returns `None` if no file exists yet (i.e. the user hasn't customized).
+#[tauri::command]
+pub async fn load_keybindings(app: AppHandle) -> Result<Option<String>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let path = data_dir.join("keybindings.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    std::fs::read_to_string(path).map(Some).map_err(|e| e.to_string())
+}
+
+/// Save the keybinding overrides JSON to the app data directory. JSON is
+/// validated before writing so we never persist corrupt data.
+#[tauri::command]
+pub async fn save_keybindings(app: AppHandle, bindings_json: String) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(&bindings_json)
+        .map_err(|e| format!("Invalid keybindings JSON: {e}"))?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let path = data_dir.join("keybindings.json");
+    std::fs::write(path, bindings_json).map_err(|e| e.to_string())
+}
+
+/// Return the mtime (millis since epoch) of `keybindings.json`, or `None` if
+/// the file does not exist. Used by the JS-side hot-reload poller.
+#[tauri::command]
+pub async fn get_keybindings_mtime(app: AppHandle) -> Result<Option<u128>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let path = data_dir.join("keybindings.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let modified = meta.modified().map_err(|e| e.to_string())?;
+    let millis = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    Ok(Some(millis))
+}
+
+/// Create `keybindings.json` with an empty starter template if it does not
+/// already exist. Idempotent; returns the absolute path either way.
+#[tauri::command]
+pub async fn init_keybindings_file_if_missing(app: AppHandle) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let path = data_dir.join("keybindings.json");
+    if !path.exists() {
+        let starter = "{\n  \"version\": 1,\n  \"bindings\": {}\n}\n";
+        std::fs::write(&path, starter).map_err(|e| e.to_string())?;
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Open the OS file explorer with `keybindings.json` highlighted. On Windows
+/// uses `explorer.exe /select,<path>`; on other platforms opens the parent
+/// directory.
+#[tauri::command]
+pub async fn reveal_keybindings_in_explorer(app: AppHandle) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let path = data_dir.join("keybindings.json");
+    if !path.exists() {
+        let starter = "{\n  \"version\": 1,\n  \"bindings\": {}\n}\n";
+        std::fs::write(&path, starter).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&data_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
 pub async fn save_session_vault_entry(
     app: AppHandle,
     request: SaveSessionVaultEntryRequest,

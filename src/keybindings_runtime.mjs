@@ -65,6 +65,82 @@ export function createKeybindingsRuntime() {
     }
   }
 
+  // Normalize a chord string so user input matches what `chordFromEvent`
+  // produces. Accepts "Ctrl+Shift+L", "ctrl + shift + l", "cmd+k", etc.
+  function normalizeChord(chord) {
+    if (typeof chord !== 'string') return null;
+    const tokens = chord
+      .split('+')
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+    if (tokens.length === 0) return null;
+    const modSet = new Set();
+    let key = null;
+    for (const tok of tokens) {
+      if (tok === 'ctrl' || tok === 'control') modSet.add('ctrl');
+      else if (tok === 'alt' || tok === 'option' || tok === 'opt') modSet.add('alt');
+      else if (tok === 'shift') modSet.add('shift');
+      else if (tok === 'meta' || tok === 'cmd' || tok === 'command' || tok === 'win') modSet.add('meta');
+      else key = tok;
+    }
+    if (!key) return null;
+    const parts = [];
+    if (modSet.has('ctrl')) parts.push('ctrl');
+    if (modSet.has('alt')) parts.push('alt');
+    if (modSet.has('shift')) parts.push('shift');
+    if (modSet.has('meta')) parts.push('meta');
+    parts.push(key);
+    return parts.join('+');
+  }
+
+  // Replace the chord set for one or more commands. Used by Stage B to apply
+  // user overrides from `keybindings.json`. Shape:
+  //   { "pane.split.horizontal": ["ctrl+/"], "panel.activity-log.toggle": [] }
+  // - Empty array means "unbind this command."
+  // - Missing commands keep their defaults (callers should pass only changes).
+  // - Unknown command ids are logged and skipped.
+  // Returns { applied: string[], unknown: string[], conflicts: string[] }.
+  function applyOverrides(overrides) {
+    if (!overrides || typeof overrides !== 'object') {
+      return { applied: [], unknown: [], conflicts: [] };
+    }
+    const applied = [];
+    const unknown = [];
+    const conflicts = [];
+    for (const [commandId, rawChords] of Object.entries(overrides)) {
+      const cmd = commands.get(commandId);
+      if (!cmd) {
+        unknown.push(commandId);
+        continue;
+      }
+      const chordList = Array.isArray(rawChords) ? rawChords : [rawChords].filter(Boolean);
+      const normalized = chordList
+        .map(normalizeChord)
+        .filter((c) => c != null);
+      // Drop every existing chord that points at this command.
+      for (const [chord, ownerId] of [...bindings.entries()]) {
+        if (ownerId === commandId) bindings.delete(chord);
+      }
+      // Wire up the override chords. On conflict, the existing owner wins —
+      // this is documented to the user via the returned `conflicts` list so
+      // a future Stage C UI can surface it.
+      for (const chord of normalized) {
+        if (bindings.has(chord)) {
+          conflicts.push(`${commandId} ↔ ${bindings.get(chord)} on "${chord}"`);
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[keybindings] override "${chord}" for "${commandId}" conflicts with "${bindings.get(chord)}" — dropping the override`,
+          );
+          continue;
+        }
+        bindings.set(chord, commandId);
+      }
+      cmd.currentBindings = normalized;
+      applied.push(commandId);
+    }
+    return { applied, unknown, conflicts };
+  }
+
   function dispatch(event) {
     const chord = chordFromEvent(event);
     if (!chord) return;
@@ -80,14 +156,21 @@ export function createKeybindingsRuntime() {
   }
 
   // Used by Stage B (file-based overrides) and Stage C (settings UI).
-  // For Phase A it's just here to keep the API stable.
+  // Reports each command's defaults *and* its currently-active chord set
+  // (which differs from defaults once `applyOverrides` runs).
   function snapshot() {
+    const activeByCommand = new Map();
+    for (const [chord, commandId] of bindings.entries()) {
+      if (!activeByCommand.has(commandId)) activeByCommand.set(commandId, []);
+      activeByCommand.get(commandId).push(chord);
+    }
     return [...commands.values()].map((cmd) => ({
       id: cmd.id,
       label: cmd.label,
-      bindings: cmd.defaultBindings,
+      defaults: cmd.defaultBindings,
+      bindings: activeByCommand.get(cmd.id) ?? [],
     }));
   }
 
-  return { register, dispatch, snapshot, chordFromEvent };
+  return { register, dispatch, snapshot, chordFromEvent, applyOverrides, normalizeChord };
 }

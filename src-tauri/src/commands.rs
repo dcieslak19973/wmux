@@ -979,6 +979,36 @@ pub async fn load_layout(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+pub async fn get_keybindings_path(app: AppHandle) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(data_dir.join("keybindings.json").to_string_lossy().into_owned())
+}
+
+/// Load the user's keybinding overrides from the app data directory.
+/// Returns `None` if no file exists yet (i.e. the user hasn't customized).
+#[tauri::command]
+pub async fn load_keybindings(app: AppHandle) -> Result<Option<String>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let path = data_dir.join("keybindings.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    std::fs::read_to_string(path).map(Some).map_err(|e| e.to_string())
+}
+
+/// Save the keybinding overrides JSON to the app data directory. JSON is
+/// validated before writing so we never persist corrupt data.
+#[tauri::command]
+pub async fn save_keybindings(app: AppHandle, bindings_json: String) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(&bindings_json)
+        .map_err(|e| format!("Invalid keybindings JSON: {e}"))?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let path = data_dir.join("keybindings.json");
+    std::fs::write(path, bindings_json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn save_session_vault_entry(
     app: AppHandle,
     request: SaveSessionVaultEntryRequest,

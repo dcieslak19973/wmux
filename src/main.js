@@ -3914,6 +3914,59 @@ for (let n = 1; n <= 9; n += 1) {
 
 document.addEventListener('keydown', (e) => keybindingsRuntime.dispatch(e));
 
+// Stage B: load user keybinding overrides from `keybindings.json` in the app
+// data dir. The file is optional — if absent or malformed we keep defaults
+// and surface the problem in the console (Stage C will add a toast + UI).
+// Exposes a `window.__wmux.reloadKeybindings()` helper for ad-hoc re-apply
+// without restarting; the proper hot-reload + reveal-in-explorer affordances
+// come with the settings panel in Stage C.
+async function loadAndApplyKeybindingOverrides() {
+  try {
+    const raw = await invoke('load_keybindings');
+    if (!raw) return { applied: [], unknown: [], conflicts: [], path: null };
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      console.warn('[keybindings] keybindings.json is not valid JSON — ignoring:', err);
+      return null;
+    }
+    const overrides = parsed && typeof parsed === 'object' ? parsed.bindings : null;
+    if (!overrides || typeof overrides !== 'object') {
+      console.warn('[keybindings] keybindings.json missing top-level "bindings" object — ignoring');
+      return null;
+    }
+    const result = keybindingsRuntime.applyOverrides(overrides);
+    if (result.unknown.length) {
+      console.warn('[keybindings] unknown command ids in keybindings.json:', result.unknown);
+    }
+    if (result.conflicts.length) {
+      console.warn('[keybindings] override chord conflicts:', result.conflicts);
+    }
+    if (result.applied.length) {
+      console.info(`[keybindings] applied overrides for ${result.applied.length} command(s):`, result.applied);
+    }
+    return result;
+  } catch (err) {
+    console.warn('[keybindings] failed to load keybindings.json:', err);
+    return null;
+  }
+}
+
+(async () => {
+  try {
+    const path = await invoke('get_keybindings_path');
+    console.info(`[keybindings] config path: ${path}`);
+  } catch (err) {
+    console.warn('[keybindings] could not resolve config path:', err);
+  }
+  await loadAndApplyKeybindingOverrides();
+})();
+
+window.__wmux = window.__wmux ?? {};
+window.__wmux.reloadKeybindings = loadAndApplyKeybindingOverrides;
+window.__wmux.snapshotKeybindings = () => keybindingsRuntime.snapshot();
+
 // Boot
 
 btnNewTab.addEventListener('click', () => createTab(getDefaultTarget()));

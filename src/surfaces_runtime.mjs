@@ -311,25 +311,56 @@ export function createSurfaceRuntime({
     // Switch this pane into CEF mode and load `full` via the helper. Idempotent
     // for cefActive=true; reuses the helper via CDP navigate when one exists,
     // falls back to a fresh spawn if the navigate fails. Removes the iframe
-    // and shows the in-pane indicator on first activation. Called by:
-    //   - the 🌐 button click handler
-    //   - navigateTo's pre-load header-check when the URL refuses iframe
-    //   - navigateTo's cefActive branch when the user navigates again
-    const cefHelperForPane = (full) => {
+    // and shows the in-pane indicator on first activation. `reason` is
+    // either 'manual' (user clicked 🌐) or 'auto-iframe-blocked' (navigateTo's
+    // header check decided the site can't iframe); affects only the indicator
+    // copy so the user understands why a popup just appeared.
+    const cefHelperForPane = (full, reason = 'manual') => {
       const firstActivation = !browserState.cefActive;
       browserState.cefActive = true;
+
+      // Persistent visual signal in the browser bar so the user can tell
+      // at-a-glance that further navigations in this pane will pop out.
+      const cefBtn = document.getElementById(`bb-cef-${label}`);
+      if (cefBtn) {
+        cefBtn.classList.add('cef-active');
+        cefBtn.style.background = '#7c6af7';
+        cefBtn.style.color = '#fff';
+      }
 
       if (firstActivation) {
         try { iframeEl.remove?.(); } catch (_) {}
         placeholderEl?.remove?.();
         if (!browserEl.querySelector('.cef-active-indicator')) {
+          let host = '';
+          try { host = new URL(full).hostname; } catch (_) {}
           const indicator = document.createElement('div');
           indicator.className = 'cef-active-indicator';
-          indicator.style.cssText = 'padding:16px;color:#9ca3af;font-size:12px;line-height:1.5';
-          indicator.innerHTML = '<strong style="color:#7c6af7">CEF helper active for this pane.</strong><br>'
-            + 'The page is rendered in a separate top-level Chromium window — it should appear next to wmux.<br><br>'
-            + '<em>Embedding the CEF window <strong>inside</strong> the pane requires off-screen rendering '
-            + '(CEF renders to a pixel buffer, we paint it on a canvas via IPC). Deferred to Phase 3+.</em>';
+          indicator.style.cssText = 'padding:16px;color:#d1d5db;font-size:13px;line-height:1.55;max-width:560px';
+          if (reason === 'auto-iframe-blocked') {
+            indicator.innerHTML =
+              '<div style="font-size:15px;color:#fff;margin-bottom:8px">'
+              + `&#x1f310; Opened <strong>${host || 'this page'}</strong> in a separate window`
+              + '</div>'
+              + `<div>${host || 'This site'} doesn't allow being embedded inside other apps `
+              + '(it sends <code>X-Frame-Options</code> or a <code>frame-ancestors</code> CSP). '
+              + 'wmux launched it in its own Chromium window — drag it wherever you want.</div>'
+              + '<div style="margin-top:10px;color:#9ca3af">'
+              + 'Any further <strong>Enter</strong> / <strong>Go</strong> in this pane will reuse that window. '
+              + 'Close the pane and reopen it to reset to in-pane iframe mode.'
+              + '</div>';
+          } else {
+            indicator.innerHTML =
+              '<div style="font-size:15px;color:#fff;margin-bottom:8px">'
+              + '&#x1f310; Chromium window active for this pane'
+              + '</div>'
+              + '<div>You clicked &#x1f310; — the page is rendering in a separate Chromium window. '
+              + 'Drag it wherever you want.</div>'
+              + '<div style="margin-top:10px;color:#9ca3af">'
+              + 'Any further <strong>Enter</strong> / <strong>Go</strong> in this pane will reuse that window. '
+              + 'Close the pane and reopen it to reset to in-pane iframe mode.'
+              + '</div>';
+          }
           browserEl.appendChild(indicator);
         }
       }
@@ -340,8 +371,13 @@ export function createSurfaceRuntime({
         const ind = browserEl.querySelector('.cef-active-indicator');
         if (ind && !ind.dataset.labeled) {
           ind.dataset.labeled = '1';
-          ind.innerHTML += `<br><br><code style="color:#4ade80">CEF label: ${spawned.label}</code><br>`
-            + `<code style="color:#4ade80">CDP: http://localhost:${spawned.cdp_port}/json</code>`;
+          ind.innerHTML +=
+            '<div style="margin-top:14px;padding-top:10px;border-top:1px solid #374151;color:#9ca3af;font-size:11px">'
+            + 'For agents (MCP): this page is now readable via '
+            + '<code>browser_read_content</code> with the label below.'
+            + `<br><code style="color:#4ade80">CEF label: ${spawned.label}</code>`
+            + `<br><code style="color:#4ade80">CDP: http://localhost:${spawned.cdp_port}/json</code>`
+            + '</div>';
         }
       };
 
@@ -379,7 +415,8 @@ export function createSurfaceRuntime({
 
       // Already in CEF mode → straight to the helper.
       if (browserState.cefActive) {
-        cefHelperForPane(full);
+        // Reuse — keep whatever indicator copy is already shown.
+        cefHelperForPane(full, 'manual');
         return;
       }
 
@@ -397,8 +434,8 @@ export function createSurfaceRuntime({
       invoke('check_iframe_compatible', { url: full })
         .then((compatible) => {
           if (compatible) return;
-          // Header-based block detected — auto-switch.
-          cefHelperForPane(full);
+          // Header-based block detected — auto-switch with explanatory copy.
+          cefHelperForPane(full, 'auto-iframe-blocked');
         })
         .catch(() => {
           // Network error during the check — leave the iframe alone, the

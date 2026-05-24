@@ -330,19 +330,32 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
 }
 
 async function fetchCdpPageTarget(port) {
+  let lastErr = null;
+  let lastTargets = null;
   for (let attempt = 0; attempt < CDP_FETCH_MAX_ATTEMPTS; attempt++) {
     try {
       const resp = await fetch(`http://127.0.0.1:${port}/json`);
-      if (resp.ok) {
+      if (!resp.ok) {
+        lastErr = `HTTP ${resp.status} from /json`;
+      } else {
         const targets = await resp.json();
-        const page = Array.isArray(targets) && targets.find((t) => t.type === 'page');
-        if (page && page.webSocketDebuggerUrl) return page;
+        lastTargets = targets;
+        if (Array.isArray(targets)) {
+          const page = targets.find((t) => t.type === 'page');
+          if (page && page.webSocketDebuggerUrl) return page;
+        }
       }
-    } catch {
-      // Helper may not have CDP up yet — retry below.
+    } catch (err) {
+      lastErr = String(err?.message ?? err);
     }
     await new Promise((r) => setTimeout(r, CDP_FETCH_RETRY_MS));
   }
+  console.warn('[cef-embed] CDP target not found after retries', {
+    port,
+    lastErr,
+    lastTargets,
+    lastTargetTypes: Array.isArray(lastTargets) ? lastTargets.map((t) => t.type) : null,
+  });
   return null;
 }
 

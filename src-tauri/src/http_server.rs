@@ -601,12 +601,20 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                     },
                     {
                         "name": "browser_list",
-                        "description": "List all open browser panes in wmux. Optionally filter by tab. Returns label, tabId, url, history, historyIndex, and active flag for each pane.",
+                        "description": "List all open browser panes in wmux. Optionally filter by tab. Returns label, tabId, url, history, historyIndex, and active flag for each pane. NOTE: This lists iframe-based browser panes only. For out-of-process CEF helper windows (driveable via Chrome DevTools Protocol), use cef_helper_list instead.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "tab_id": { "type": "string", "description": "Optional tab ID to filter browser panes. Omit to list all." }
                             }
+                        }
+                    },
+                    {
+                        "name": "cef_helper_list",
+                        "description": "List the out-of-process CEF browser helpers currently registered. Each helper is a standalone Chromium window launched by the wmux frontend (via the 'CEF' button on a browser pane) or by the spike spawn path. Helpers are driveable via Chrome DevTools Protocol on their advertised cdp_port; use the label with browser_read_content to extract page text/HTML. Helpers do NOT appear in browser_list output (that tool lists iframe panes).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
                         }
                     },
                     {
@@ -882,6 +890,12 @@ async fn dispatch_tool(
             let result = bridge.request(app, "list-browsers", payload).await?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
+        "cef_helper_list" => {
+            // Read straight from BrowserHelpers state — no IPC to JS needed.
+            let helpers = app.state::<crate::BrowserHelpers>();
+            let entries = helpers.snapshot();
+            serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())
+        }
         "browser_open" => {
             let url = args["url"]
                 .as_str()
@@ -933,73 +947,32 @@ async fn dispatch_tool(
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
         "browser_read_content" => {
-            // KNOWN BROKEN as of 2026-05-23: the browser pane was reverted from a
-            // child WebView2 (`add_child`) back to a same-document <iframe> in
-            // surfaces_runtime.mjs because the child WebView2 wedged the adjacent
-            // terminal's ConPTY pipeline after page load via a focus-event storm
-            // (WriteFile succeeded but bash stopped echoing after the first byte).
+            // Drives the out-of-process CEF helper window via Chrome DevTools
+            // Protocol. The helper was launched by `spawn_browser_helper` with
+            // `--remote-debugging-port=N`; the (label → port) mapping lives in
+            // the `BrowserHelpers` Tauri-managed state.
             //
-            // Consequences for this tool:
-            //   * `app.get_webview(label)` no longer resolves — there is no child
-            //     webview registered with that label, just an <iframe> element
-            //     inside the main webview.
-            //   * Even if we routed through the main webview, the iframe is
-            //     same-origin-policy-bound — cross-origin pages (anything on the
-            //     real internet) refuse `iframe.contentDocument` reads.
+            // CDP flow:
+            //   1. GET http://localhost:N/json to enumerate page targets.
+            //   2. Pick the first `type == "page"` target's webSocketDebuggerUrl.
+            //   3. Open a WebSocket to it and send a `Runtime.evaluate`
+            //      JSON-RPC request that returns {url, title, content}.
+            //   4. Wait for the matching response by id.
             //
-            // Path forward when re-enabling: either (a) move the read to a JS
-            // bridge that postMessages out of the iframe (only works for pages
-            // that cooperate or origins we control), or (b) Rust-side fetch the
-            // URL ourselves and return the body (loses any client-side rendering
-            // state — likely good enough for static pages). The previous
-            // ExecuteScript-on-child-WebView2 approach is not viable until the
-            // ConPTY wedge is fixed at the Windows/WebView2 layer.
-            //
-            // Upstream issues to watch — if any of these get resolved, the
-            // child-WebView2 path may become viable again:
-            //
-            //   WebView2 (Microsoft):
-            //     - First-navigation focus steal:
-            //         https://github.com/MicrosoftEdge/WebView2Feedback/issues/862
-            //     - WebView steals focus from newly started process:
-            //         https://github.com/MicrosoftEdge/WebView2Feedback/issues/1526
-            //     - WebView2 breaks window message processing (closest match in
-            //       vocabulary to our ConPTY wedge):
-            //         https://github.com/MicrosoftEdge/WebView2Feedback/issues/2707
-            //     - "Failed to unregister class Chrome_WidgetWin_0" on shutdown
-            //       (we see this in stderr — Chromium-internal cleanup leak):
-            //         https://github.com/MicrosoftEdge/WebView2Feedback/issues/1762
-            //     - WebView2 v134 focus regression (Microsoft Q&A):
-            //         https://learn.microsoft.com/en-us/answers/questions/2224688/webview2-version-134-focus-issues
-            //
-            //   Tauri (wraps WebView2 via wry):
-            //     - add_child broken in 2.0.5:
-            //         https://github.com/tauri-apps/tauri/issues/11452
-            //     - V2 child webview discussion / docs request:
-            //         https://github.com/tauri-apps/tauri/issues/10079
-            //     - Crash with same Chrome_WidgetWin_0 error:
-            //         https://github.com/tauri-apps/tauri/issues/7606
-            //
-            //   Wails (independent corroboration of the shutdown error):
-            //     - V2 / Failed to unregister class Chrome_WidgetWin_0:
-            //         https://github.com/wailsapp/wails/issues/866
-            //
-            // Our specific symptom — "child WebView2 page load wedges a sibling
-            // ConPTY session so the shell echoes the first byte then goes silent
-            // while WriteFile keeps succeeding" — does not appear publicly filed
-            // anywhere as of 2026-05-23. If we want this fixed upstream, the
-            // right destination is WebView2Feedback (not Tauri — we proved the
-            // wedge is below the Tauri layer). A minimal repro would be a bare
-            // Win32 app with a ConPTY + a child WebView2 loading google.com,
-            // testing whether WSL is incidental.
+            // This replaces the previous WebView2.ExecuteScript path (which
+            // assumed an in-process child webview registered with Tauri's
+            // runtime) and the iframe HTTP-callback fallback. Works on any
+            // platform where CEF can run with --remote-debugging-port.
             let label = args["label"]
                 .as_str()
                 .ok_or_else(|| "label is required".to_string())?;
             let format = args.get("format").and_then(|v| v.as_str()).unwrap_or("text");
 
-            let win = app
-                .get_webview(label)
-                .ok_or_else(|| format!("browser pane '{}' not found", label))?;
+            let helpers = app.state::<crate::BrowserHelpers>();
+            let helper = helpers
+                .get(label)
+                .ok_or_else(|| format!("browser helper '{}' not found — call spawn_browser_helper first", label))?;
+            let port = helper.cdp_port;
 
             let js_extract = if format == "html" {
                 "document.documentElement.outerHTML.slice(0, 400000)"
@@ -1007,93 +980,125 @@ async fn dispatch_tool(
                 "(document.body ? document.body.innerText : document.documentElement.textContent || '').slice(0, 200000)"
             };
 
-            // Windows: use WebView2's ExecuteScript channel. The script result is
-            // returned directly to a Rust callback — no network hop, fully
-            // CSP-immune, works on any page including HTTPS sites.
-            //
-            // TODO(mac): replace with WKScriptMessageHandler + objc2 when adding
-            // macOS support. Register a handler name (e.g. "wmuxContent") on the
-            // WKUserContentController, then the JS side becomes:
-            //   window.webkit.messageHandlers.wmuxContent.postMessage({requestId, url, title, content})
-            // Receive it in the handler and complete the channel from there.
-            #[cfg(target_os = "windows")]
-            {
-                use webview2_com::ExecuteScriptCompletedHandler;
-                use windows::core::HSTRING;
+            cdp_read_content(port, js_extract).await
+        }
+        _ => Err(format!("unknown tool: {}", name)),
+    }
+}
 
-                let js = format!(
-                    "(function(){{ return {{ url: location.href, title: document.title, content: ({}) }}; }})()",
-                    js_extract,
-                );
+/// Read content from a CEF helper via Chrome DevTools Protocol.
+///
+/// `port` is the helper's `--remote-debugging-port` value. `js_extract` is a
+/// JS expression (without a trailing semicolon) that produces the page-content
+/// string we want — e.g. `document.body.innerText.slice(0, 200000)`.
+///
+/// Returns the helper's reply as a JSON string `{url, title, content}` suitable
+/// for handing straight back to the MCP caller.
+async fn cdp_read_content(port: u16, js_extract: &str) -> Result<String, String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
 
-                let (tx, rx) = oneshot::channel::<Result<String, String>>();
-
-                win.with_webview(move |wv| unsafe {
-                    let webview = match wv.controller().CoreWebView2() {
-                        Ok(wv) => wv,
-                        Err(_) => return,
-                    };
-                    let _ = webview.ExecuteScript(
-                        &HSTRING::from(js.as_str()),
-                        &ExecuteScriptCompletedHandler::create(Box::new(move |error, result| {
-                            let _ = tx.send(if error.is_ok() {
-                                Ok(result)
-                            } else {
-                                Err(format!("script error: {:?}", error))
-                            });
-                            Ok(())
-                        })),
-                    );
-                })
-                .map_err(|e| e.to_string())?;
-
-                match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
-                    Ok(Ok(Ok(content))) => Ok(content),
-                    Ok(Ok(Err(e))) => Err(e),
-                    Ok(Err(_)) => Err(format!(
-                        "failed to read content from browser pane '{}' — page may not be loaded yet",
-                        label
-                    )),
-                    Err(_) => Err(format!(
-                        "timed out reading content from browser pane '{}' — ensure a page is loaded",
-                        label
-                    )),
+    // Step 1: enumerate page targets via the HTTP endpoint. Retry briefly to
+    // tolerate the case where the helper was just spawned and CDP isn't ready
+    // yet (Chromium takes ~500ms to come up).
+    let client = reqwest::Client::new();
+    let json_url = format!("http://127.0.0.1:{port}/json");
+    let mut targets: Vec<serde_json::Value> = Vec::new();
+    for attempt in 0..20u32 {
+        match client.get(&json_url).send().await {
+            Ok(resp) => match resp.json::<Vec<serde_json::Value>>().await {
+                Ok(list) => {
+                    targets = list;
+                    break;
                 }
-            }
-
-            // Non-Windows fallback: JS posts page text back via HTTP. Subject to
-            // CSP connect-src restrictions on HTTPS pages. Replace with a
-            // platform-native approach (e.g. WKScriptMessageHandler on macOS)
-            // when adding support for other operating systems.
-            #[cfg(not(target_os = "windows"))]
-            {
-                let request_id = uuid::Uuid::new_v4().to_string();
-                let pending = app.state::<BrowserContentPending>();
-                let rx = pending.register(request_id.clone()).await;
-
-                let js = format!(
-                    r#"(function(){{try{{var c={extract};fetch('http://localhost:{port}/browser-content?request_id={rid}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:location.href,title:document.title,content:c}})}}).catch(function(){{}});}}catch(e){{}}}})()"#,
-                    extract = js_extract,
-                    port = PORT,
-                    rid = request_id,
-                );
-
-                win.eval(&js).map_err(|e| e.to_string())?;
-
-                match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
-                    Ok(Ok(body)) => Ok(body),
-                    Ok(Err(_)) => Err("browser content channel dropped".to_string()),
-                    Err(_) => {
-                        pending.cancel(&request_id).await;
-                        Err(format!(
-                            "timed out reading content from browser pane '{}' — the page may have a restrictive Content-Security-Policy connect-src directive",
-                            label
-                        ))
+                Err(e) => {
+                    if attempt == 19 {
+                        return Err(format!("CDP /json returned invalid response: {e}"));
                     }
+                }
+            },
+            Err(e) => {
+                if attempt == 19 {
+                    return Err(format!(
+                        "CDP not reachable on port {port} after 5s ({e}). \
+                         Helper may have failed to start."
+                    ));
                 }
             }
         }
-        _ => Err(format!("unknown tool: {}", name)),
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    // Step 2: find a page-typed target with a webSocketDebuggerUrl.
+    let page = targets
+        .iter()
+        .find(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+        .ok_or_else(|| "no page target available in CDP — helper window may not be loaded yet".to_string())?;
+    let ws_url = page
+        .get("webSocketDebuggerUrl")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "CDP page target has no webSocketDebuggerUrl".to_string())?;
+
+    // Step 3: open WebSocket and send Runtime.evaluate.
+    let (mut ws_stream, _resp) = tokio_tungstenite::connect_async(ws_url)
+        .await
+        .map_err(|e| format!("CDP WebSocket connect failed: {e}"))?;
+
+    let expression = format!(
+        "JSON.stringify({{url: location.href, title: document.title, content: ({js_extract})}})"
+    );
+    let request_id = 1u64;
+    let request = serde_json::json!({
+        "id": request_id,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": expression,
+            "returnByValue": true,
+            "awaitPromise": false,
+        }
+    });
+    ws_stream
+        .send(Message::Text(request.to_string()))
+        .await
+        .map_err(|e| format!("CDP WebSocket send failed: {e}"))?;
+
+    // Step 4: receive the matching response. Skip event notifications.
+    let read_fut = async {
+        while let Some(msg) = ws_stream.next().await {
+            let msg = msg.map_err(|e| format!("CDP WebSocket recv failed: {e}"))?;
+            let text = match msg {
+                Message::Text(t) => t.to_string(),
+                Message::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
+                Message::Close(_) => return Err("CDP WebSocket closed unexpectedly".to_string()),
+                _ => continue,
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if parsed.get("id").and_then(|v| v.as_u64()) != Some(request_id) {
+                continue;
+            }
+            if let Some(err) = parsed.get("error") {
+                return Err(format!("CDP Runtime.evaluate error: {err}"));
+            }
+            // result.result.value holds the stringified JSON we asked for.
+            let val = parsed
+                .pointer("/result/result/value")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!("CDP response missing /result/result/value: {}", parsed)
+                })?;
+            return Ok(val.to_string());
+        }
+        Err("CDP WebSocket stream ended without a response".to_string())
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(15), read_fut).await {
+        Ok(res) => res,
+        Err(_) => Err(format!(
+            "CDP Runtime.evaluate timed out on port {port}"
+        )),
     }
 }
 

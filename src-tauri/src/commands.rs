@@ -1462,6 +1462,168 @@ fn uuid_short() -> String {
     format!("{:08x}", n)
 }
 
+/// Spawn the out-of-process CEF browser helper as a top-level Chromium window.
+///
+/// Each helper is launched with `--remote-debugging-port=<free port>` so the
+/// MCP `browser_read_content` tool (and future automation) can drive its
+/// content via the Chrome DevTools Protocol over HTTP+WebSocket. The
+/// (label → port) mapping is registered into `BrowserHelpers` Tauri state.
+///
+/// Returns the helper's auto-generated label. Callers should remember the
+/// label and pass it to any MCP / CDP-routed operations.
+#[derive(serde::Serialize)]
+pub struct SpawnedHelper {
+    pub label: String,
+    pub pid: u32,
+    pub cdp_port: u16,
+}
+
+#[tauri::command]
+pub async fn spawn_browser_helper(
+    app: AppHandle,
+    helpers: tauri::State<'_, crate::BrowserHelpers>,
+    window_label: String,
+    url: String,
+) -> Result<SpawnedHelper, String> {
+    // window_label is retained in the signature for future use (e.g. SetParent
+    // / OSR sync) but the spike spawns the helper as a top-level window.
+    let _ = (&app, &window_label);
+
+    // Helper label = short uuid. Becomes the key in BrowserHelpers state.
+    let label = format!("cef-helper-{}", uuid_short());
+
+    // Per-helper isolated user data dir so multiple panes / restarts don't
+    // collide on Chromium's lock file.
+    let user_data_dir = std::env::temp_dir()
+        .join(format!("wmux-browser-helper-{}", uuid_short()))
+        .to_string_lossy()
+        .into_owned();
+
+    // Locate the helper binary. In dev (`cargo run` from src-tauri or
+    // workspace root) it sits at `target/debug/wmux-browser-helper.exe`
+    // beside the wmux binary. In a packaged build it'll be bundled
+    // adjacent to wmux.exe via the MSI installer (TODO once Phase 5 lands).
+    let helper_path = std::env::current_exe()
+        .map_err(|e| format!("could not locate current exe: {e}"))?
+        .parent()
+        .ok_or_else(|| "current exe has no parent dir".to_string())?
+        .join(if cfg!(windows) { "wmux-browser-helper.exe" } else { "wmux-browser-helper" });
+
+    if !helper_path.exists() {
+        return Err(format!(
+            "wmux-browser-helper binary not found at {}. \
+             Build with `cargo build --package wmux-browser-helper` first.",
+            helper_path.display()
+        ));
+    }
+
+    // CEF locates its resource files (`*.pak`, `icudtl.dat`, `locales/`)
+    // relative to the *current working directory* in addition to the
+    // executable directory. When wmux spawns the helper from the project
+    // root (e.g. via `npm run tauri dev`), inheriting that CWD can cause
+    // CEF to silently fall back to a degraded mode where HTTPS to some
+    // hosts fails ("connection refused" or similar). Force CWD to where
+    // the helper binary and CEF runtime files live.
+    let helper_dir = helper_path
+        .parent()
+        .ok_or_else(|| "helper path has no parent dir".to_string())?;
+
+    // SPIKE FINDING: passing --parent-hwnd to make CEF a Win32 child of
+    // wmux's HWND triggered Chromium compositor errors ("Source has
+    // different root than target: source chain=[WebContentsViewAura]…"),
+    // because Chromium refuses to attach CEF's render layer when the
+    // parent HWND isn't in its own view tree. Embedding inside the pane
+    // requires off-screen rendering (Phase 3+). For now the helper opens
+    // as a top-level Chromium window.
+    let child = std::process::Command::new(&helper_path)
+        .current_dir(helper_dir)
+        .arg(format!("--url={url}"))
+        .arg(format!("--user-data-dir={user_data_dir}"))
+        // --remote-debugging-port=0 lets Chromium pick a free port itself —
+        // we previously tried picking the port in Rust via TcpListener bind
+        // + drop, but the TCP TIME_WAIT race could leave CEF unable to bind
+        // the requested port, silently falling back to a different one (so
+        // our registry had stale info). With port=0, Chromium writes the
+        // chosen port to <user_data_dir>/DevToolsActivePort which we read
+        // after spawn. Mirrors how Puppeteer / Playwright discover the port.
+        .arg("--remote-debugging-port=0")
+        // --remote-allow-origins=* permits localhost CDP clients (us)
+        // without the CORS check Chromium 109+ added by default. Without
+        // this CDP responds but refuses the upgrade-to-WebSocket.
+        .arg("--remote-allow-origins=*")
+        // Chromium switches (consumed by CEF before our --url/--parent-hwnd).
+        //
+        // --proxy-auto-detect: CEF defaults to direct connection. On corporate
+        // networks that require a proxy this surfaces as ERR_CONNECTION_REFUSED.
+        // Auto-detect consults WPAD / system proxy config like Chrome does.
+        // No-op when no proxy is configured.
+        .arg("--proxy-auto-detect")
+        // --disable-gpu / --disable-gpu-compositing: CEF's GPU subprocess
+        // crashes repeatedly with STATUS_BREAKPOINT (exit_code=-2147483645)
+        // when embedded as a child of the wmux window. After 3+ crashes
+        // Chromium falls back to software rendering, but for complex
+        // JS-heavy pages (e.g. google.com) the software fallback can render
+        // as blank — making the page LOOK like a connection error even
+        // though network loaded fine. Disable GPU outright so we skip the
+        // crashing subprocess and use software rendering from the start.
+        // Trades animation smoothness for reliability — acceptable while
+        // the actual GPU-sandbox-in-embedded-context issue is unsolved.
+        .arg("--disable-gpu")
+        .arg("--disable-gpu-compositing")
+        // --enable-logging=stderr: capture Chromium's net + ipc errors to
+        // stderr instead of the default debug.log. Gives us actionable
+        // diagnostics when something goes wrong, at the cost of some
+        // log noise. Pair with --vmodule for finer control.
+        .arg("--enable-logging=stderr")
+        .spawn()
+        .map_err(|e| format!("failed to spawn browser helper: {e}"))?;
+
+    let pid = child.id();
+    // std::process::Child does NOT kill the process on drop — the helper
+    // keeps running independently after we return. Proper tracking (so
+    // callers can kill helpers on pane close) is a Phase 3/4 follow-up.
+    drop(child);
+
+    // Discover the actual CDP port Chromium picked by reading the
+    // DevToolsActivePort file it writes into the user_data_dir on startup.
+    // First line of the file is the decimal port number. (Second line is
+    // the browser-target WebSocket path — we don't need it.)
+    let active_port_path = std::path::Path::new(&user_data_dir).join("DevToolsActivePort");
+    let cdp_port: u16 = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&active_port_path) {
+                if let Some(first_line) = contents.lines().next() {
+                    if let Ok(p) = first_line.trim().parse::<u16>() {
+                        break p;
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for {} (helper may have failed to start CDP)",
+                    active_port_path.display()
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+
+    helpers.register(
+        label.clone(),
+        crate::HelperInfo {
+            pid,
+            cdp_port,
+        },
+    );
+
+    Ok(SpawnedHelper {
+        label,
+        pid,
+        cdp_port,
+    })
+}
+
 /// Create a borderless browser WebviewWindow positioned at the given screen coords.
 #[tauri::command]
 pub async fn create_browser_window(app: AppHandle, request: CreateBrowserWindowRequest) -> Result<(), String> {

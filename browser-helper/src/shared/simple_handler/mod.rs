@@ -103,8 +103,9 @@ impl SimpleHandler {
         #[cfg(target_os = "windows")]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOP,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW,
+                GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+                GWL_EXSTYLE, HWND_TOP, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                WS_EX_LAYERED, WS_EX_TOOLWINDOW,
             };
             let cef_hwnd = browser
                 .host()
@@ -118,18 +119,24 @@ impl SimpleHandler {
                 .unwrap_or(false);
             unsafe {
                 if offscreen {
-                    // Move way off the visible desktop. Size is left intact
-                    // so the renderer keeps its layout dimensions; the wmux
-                    // pane will drive size via emulation later.
-                    SetWindowPos(raw, HWND_TOP, -30000, -30000, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-                    // Mark as a tool window so it doesn't appear in Alt-Tab
-                    // or the taskbar. Without this, the user can Alt-Tab
-                    // straight to the still-existing top-level Chromium
-                    // window and interact with its real selection/focus
-                    // — which leaks user gestures around the canvas
-                    // abstraction we're building.
+                    // 1. Tool window — removes from Alt-Tab / taskbar.
+                    // 2. Layered — lets us set per-window alpha. Setting
+                    //    alpha to 0 makes the window fully transparent
+                    //    regardless of position. Chromium can re-move the
+                    //    window during navigation (we observed it pulling
+                    //    the window back near the screen origin on link
+                    //    clicks); with alpha=0 the user never sees it
+                    //    wherever it ends up.
+                    // 3. Position offscreen anyway — defense in depth,
+                    //    and saves the OS some compositor work.
                     let ex = GetWindowLongPtrW(raw, GWL_EXSTYLE);
-                    SetWindowLongPtrW(raw, GWL_EXSTYLE, ex | (WS_EX_TOOLWINDOW as isize));
+                    SetWindowLongPtrW(
+                        raw,
+                        GWL_EXSTYLE,
+                        ex | (WS_EX_TOOLWINDOW as isize) | (WS_EX_LAYERED as isize),
+                    );
+                    SetLayeredWindowAttributes(raw, 0, 0, LWA_ALPHA);
+                    SetWindowPos(raw, HWND_TOP, -30000, -30000, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
                 } else {
                     SetWindowPos(raw, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }

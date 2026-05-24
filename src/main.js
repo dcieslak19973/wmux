@@ -2510,6 +2510,10 @@ function showError(msg) {
   return panelsRuntime?.showError(msg);
 }
 
+function showToast(msg, severity) {
+  return panelsRuntime?.showToast(msg, severity);
+}
+
 function showUrlBanner(sessionId, tabId, url, isOauth) {
   return panelsRuntime?.showUrlBanner(sessionId, tabId, url, isOauth);
 }
@@ -3940,11 +3944,7 @@ async function loadAndApplyKeybindingOverrides({ silent = false } = {}) {
     } catch (err) {
       console.warn('[keybindings] keybindings.json is not valid JSON:', err);
       if (!silent) {
-        addNotification?.({
-          severity: 'warning',
-          title: 'keybindings.json parse error',
-          body: String(err?.message ?? err),
-        });
+        showToast(`keybindings.json parse error: ${err?.message ?? err}`, 'warning');
       }
       return { error: 'parse', message: String(err?.message ?? err) };
     }
@@ -3952,11 +3952,7 @@ async function loadAndApplyKeybindingOverrides({ silent = false } = {}) {
     if (!overrides || typeof overrides !== 'object') {
       console.warn('[keybindings] keybindings.json missing top-level "bindings" object');
       if (!silent) {
-        addNotification?.({
-          severity: 'warning',
-          title: 'keybindings.json shape error',
-          body: 'Expected a top-level "bindings" object. Falling back to defaults.',
-        });
+        showToast('keybindings.json missing "bindings" object — falling back to defaults', 'warning');
       }
       currentOverrides = {};
       keybindingsRuntime.restoreAllDefaults();
@@ -4042,11 +4038,7 @@ async function pollKeybindingsForChanges() {
       console.info('[keybindings] external edit detected, reloading');
       const result = await loadAndApplyKeybindingOverrides();
       if (result && !result.error) {
-        addNotification?.({
-          severity: 'info',
-          title: 'Keybindings reloaded',
-          body: 'Picked up changes from keybindings.json.',
-        });
+        showToast('Keybindings reloaded from keybindings.json', 'info');
       }
     }
   } catch (err) {

@@ -51,8 +51,21 @@ export function createUiPanelsRuntime({
   }
 
   function showError(msg) {
+    showToast(msg, 'error');
+  }
+
+  // App-level transient toast. Use for app-scoped status / error messages
+  // that aren't tied to a tab or pane (use addNotification for those).
+  function showToast(msg, severity = 'info') {
     const el = document.createElement('div');
-    el.style.cssText = 'position:fixed;bottom:16px;right:16px;background:#7f1d1d;color:#fecaca;padding:10px 14px;border-radius:8px;font-size:12px;z-index:9999;max-width:340px;';
+    const palette = {
+      error:   { bg: '#7f1d1d', fg: '#fecaca' },
+      warning: { bg: '#78350f', fg: '#fed7aa' },
+      info:    { bg: '#1e3a8a', fg: '#bfdbfe' },
+      success: { bg: '#14532d', fg: '#bbf7d0' },
+    };
+    const { bg, fg } = palette[severity] ?? palette.info;
+    el.style.cssText = `position:fixed;bottom:16px;right:16px;background:${bg};color:${fg};padding:10px 14px;border-radius:8px;font-size:12px;z-index:9999;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,0.4);`;
     el.textContent = msg;
     document.body.appendChild(el);
     setTimeout(() => el.remove(), 5000);
@@ -1046,8 +1059,19 @@ export function createUiPanelsRuntime({
       }
       const chord = kbApi.chordFromEvent(event);
       if (!chord) { exitCapture(); return; }
+      // Conflict check: if another command currently owns this chord, refuse
+      // and tell the user where it's bound. They can clear that command's
+      // chord first and try again. (Auto-stealing would be too magical.)
+      const snap = kbApi.snapshot();
+      const owner = snap.find((c) => c.id !== commandId && c.bindings.includes(chord));
+      if (owner) {
+        showToast(`"${chord}" is already bound to "${owner.label}". Clear that binding first.`, 'warning');
+        exitCapture();
+        return;
+      }
       try {
         await kbApi.setOverride(commandId, [chord]);
+        showToast(`Bound "${chord}" → ${kbCaptureRow ? kbCaptureRow.querySelector('.settings-kb-label')?.textContent : commandId}`, 'success');
       } catch (err) {
         showError(`Could not save keybinding: ${err}`);
       }
@@ -1128,6 +1152,7 @@ export function createUiPanelsRuntime({
     artifacts,
     unreadNotificationCount,
     showError,
+    showToast,
     copyTextToClipboard,
     showUrlBanner,
     base64Decode,

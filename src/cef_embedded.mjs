@@ -88,8 +88,11 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
 
   ws.addEventListener('open', () => {
     status.textContent = 'Connected — waiting for first frame…';
-    // Send the screencast start with our current canvas dimensions. CEF will
-    // re-render at maxWidth/maxHeight, so this keeps JPEG size bounded.
+    // Page.enable is required before Page.* events (including
+    // screencastFrame) will be delivered. CDP queues requests in order, so
+    // we don't need to await a response — the enable will be processed
+    // before startScreencast.
+    sendCdp('Page.enable');
     sendCdp('Page.startScreencast', {
       format: 'jpeg',
       quality,
@@ -108,6 +111,9 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
     }
     if (msg.method === 'Page.screencastFrame') {
       onFrame(msg.params);
+    } else if (msg.id && msg.error) {
+      // Surface CDP request errors — these are silent killers otherwise.
+      console.warn('[cef-embed] CDP error', msg);
     }
   });
 

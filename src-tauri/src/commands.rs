@@ -922,20 +922,6 @@ pub async fn open_url(url: String) -> Result<(), String> {
     opener::open_browser(&url).map_err(|e| e.to_string())
 }
 
-/// Open an arbitrary URL in the system default browser.
-///
-/// Unlike `open_url`, this accepts any http(s) URL — intended for the browser
-/// pane's "open externally" button, where the user explicitly drives the
-/// action. NOT safe to call from terminal-URL-detection paths (use `open_url`
-/// for that — it restricts to localhost as a phishing/malware guard).
-#[tauri::command]
-pub async fn open_external_url(url: String) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(format!("Refused to open non-http(s) URL: {url}"));
-    }
-    opener::open_browser(&url).map_err(|e| e.to_string())
-}
-
 /// Resolve a localhost URL for a given pane, creating an SSH or WSL port-forward
 /// tunnel if needed.  Returns the URL to open in the wmux browser (remapped to
 /// the forwarded local port for SSH/WSL, unchanged for local sessions).
@@ -1462,6 +1448,103 @@ fn uuid_short() -> String {
     format!("{:08x}", n)
 }
 
+/// Determine whether a URL can safely be loaded inside a wmux iframe pane,
+/// purely from its HTTP response headers.
+///
+/// Returns:
+///   - `Ok(true)`  — no header forbids embedding; iframe is worth trying.
+///   - `Ok(false)` — `X-Frame-Options` or `Content-Security-Policy: frame-ancestors`
+///                   indicate framing is blocked.
+///
+/// Used by the browser pane's auto-routing: before setting `iframe.src`, the
+/// frontend calls this; on `false` it activates CEF mode for the pane and
+/// loads the URL in an out-of-process helper instead.
+///
+/// Caveats:
+///   - Only catches *header-based* embedding blocks. Sites that allow iframes
+///     in headers but use JavaScript frame-busting (e.g. `top.location =
+///     window.location`) will still load into the iframe and escape at
+///     runtime. That requires a separate detector (beforeunload interception)
+///     not implemented here.
+///   - HEAD requests sometimes 405; falls back to a 1-byte GET via Range.
+///   - Network errors are returned as `Ok(true)` — we prefer to try iframe
+///     and let the user see whatever error rather than block on a flaky
+///     pre-check.
+#[tauri::command]
+pub async fn check_iframe_compatible(url: String) -> Result<bool, String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        // Non-http URLs (file://, data:, about:) are always iframe-able.
+        return Ok(true);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        // Don't follow redirects automatically — we want to inspect the
+        // headers wherever they're declared, but a redirect chain that
+        // eventually allows framing should still be considered OK. For now
+        // the simple behavior (check the first response) is acceptable.
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Try HEAD first, fall back to a 1-byte GET if the server rejects HEAD.
+    let mut resp = match client.head(&url).send().await {
+        Ok(r) if r.status().is_success() => Some(r),
+        _ => None,
+    };
+    if resp.is_none() {
+        resp = client
+            .get(&url)
+            .header("Range", "bytes=0-0")
+            .send()
+            .await
+            .ok();
+    }
+    let Some(resp) = resp else {
+        // Couldn't reach the URL. Don't pre-emptively block iframe — let
+        // the user see whatever happens.
+        return Ok(true);
+    };
+
+    let headers = resp.headers();
+
+    // X-Frame-Options DENY / SAMEORIGIN → blocked.
+    if let Some(xfo) = headers
+        .get("x-frame-options")
+        .and_then(|v| v.to_str().ok())
+    {
+        let xfo = xfo.trim().to_ascii_lowercase();
+        if xfo == "deny" || xfo.starts_with("sameorigin") {
+            return Ok(false);
+        }
+        // "ALLOW-FROM <uri>" is deprecated and unlikely to allow our origin,
+        // so treat any other XFO value as blocked too.
+        if !xfo.is_empty() {
+            return Ok(false);
+        }
+    }
+
+    // CSP frame-ancestors: 'none' or 'self' block us. Wildcard or specific
+    // origins matching wmux are unlikely; if the directive exists and isn't
+    // *, treat as blocked.
+    for csp in headers.get_all("content-security-policy").iter() {
+        let Some(s) = csp.to_str().ok() else { continue };
+        for directive in s.split(';') {
+            let d = directive.trim().to_ascii_lowercase();
+            if let Some(rest) = d.strip_prefix("frame-ancestors") {
+                let rest = rest.trim();
+                // `frame-ancestors *` → allow all.
+                if rest == "*" {
+                    return Ok(true);
+                }
+                // Anything else (none, self, specific origins) → block.
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
 /// Spawn the out-of-process CEF browser helper as a top-level Chromium window.
 ///
 /// Each helper is launched with `--remote-debugging-port=<free port>` so the
@@ -1578,43 +1661,41 @@ pub async fn spawn_browser_helper(
         .spawn()
         .map_err(|e| format!("failed to spawn browser helper: {e}"))?;
 
+    let mut child = child;
     let pid = child.id();
-    // std::process::Child does NOT kill the process on drop — the helper
-    // keeps running independently after we return. Proper tracking (so
-    // callers can kill helpers on pane close) is a Phase 3/4 follow-up.
-    drop(child);
 
     // Discover the actual CDP port Chromium picked by reading the
     // DevToolsActivePort file it writes into the user_data_dir on startup.
-    // First line of the file is the decimal port number. (Second line is
-    // the browser-target WebSocket path — we don't need it.)
+    // First line of the file is the decimal port number.
     let active_port_path = std::path::Path::new(&user_data_dir).join("DevToolsActivePort");
-    let cdp_port: u16 = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        loop {
-            if let Ok(contents) = std::fs::read_to_string(&active_port_path) {
-                if let Some(first_line) = contents.lines().next() {
-                    if let Ok(p) = first_line.trim().parse::<u16>() {
-                        break p;
-                    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let cdp_port: u16 = loop {
+        if let Ok(contents) = std::fs::read_to_string(&active_port_path) {
+            if let Some(first_line) = contents.lines().next() {
+                if let Ok(p) = first_line.trim().parse::<u16>() {
+                    break p;
                 }
             }
-            if std::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "timed out waiting for {} (helper may have failed to start CDP)",
-                    active_port_path.display()
-                ));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        if std::time::Instant::now() >= deadline {
+            // Helper failed to start CDP — kill it so we don't leak a hung
+            // process.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "timed out waiting for {} (helper may have failed to start CDP)",
+                active_port_path.display()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     };
 
+    // Register info + handover Child ownership so `kill_browser_helper`
+    // can later terminate it.
     helpers.register(
         label.clone(),
-        crate::HelperInfo {
-            pid,
-            cdp_port,
-        },
+        crate::HelperInfo { pid, cdp_port },
+        child,
     );
 
     Ok(SpawnedHelper {
@@ -1622,6 +1703,33 @@ pub async fn spawn_browser_helper(
         pid,
         cdp_port,
     })
+}
+
+/// Kill a previously-spawned CEF browser helper and remove its registry
+/// entry. Idempotent — returns false (not Err) if no helper exists under
+/// this label, true if one was killed.
+#[tauri::command]
+pub async fn kill_browser_helper(
+    helpers: tauri::State<'_, crate::BrowserHelpers>,
+    label: String,
+) -> Result<bool, String> {
+    Ok(helpers.kill(&label))
+}
+
+/// Navigate an existing CEF browser helper to a new URL via Chrome DevTools
+/// Protocol (`Page.navigate`). Used by the wmux frontend when the user
+/// re-uses a pane's already-CEF-active state via Enter/Go or another CEF
+/// click — beats spawning a fresh helper fleet on every URL change.
+#[tauri::command]
+pub async fn navigate_browser_helper(
+    helpers: tauri::State<'_, crate::BrowserHelpers>,
+    label: String,
+    url: String,
+) -> Result<(), String> {
+    let info = helpers
+        .get(&label)
+        .ok_or_else(|| format!("helper '{label}' not found"))?;
+    crate::http_server::cdp_navigate(info.cdp_port, &url).await
 }
 
 /// Create a borderless browser WebviewWindow positioned at the given screen coords.

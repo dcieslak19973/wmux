@@ -1578,43 +1578,41 @@ pub async fn spawn_browser_helper(
         .spawn()
         .map_err(|e| format!("failed to spawn browser helper: {e}"))?;
 
+    let mut child = child;
     let pid = child.id();
-    // std::process::Child does NOT kill the process on drop — the helper
-    // keeps running independently after we return. Proper tracking (so
-    // callers can kill helpers on pane close) is a Phase 3/4 follow-up.
-    drop(child);
 
     // Discover the actual CDP port Chromium picked by reading the
     // DevToolsActivePort file it writes into the user_data_dir on startup.
-    // First line of the file is the decimal port number. (Second line is
-    // the browser-target WebSocket path — we don't need it.)
+    // First line of the file is the decimal port number.
     let active_port_path = std::path::Path::new(&user_data_dir).join("DevToolsActivePort");
-    let cdp_port: u16 = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        loop {
-            if let Ok(contents) = std::fs::read_to_string(&active_port_path) {
-                if let Some(first_line) = contents.lines().next() {
-                    if let Ok(p) = first_line.trim().parse::<u16>() {
-                        break p;
-                    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let cdp_port: u16 = loop {
+        if let Ok(contents) = std::fs::read_to_string(&active_port_path) {
+            if let Some(first_line) = contents.lines().next() {
+                if let Ok(p) = first_line.trim().parse::<u16>() {
+                    break p;
                 }
             }
-            if std::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "timed out waiting for {} (helper may have failed to start CDP)",
-                    active_port_path.display()
-                ));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        if std::time::Instant::now() >= deadline {
+            // Helper failed to start CDP — kill it so we don't leak a hung
+            // process.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "timed out waiting for {} (helper may have failed to start CDP)",
+                active_port_path.display()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     };
 
+    // Register info + handover Child ownership so `kill_browser_helper`
+    // can later terminate it.
     helpers.register(
         label.clone(),
-        crate::HelperInfo {
-            pid,
-            cdp_port,
-        },
+        crate::HelperInfo { pid, cdp_port },
+        child,
     );
 
     Ok(SpawnedHelper {
@@ -1622,6 +1620,33 @@ pub async fn spawn_browser_helper(
         pid,
         cdp_port,
     })
+}
+
+/// Kill a previously-spawned CEF browser helper and remove its registry
+/// entry. Idempotent — returns false (not Err) if no helper exists under
+/// this label, true if one was killed.
+#[tauri::command]
+pub async fn kill_browser_helper(
+    helpers: tauri::State<'_, crate::BrowserHelpers>,
+    label: String,
+) -> Result<bool, String> {
+    Ok(helpers.kill(&label))
+}
+
+/// Navigate an existing CEF browser helper to a new URL via Chrome DevTools
+/// Protocol (`Page.navigate`). Used by the wmux frontend when the user
+/// re-uses a pane's already-CEF-active state via Enter/Go or another CEF
+/// click — beats spawning a fresh helper fleet on every URL change.
+#[tauri::command]
+pub async fn navigate_browser_helper(
+    helpers: tauri::State<'_, crate::BrowserHelpers>,
+    label: String,
+    url: String,
+) -> Result<(), String> {
+    let info = helpers
+        .get(&label)
+        .ok_or_else(|| format!("helper '{label}' not found"))?;
+    crate::http_server::cdp_navigate(info.cdp_port, &url).await
 }
 
 /// Create a borderless browser WebviewWindow positioned at the given screen coords.

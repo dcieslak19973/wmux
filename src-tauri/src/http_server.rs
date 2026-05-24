@@ -654,12 +654,12 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                     },
                     {
                         "name": "wmux_eval",
-                        "description": "**SPIKE — server-side script execution.** Run a JavaScript script in a sandboxed boa engine with selected wmux MCP tools bound as synchronous global functions. Lets you collapse multi-step workflows (e.g. 'new workspace + create tab + split twice + send commands') into a single MCP call. Bound tools (v0): list_workspaces, list_tabs, list_panes, get_layout, list_agents, list_sessions, ask_agent, pane_send_text, pane_send_keys, pane_read_screen, browser_list, browser_open, browser_navigate. Each is a synchronous JS function — call without `await`. Each takes a single optional object argument matching the tool's MCP input schema, and returns the tool's parsed JSON result. Throws on tool error. Script's final expression value is returned as JSON. Default 10s timeout, max 60s.",
+                        "description": "**SPIKE — server-side script execution.** Run a JavaScript script in a sandboxed boa engine with selected wmux MCP tools bound as synchronous global functions. Lets you collapse multi-step workflows (e.g. 'new workspace + create tab + split twice + send commands') into a single MCP call. Bound tools (v0): list_workspaces, list_tabs, list_panes, get_layout, list_agents, list_sessions, ask_agent, pane_send_text, pane_send_keys, pane_read_screen, browser_list, browser_open, browser_navigate. Each is a synchronous JS function — call without `await`. Each takes a single optional object argument matching the tool's MCP input schema, and returns the tool's parsed JSON result. Throws on tool error. Script's final expression value is returned as JSON. Default 90s timeout, max 5 min.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "script": { "type": "string", "description": "JS source. Example: `const ws = list_workspaces(); ws.length;` or `const tabs = list_tabs(); for (const t of tabs) { pane_send_text({pane_id: t.paneIds[0], text: 'date', append_enter: true}); } 'done';`. Sync API — no Promises, no await." },
-                                "timeout_ms": { "type": "integer", "description": "Wall-clock limit in ms (default 10000, max 60000)." }
+                                "timeout_ms": { "type": "integer", "description": "Wall-clock limit in ms (default 90000, max 300000)." }
                             },
                             "required": ["script"]
                         }
@@ -1138,7 +1138,7 @@ pub async fn dispatch_tool(
             let timeout_ms = args
                 .get("timeout_ms")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(10_000);
+                .unwrap_or(90_000);
             crate::code_mode::eval_script(
                 script.to_string(),
                 timeout_ms,

@@ -60,7 +60,7 @@ pub async fn eval_script(
     app: tauri::AppHandle,
     bridge: FrontendControlBridge,
 ) -> Result<String, String> {
-    let deadline_ms = timeout_ms.clamp(500, 60_000);
+    let deadline_ms = timeout_ms.clamp(500, 300_000);
 
     // boa is sync and not Send across awaits — run it on a blocking thread.
     // Each tool binding will block_on the async dispatch_tool back through

@@ -103,7 +103,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, list_workspaces, switch_workspace, new_workspace, close_workspace, list_tabs, create_tab, focus_tab, close_tab, move_tab, list_panes, split_pane, focus_pane, close_pane, get_layout, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, list_workspaces, switch_workspace, new_workspace, close_workspace, list_tabs, create_tab, focus_tab, close_tab, move_tab, list_panes, split_pane, focus_pane, close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -624,6 +624,47 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                         "inputSchema": { "type": "object", "properties": {} }
                     },
                     {
+                        "name": "pane_send_text",
+                        "description": "Write text to a pane's PTY as if the user typed it. Fire-and-forget — returns immediately, does NOT wait for output (use ask_agent if you want request/response semantics). Useful for queueing input into a TUI, pasting a snippet, or pre-filling a prompt. Set append_enter to also press Enter after the text.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pane_id": { "type": "string", "description": "Pane id (from list_panes or list_agents). Same value as $WMUX_PANE_ID inside that pane." },
+                                "text": { "type": "string", "description": "UTF-8 text to write to the PTY." },
+                                "append_enter": { "type": "boolean", "description": "If true, send a trailing carriage return after the text. Default false." }
+                            },
+                            "required": ["pane_id", "text"]
+                        }
+                    },
+                    {
+                        "name": "pane_send_keys",
+                        "description": "Send structured key chords / special keys to a pane's PTY. Each entry is one keystroke, tmux-style: control modifiers `C-c` (Ctrl+C), `M-x` (Alt/Meta+X), named keys `Up` `Down` `Left` `Right` `Enter` `Tab` `Esc` `BSpace` `Space` `Home` `End` `PageUp` `PageDown` `Delete` `F1`..`F12`, or a single literal character (`a`, `9`). Multiple keys = multiple bytes written in sequence (use this to nav menus: [\"Up\", \"Up\", \"Enter\"]). Fire-and-forget.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pane_id": { "type": "string", "description": "Pane id (from list_panes or list_agents)." },
+                                "keys": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Sequence of key names. Examples: [\"C-c\"], [\"Up\", \"Up\", \"Enter\"], [\"M-x\", \"f\", \"i\", \"n\", \"d\", \"Enter\"]."
+                                }
+                            },
+                            "required": ["pane_id", "keys"]
+                        }
+                    },
+                    {
+                        "name": "pane_read_screen",
+                        "description": "Return the current ANSI-stripped scrollback for a pane. Unlike get_blocks (which is OSC 133 prompt-bounded), this returns the raw terminal contents — useful when there's no prompt (TUIs, partial output, agents that don't emit OSC 133). Optionally limit to the last N lines.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pane_id": { "type": "string", "description": "Pane id (from list_panes or list_agents)." },
+                                "lines": { "type": "integer", "description": "If set, return only the last N lines. Omit for full available scrollback." }
+                            },
+                            "required": ["pane_id"]
+                        }
+                    },
+                    {
                         "name": "workbook_list",
                         "description": "List saved workbooks in wmux. Returns each workbook's id, title, subtitle, chart count, row count, and last updated time.",
                         "inputSchema": { "type": "object", "properties": {} }
@@ -1074,6 +1115,94 @@ async fn dispatch_tool(
         "get_layout" => {
             let result = bridge.request(app, "get-layout", serde_json::Value::Null).await?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        // ── Pane input/output tools ─────────────────────────────────────
+        // Direct PTY access. write_to() bypasses the JS bridge — these are
+        // bytes-to-pseudoterminal calls. Trust model is the same as
+        // ask_agent: any MCP client with API access can write any keystrokes
+        // to any pane (local trust assumed).
+        "pane_send_text" => {
+            let pane_id = args["pane_id"]
+                .as_str()
+                .ok_or_else(|| "pane_id is required".to_string())?;
+            let text = args["text"]
+                .as_str()
+                .ok_or_else(|| "text is required".to_string())?;
+            let append_enter = args
+                .get("append_enter")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut bytes = text.as_bytes().to_vec();
+            if append_enter {
+                bytes.push(b'\r');
+            }
+            let written = bytes.len();
+            if !manager.write_to(pane_id, &bytes).await {
+                return Err(format!("pane '{}' not found", pane_id));
+            }
+            serde_json::to_string_pretty(&serde_json::json!({
+                "pane_id": pane_id,
+                "bytes_written": written,
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "pane_send_keys" => {
+            let pane_id = args["pane_id"]
+                .as_str()
+                .ok_or_else(|| "pane_id is required".to_string())?;
+            let keys = args["keys"]
+                .as_array()
+                .ok_or_else(|| "keys must be an array of strings".to_string())?;
+            let mut bytes: Vec<u8> = Vec::new();
+            for (idx, key) in keys.iter().enumerate() {
+                let name = key
+                    .as_str()
+                    .ok_or_else(|| format!("keys[{idx}] is not a string"))?;
+                bytes.extend(
+                    parse_key(name)
+                        .map_err(|e| format!("keys[{idx}] ('{name}'): {e}"))?,
+                );
+            }
+            let written = bytes.len();
+            if !manager.write_to(pane_id, &bytes).await {
+                return Err(format!("pane '{}' not found", pane_id));
+            }
+            serde_json::to_string_pretty(&serde_json::json!({
+                "pane_id": pane_id,
+                "keys_sent": keys.len(),
+                "bytes_written": written,
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "pane_read_screen" => {
+            let pane_id = args["pane_id"]
+                .as_str()
+                .ok_or_else(|| "pane_id is required".to_string())?;
+            let content = manager
+                .capture_output_by_id(pane_id)
+                .await
+                .ok_or_else(|| format!("pane '{}' not found", pane_id))?;
+            let trimmed = if let Some(n) = args.get("lines").and_then(|v| v.as_u64()) {
+                let n = n.max(1) as usize;
+                let line_count = content.lines().count();
+                if line_count > n {
+                    content
+                        .lines()
+                        .skip(line_count - n)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    content.clone()
+                }
+            } else {
+                content.clone()
+            };
+            serde_json::to_string_pretty(&serde_json::json!({
+                "pane_id": pane_id,
+                "content": trimmed,
+                "total_lines": content.lines().count(),
+            }))
+            .map_err(|e| e.to_string())
         }
         "workbook_list" => {
             let store = WorkbookStore::from_app(app)?;
@@ -1714,6 +1843,89 @@ async fn cdp_screenshot(port: u16, full_page: bool) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD
         .decode(b64)
         .map_err(|e| format!("base64 decode of screenshot failed: {e}"))
+}
+
+/// Parse one tmux-style key token into the bytes a terminal expects to see.
+///
+/// Recognized forms (case-sensitive prefixes):
+///   * `C-<key>` — Ctrl + key (Ctrl-letters map to 0x01..0x1A)
+///   * `M-<key>` — Alt/Meta + key (prepends Esc, then encodes the rest)
+///   * Named keys — Up/Down/Left/Right/Enter/Tab/Esc/BSpace/Space/Home/End/
+///     PageUp/PageDown/Delete/Insert, F1..F12 (xterm escape sequences)
+///   * Single char — sent as a UTF-8 byte sequence (e.g. "a", "9")
+///
+/// Modifiers compose: `C-M-a` = Esc + Ctrl-A. Returns an error if the token
+/// is empty or names an unknown key.
+fn parse_key(name: &str) -> Result<Vec<u8>, String> {
+    if name.is_empty() {
+        return Err("empty key name".to_string());
+    }
+    // Strip a single leading M- (Alt). Tmux supports nested C-M-x = Esc + C-x.
+    if let Some(rest) = name.strip_prefix("M-") {
+        let mut out = vec![0x1b];
+        out.extend(parse_key(rest)?);
+        return Ok(out);
+    }
+    // Strip a single leading C- (Ctrl).
+    if let Some(rest) = name.strip_prefix("C-") {
+        // C-Space → NUL (0x00). C-<letter> → 1..26. C-[ → Esc. C-\ → 0x1c. etc.
+        if rest.eq_ignore_ascii_case("space") {
+            return Ok(vec![0x00]);
+        }
+        if rest.len() == 1 {
+            let ch = rest.chars().next().unwrap();
+            let code = match ch {
+                'a'..='z' => (ch as u8) - b'a' + 1,
+                'A'..='Z' => (ch as u8) - b'A' + 1,
+                '[' => 0x1b, // Esc
+                '\\' => 0x1c,
+                ']' => 0x1d,
+                '^' => 0x1e,
+                '_' => 0x1f,
+                '?' => 0x7f, // sometimes mapped to DEL
+                _ => return Err(format!("unsupported Ctrl key 'C-{ch}'")),
+            };
+            return Ok(vec![code]);
+        }
+        return Err(format!("Ctrl modifier expects a single character after C-, got 'C-{rest}'"));
+    }
+    // Named keys (xterm/ANSI sequences).
+    let bytes: &[u8] = match name {
+        "Up"        => b"\x1b[A",
+        "Down"      => b"\x1b[B",
+        "Right"     => b"\x1b[C",
+        "Left"      => b"\x1b[D",
+        "Home"      => b"\x1b[H",
+        "End"       => b"\x1b[F",
+        "PageUp"    => b"\x1b[5~",
+        "PageDown"  => b"\x1b[6~",
+        "Insert"    => b"\x1b[2~",
+        "Delete"    => b"\x1b[3~",
+        "Enter"     => b"\r",
+        "Tab"       => b"\t",
+        "BTab" | "S-Tab" => b"\x1b[Z",
+        "Esc" | "Escape" => b"\x1b",
+        "BSpace" | "Backspace" => b"\x7f",
+        "Space"     => b" ",
+        "F1"  => b"\x1bOP",
+        "F2"  => b"\x1bOQ",
+        "F3"  => b"\x1bOR",
+        "F4"  => b"\x1bOS",
+        "F5"  => b"\x1b[15~",
+        "F6"  => b"\x1b[17~",
+        "F7"  => b"\x1b[18~",
+        "F8"  => b"\x1b[19~",
+        "F9"  => b"\x1b[20~",
+        "F10" => b"\x1b[21~",
+        "F11" => b"\x1b[23~",
+        "F12" => b"\x1b[24~",
+        _ => {
+            // Literal single character (e.g. "a", "9", "/"). UTF-8 multi-byte
+            // chars also pass through here.
+            return Ok(name.as_bytes().to_vec());
+        }
+    };
+    Ok(bytes.to_vec())
 }
 
 /// Resolve a CEF-helper label to its CDP port, or a clear error. Used by

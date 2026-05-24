@@ -172,5 +172,47 @@ export function createKeybindingsRuntime() {
     }));
   }
 
-  return { register, dispatch, snapshot, chordFromEvent, applyOverrides, normalizeChord };
+  // Restore a single command to its default chord set. Returns the chords
+  // that ended up active for it (same as defaults minus any that conflict
+  // with a chord owned by some other command).
+  function restoreDefaults(commandId) {
+    const cmd = commands.get(commandId);
+    if (!cmd) return [];
+    // Drop existing chords for this command first.
+    for (const [chord, ownerId] of [...bindings.entries()]) {
+      if (ownerId === commandId) bindings.delete(chord);
+    }
+    const result = [];
+    for (const chord of cmd.defaultBindings) {
+      if (bindings.has(chord)) continue;
+      bindings.set(chord, commandId);
+      result.push(chord);
+    }
+    cmd.currentBindings = result;
+    return result;
+  }
+
+  // Drop ALL overrides — restore every command to its defaults. Used by the
+  // settings UI "Reset all to defaults" button.
+  function restoreAllDefaults() {
+    bindings.clear();
+    for (const cmd of commands.values()) {
+      for (const chord of cmd.defaultBindings) {
+        if (bindings.has(chord)) continue;
+        bindings.set(chord, cmd.id);
+      }
+      cmd.currentBindings = cmd.defaultBindings.slice();
+    }
+  }
+
+  return {
+    register,
+    dispatch,
+    snapshot,
+    chordFromEvent,
+    applyOverrides,
+    normalizeChord,
+    restoreDefaults,
+    restoreAllDefaults,
+  };
 }

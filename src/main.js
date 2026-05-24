@@ -3355,6 +3355,7 @@ panelsRuntime = createUiPanelsRuntime({
   checkForAppUpdate: (config) => invoke('check_for_app_update', { config }),
   installAppUpdate: (config) => invoke('install_app_update', { config }),
   getAppVersion: () => invoke('get_app_version'),
+  getKeybindingsApi: () => keybindingsApi,
 });
 
 prReviewRuntime = createPrReviewRuntime({
@@ -3914,42 +3915,142 @@ for (let n = 1; n <= 9; n += 1) {
 
 document.addEventListener('keydown', (e) => keybindingsRuntime.dispatch(e));
 
-// Stage B: load user keybinding overrides from `keybindings.json` in the app
-// data dir. The file is optional — if absent or malformed we keep defaults
-// and surface the problem in the console (Stage C will add a toast + UI).
-// Exposes a `window.__wmux.reloadKeybindings()` helper for ad-hoc re-apply
-// without restarting; the proper hot-reload + reveal-in-explorer affordances
-// come with the settings panel in Stage C.
-async function loadAndApplyKeybindingOverrides() {
+// ── Keybindings persistence + hot-reload ────────────────────────────────
+//
+// `currentOverrides` is the live in-memory mirror of `keybindings.json`'s
+// `bindings` map: { commandId -> chord[] }. The settings UI mutates it via
+// setOverride/clearOverride/resetOverride; each mutation persists the full
+// map back to disk and re-applies it to the runtime. The mtime poller below
+// hot-reloads the file when an external editor changes it.
+let currentOverrides = {};
+let lastKnownKeybindingsMtime = null;
+let _suppressNextMtimeReload = false;
+
+async function loadAndApplyKeybindingOverrides({ silent = false } = {}) {
   try {
     const raw = await invoke('load_keybindings');
-    if (!raw) return { applied: [], unknown: [], conflicts: [], path: null };
+    if (!raw) {
+      currentOverrides = {};
+      keybindingsRuntime.restoreAllDefaults();
+      return { applied: [], unknown: [], conflicts: [], empty: true };
+    }
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
-      console.warn('[keybindings] keybindings.json is not valid JSON — ignoring:', err);
-      return null;
+      console.warn('[keybindings] keybindings.json is not valid JSON:', err);
+      if (!silent) {
+        addNotification?.({
+          severity: 'warning',
+          title: 'keybindings.json parse error',
+          body: String(err?.message ?? err),
+        });
+      }
+      return { error: 'parse', message: String(err?.message ?? err) };
     }
     const overrides = parsed && typeof parsed === 'object' ? parsed.bindings : null;
     if (!overrides || typeof overrides !== 'object') {
-      console.warn('[keybindings] keybindings.json missing top-level "bindings" object — ignoring');
-      return null;
+      console.warn('[keybindings] keybindings.json missing top-level "bindings" object');
+      if (!silent) {
+        addNotification?.({
+          severity: 'warning',
+          title: 'keybindings.json shape error',
+          body: 'Expected a top-level "bindings" object. Falling back to defaults.',
+        });
+      }
+      currentOverrides = {};
+      keybindingsRuntime.restoreAllDefaults();
+      return { error: 'shape' };
     }
-    const result = keybindingsRuntime.applyOverrides(overrides);
-    if (result.unknown.length) {
-      console.warn('[keybindings] unknown command ids in keybindings.json:', result.unknown);
-    }
-    if (result.conflicts.length) {
-      console.warn('[keybindings] override chord conflicts:', result.conflicts);
-    }
-    if (result.applied.length) {
-      console.info(`[keybindings] applied overrides for ${result.applied.length} command(s):`, result.applied);
-    }
+    currentOverrides = { ...overrides };
+    keybindingsRuntime.restoreAllDefaults();
+    const result = keybindingsRuntime.applyOverrides(currentOverrides);
+    if (result.unknown.length) console.warn('[keybindings] unknown command ids:', result.unknown);
+    if (result.conflicts.length) console.warn('[keybindings] chord conflicts:', result.conflicts);
+    if (result.applied.length) console.info(`[keybindings] applied ${result.applied.length} override(s):`, result.applied);
+    document.dispatchEvent(new CustomEvent('wmux-keybindings-changed'));
     return result;
   } catch (err) {
     console.warn('[keybindings] failed to load keybindings.json:', err);
-    return null;
+    return { error: 'io', message: String(err) };
+  }
+}
+
+async function persistOverrides() {
+  // Drop empty arrays that match a command being unbound? No — empty array
+  // is a meaningful "unbind" directive. We DO drop keys whose value equals
+  // the command's default chord set, to keep the file minimal.
+  const minimal = {};
+  for (const cmd of keybindingsRuntime.snapshot()) {
+    if (!(cmd.id in currentOverrides)) continue;
+    const overrideList = currentOverrides[cmd.id];
+    const defaultsList = cmd.defaults;
+    const sameAsDefault =
+      Array.isArray(overrideList) &&
+      overrideList.length === defaultsList.length &&
+      overrideList.every((c, i) => c === defaultsList[i]);
+    if (sameAsDefault) continue;
+    minimal[cmd.id] = overrideList;
+  }
+  currentOverrides = minimal;
+  const json = JSON.stringify({ version: 1, bindings: minimal }, null, 2) + '\n';
+  _suppressNextMtimeReload = true;
+  await invoke('save_keybindings', { bindingsJson: json });
+  try {
+    lastKnownKeybindingsMtime = await invoke('get_keybindings_mtime');
+  } catch {
+    /* ignore */
+  }
+}
+
+async function setKeybindingOverride(commandId, chords) {
+  const list = (Array.isArray(chords) ? chords : [chords])
+    .map((c) => keybindingsRuntime.normalizeChord(c))
+    .filter(Boolean);
+  currentOverrides[commandId] = list;
+  keybindingsRuntime.restoreAllDefaults();
+  const result = keybindingsRuntime.applyOverrides(currentOverrides);
+  await persistOverrides();
+  return result;
+}
+
+async function resetKeybindingOverride(commandId) {
+  delete currentOverrides[commandId];
+  keybindingsRuntime.restoreAllDefaults();
+  const result = keybindingsRuntime.applyOverrides(currentOverrides);
+  await persistOverrides();
+  return result;
+}
+
+async function resetAllKeybindings() {
+  currentOverrides = {};
+  keybindingsRuntime.restoreAllDefaults();
+  await persistOverrides();
+}
+
+async function pollKeybindingsForChanges() {
+  try {
+    const mtime = await invoke('get_keybindings_mtime');
+    if (mtime === lastKnownKeybindingsMtime) return;
+    if (_suppressNextMtimeReload) {
+      _suppressNextMtimeReload = false;
+      lastKnownKeybindingsMtime = mtime;
+      return;
+    }
+    lastKnownKeybindingsMtime = mtime;
+    if (mtime != null) {
+      console.info('[keybindings] external edit detected, reloading');
+      const result = await loadAndApplyKeybindingOverrides();
+      if (result && !result.error) {
+        addNotification?.({
+          severity: 'info',
+          title: 'Keybindings reloaded',
+          body: 'Picked up changes from keybindings.json.',
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('[keybindings] mtime poll failed:', err);
   }
 }
 
@@ -3960,12 +4061,34 @@ async function loadAndApplyKeybindingOverrides() {
   } catch (err) {
     console.warn('[keybindings] could not resolve config path:', err);
   }
-  await loadAndApplyKeybindingOverrides();
+  await loadAndApplyKeybindingOverrides({ silent: true });
+  try {
+    lastKnownKeybindingsMtime = await invoke('get_keybindings_mtime');
+  } catch {
+    /* ignore */
+  }
+  setInterval(pollKeybindingsForChanges, 2000);
 })();
+
+const keybindingsApi = {
+  snapshot: () => keybindingsRuntime.snapshot(),
+  normalizeChord: (s) => keybindingsRuntime.normalizeChord(s),
+  chordFromEvent: (e) => keybindingsRuntime.chordFromEvent(e),
+  getOverrides: () => ({ ...currentOverrides }),
+  setOverride: setKeybindingOverride,
+  clearOverride: (id) => setKeybindingOverride(id, []),
+  resetOverride: resetKeybindingOverride,
+  resetAll: resetAllKeybindings,
+  reload: loadAndApplyKeybindingOverrides,
+  reveal: () => invoke('reveal_keybindings_in_explorer'),
+  initFile: () => invoke('init_keybindings_file_if_missing'),
+  getPath: () => invoke('get_keybindings_path'),
+};
 
 window.__wmux = window.__wmux ?? {};
 window.__wmux.reloadKeybindings = loadAndApplyKeybindingOverrides;
 window.__wmux.snapshotKeybindings = () => keybindingsRuntime.snapshot();
+window.__wmux.keybindings = keybindingsApi;
 
 // Boot
 

@@ -2466,9 +2466,9 @@ body.has-tabs #empty-state { display: none; }
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 420px;
+  width: 520px;
   max-width: calc(100vw - 32px);
-  max-height: 80vh;
+  max-height: 85vh;
   background: #1e1f26;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -2758,6 +2758,128 @@ body.has-tabs #empty-state { display: none; }
   white-space: pre-wrap;
   word-break: break-word;
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+}
+
+.settings-keybindings-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+}
+
+.settings-keybindings-filter {
+  flex: 1;
+}
+
+.settings-keybindings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.18);
+  padding: 4px;
+}
+
+.settings-kb-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.settings-kb-row:hover {
+  background: rgba(255,255,255,0.04);
+}
+
+.settings-kb-row-overridden .settings-kb-label::after {
+  content: ' •';
+  color: #7c6af7;
+}
+
+.settings-kb-row-capturing {
+  background: rgba(124,106,247,0.18);
+}
+
+.settings-kb-info {
+  min-width: 0;
+}
+
+.settings-kb-label {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.settings-kb-id {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  line-height: 1.3;
+}
+
+.settings-kb-chord {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  min-width: 120px;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.settings-kb-chord:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(124,106,247,0.5);
+}
+
+.settings-kbd {
+  display: inline-block;
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 10px;
+  color: #ddd6fe;
+}
+
+.settings-kb-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 11px;
+}
+
+.settings-kb-capturing {
+  color: #ddd6fe;
+  font-size: 10px;
+  font-style: italic;
+}
+
+.settings-kb-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.settings-kb-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.06);
 }
 
 .update-prompt {

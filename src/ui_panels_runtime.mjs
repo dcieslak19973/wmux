@@ -33,6 +33,7 @@ export function createUiPanelsRuntime({
   checkForAppUpdate,
   installAppUpdate,
   getAppVersion,
+  getKeybindingsApi,
 }) {
   const artifacts = [];
   let artifactPanelVisible = false;
@@ -860,6 +861,16 @@ export function createUiPanelsRuntime({
           <div class="settings-update-status" id="sp-update-status">No update check has been run in this session.</div>
           <div class="settings-update-notes" id="sp-update-notes"></div>
         </div>
+        <div class="settings-group">
+          <div class="settings-group-label">Keybindings</div>
+          <div class="settings-keybindings-toolbar">
+            <input class="settings-input settings-keybindings-filter" id="sp-kb-filter" type="search" placeholder="Filter commands…" spellcheck="false" />
+            <button class="settings-btn-sm" id="sp-kb-edit-json">Edit JSON</button>
+            <button class="settings-btn-sm" id="sp-kb-reset-all">Reset all</button>
+          </div>
+          <div class="settings-keybindings-list" id="sp-kb-list"></div>
+          <div class="settings-help">Click a chord to rebind. Press <code>Esc</code> to cancel, <code>Backspace</code> to clear. Changes save to <code>keybindings.json</code> immediately.</div>
+        </div>
         <div class="settings-group"><div class="settings-group-label">Window</div><div class="settings-row"><span class="settings-label">New window</span><button class="settings-btn-sm" id="sp-new-window">Open</button></div></div>
         <div class="settings-footer"><button class="settings-btn-apply" id="sp-apply">Apply</button><button class="settings-btn-reset" id="sp-reset">Reset to defaults</button></div>
       </div>
@@ -972,8 +983,135 @@ export function createUiPanelsRuntime({
         setUpdateBusy(false);
       }
     });
+    // ── Keybindings list ────────────────────────────────────────────────
+    const kbApi = getKeybindingsApi?.();
+    const kbListEl = panel.querySelector('#sp-kb-list');
+    const kbFilterEl = panel.querySelector('#sp-kb-filter');
+    let kbCaptureRow = null; // currently-capturing row (only one at a time)
+
+    function renderKbList() {
+      if (!kbApi || !kbListEl) return;
+      const filter = (kbFilterEl?.value ?? '').toLowerCase();
+      const rows = kbApi.snapshot()
+        .filter((cmd) => {
+          if (!filter) return true;
+          return cmd.id.toLowerCase().includes(filter) || cmd.label.toLowerCase().includes(filter);
+        })
+        .sort((a, b) => a.id.localeCompare(b.id));
+      kbListEl.innerHTML = rows.map((cmd) => {
+        const isOverridden = !arrayShallowEqual(cmd.bindings, cmd.defaults);
+        const chordHtml = cmd.bindings.length
+          ? cmd.bindings.map((c) => `<kbd class="settings-kbd">${escHtml(c)}</kbd>`).join(' ')
+          : '<span class="settings-kb-empty">(unbound)</span>';
+        return `
+          <div class="settings-kb-row${isOverridden ? ' settings-kb-row-overridden' : ''}" data-cmd-id="${escHtml(cmd.id)}">
+            <div class="settings-kb-info">
+              <div class="settings-kb-label">${escHtml(cmd.label)}</div>
+              <div class="settings-kb-id">${escHtml(cmd.id)}</div>
+            </div>
+            <button class="settings-kb-chord" data-action="capture" title="Click to rebind">${chordHtml}</button>
+            <button class="settings-kb-btn" data-action="reset" title="Restore default">↺</button>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function arrayShallowEqual(a, b) {
+      if (!Array.isArray(a) || !Array.isArray(b)) return false;
+      if (a.length !== b.length) return false;
+      return a.every((v, i) => v === b[i]);
+    }
+
+    function exitCapture() {
+      if (!kbCaptureRow) return;
+      kbCaptureRow = null;
+      document.removeEventListener('keydown', onCaptureKeyDown, true);
+      renderKbList();
+    }
+
+    async function onCaptureKeyDown(event) {
+      if (!kbCaptureRow) return;
+      // Modifier-only presses while waiting are ignored (e.g. user holding
+      // Ctrl before pressing the second key).
+      const key = event.key;
+      if (key === 'Control' || key === 'Alt' || key === 'Shift' || key === 'Meta') return;
+      event.preventDefault();
+      event.stopPropagation();
+      const commandId = kbCaptureRow.dataset.cmdId;
+      if (key === 'Escape') { exitCapture(); return; }
+      if (key === 'Backspace') {
+        await kbApi.clearOverride(commandId);
+        exitCapture();
+        return;
+      }
+      const chord = kbApi.chordFromEvent(event);
+      if (!chord) { exitCapture(); return; }
+      try {
+        await kbApi.setOverride(commandId, [chord]);
+      } catch (err) {
+        showError(`Could not save keybinding: ${err}`);
+      }
+      exitCapture();
+    }
+
+    if (kbApi && kbListEl) {
+      renderKbList();
+      kbFilterEl?.addEventListener('input', renderKbList);
+      kbListEl.addEventListener('click', async (event) => {
+        const btn = event.target.closest('[data-action]');
+        if (!btn) return;
+        const row = btn.closest('.settings-kb-row');
+        const commandId = row?.dataset.cmdId;
+        if (!commandId) return;
+        const action = btn.dataset.action;
+        if (action === 'capture') {
+          if (kbCaptureRow === row) { exitCapture(); return; }
+          if (kbCaptureRow) exitCapture();
+          kbCaptureRow = row;
+          row.classList.add('settings-kb-row-capturing');
+          btn.innerHTML = '<span class="settings-kb-capturing">Press key combo… (Esc cancel, Backspace clear)</span>';
+          document.addEventListener('keydown', onCaptureKeyDown, true);
+        } else if (action === 'reset') {
+          try {
+            await kbApi.resetOverride(commandId);
+            renderKbList();
+          } catch (err) {
+            showError(`Could not reset keybinding: ${err}`);
+          }
+        }
+      });
+      panel.querySelector('#sp-kb-reset-all')?.addEventListener('click', async () => {
+        if (!confirm('Reset every keybinding to its default? This clears keybindings.json.')) return;
+        try {
+          await kbApi.resetAll();
+          renderKbList();
+        } catch (err) {
+          showError(`Could not reset keybindings: ${err}`);
+        }
+      });
+      panel.querySelector('#sp-kb-edit-json')?.addEventListener('click', async () => {
+        try {
+          await kbApi.initFile();
+          await kbApi.reveal();
+        } catch (err) {
+          showError(`Could not open keybindings.json: ${err}`);
+        }
+      });
+      // Re-render when the runtime reports an external file change.
+      const onExternalChange = () => renderKbList();
+      document.addEventListener('wmux-keybindings-changed', onExternalChange);
+      // Make sure document listeners + capture mode are torn down when the
+      // panel goes away (close button, click-outside, reset, escape, etc).
+      const origRemove = panel.remove.bind(panel);
+      panel.remove = () => {
+        exitCapture();
+        document.removeEventListener('wmux-keybindings-changed', onExternalChange);
+        origRemove();
+      };
+    }
+
     panel.querySelector('.settings-close').addEventListener('click', () => panel.remove());
-    panel.addEventListener('keydown', (event) => { if (event.key === 'Escape') panel.remove(); });
+    panel.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !kbCaptureRow) panel.remove(); });
     makeDockable(panel, panel.querySelector('.settings-header'), 'settings');
     setTimeout(() => {
       const onOut = (event) => {

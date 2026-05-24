@@ -103,7 +103,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, list_workspaces, switch_workspace, new_workspace, close_workspace, list_tabs, create_tab, focus_tab, close_tab, move_tab, list_panes, split_pane, focus_pane, close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, wmux_eval, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Default mode exposes a single `wmux_eval` tool (Code Mode) that runs JS scripts orchestrating ~44 wmux operations as bound globals — see the tool description for the binding catalog. Set WMUX_MCP_MODE=full to expose all underlying tools individually (get_blocks, list_sessions, list_agents, ask_agent, broadcast, list/switch/new/close_workspace, list/create/focus/close/move_tab, list/split/focus/close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, workbook_*, browser_*, cef_helper_list). Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -399,7 +399,7 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
             })
         }
         "tools/list" => {
-            serde_json::json!({
+            let full = serde_json::json!({
                 "tools": [
                     {
                         "name": "get_blocks",
@@ -654,11 +654,11 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                     },
                     {
                         "name": "wmux_eval",
-                        "description": "**SPIKE — server-side script execution.** Run a JavaScript script in a sandboxed boa engine with selected wmux MCP tools bound as synchronous global functions. Lets you collapse multi-step workflows (e.g. 'new workspace + create tab + split twice + send commands') into a single MCP call. Bound tools (v0): list_workspaces, list_tabs, list_panes, get_layout, list_agents, list_sessions, ask_agent, pane_send_text, pane_send_keys, pane_read_screen, browser_list, browser_open, browser_navigate. Each is a synchronous JS function — call without `await`. Each takes a single optional object argument matching the tool's MCP input schema, and returns the tool's parsed JSON result. Throws on tool error. Script's final expression value is returned as JSON. Default 90s timeout, max 5 min.",
+                        "description": "Run a JavaScript script that orchestrates wmux. Every wmux tool is exposed as a synchronous global function inside the sandbox; this is the *only* tool you need by default. Each binding takes one optional object argument (the MCP input shape) and returns the parsed JSON result. Throws on tool error. The script's final expression is returned as JSON. Default 90s, max 5 min. No `await` — sync API.\n\nBINDINGS:\n• Sessions/agents: get_blocks({session_id, limit?}), list_sessions(), list_agents(), ask_agent({pane_id, message, timeout_secs?, silence_secs?}), broadcast({message, exclude_pane_id?})\n• Workspaces: list_workspaces(), switch_workspace({workspace_id}), new_workspace({name?}), close_workspace({workspace_id})\n• Tabs: list_tabs({workspace_id?}), create_tab({workspace_id?, target?}), focus_tab({tab_id}), close_tab({tab_id}), move_tab({tab_id, workspace_id})\n• Panes: list_panes({tab_id?}), split_pane({pane_id, direction}), focus_pane({pane_id}), close_pane({pane_id}), get_layout()\n• Pane I/O: pane_send_text({pane_id, text, append_enter?}), pane_send_keys({pane_id, keys}), pane_read_screen({pane_id, lines?})\n• Browser: browser_list({tab_id?}), browser_open({url, kind?, tab_id?}), browser_navigate({label, url}), browser_back/forward/close({label}), browser_read_content({label, format?}), browser_get_url({label}), browser_evaluate({label, expression, await_promise?}), browser_screenshot({label, full_page?}), browser_click({label, x, y, button?}), cef_helper_list()\n• Workbook: workbook_list(), workbook_get/create/update/delete/open/add_chart/update_chart/remove_chart/reorder_charts({...})\n\nEXAMPLE:\n  const ws = new_workspace({name:'exp-1'});\n  const t = create_tab({workspace_id: ws.id});\n  split_pane({pane_id: t.paneIds[0], direction:'h'});\n  return list_panes({tab_id: t.tabId});\n\nSet WMUX_MCP_MODE=full to expose every tool individually instead.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "script": { "type": "string", "description": "JS source. Example: `const ws = list_workspaces(); ws.length;` or `const tabs = list_tabs(); for (const t of tabs) { pane_send_text({pane_id: t.paneIds[0], text: 'date', append_enter: true}); } 'done';`. Sync API — no Promises, no await." },
+                                "script": { "type": "string", "description": "JS source. See description for available bindings + example." },
                                 "timeout_ms": { "type": "integer", "description": "Wall-clock limit in ms (default 90000, max 300000)." }
                             },
                             "required": ["script"]
@@ -932,7 +932,22 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                         }
                     }
                 ]
-            })
+            });
+            // Code Mode is the default: show only `wmux_eval` (which has all
+            // the bindings documented in its description). Set
+            // WMUX_MCP_MODE=full to expose every underlying tool individually
+            // — useful for agents that struggle with code generation, or
+            // for one-off discrete tool calls during debugging.
+            let mode = std::env::var("WMUX_MCP_MODE").unwrap_or_default();
+            if mode != "full" {
+                let mut filtered = full.clone();
+                if let Some(tools) = filtered.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                    tools.retain(|t| t.get("name").and_then(|n| n.as_str()) == Some("wmux_eval"));
+                }
+                filtered
+            } else {
+                full
+            }
         }
         "tools/call" => {
             let tool_name = params["name"].as_str().unwrap_or("");

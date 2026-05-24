@@ -30,23 +30,61 @@ use tokio::task;
 
 use crate::{control_bridge::FrontendControlBridge, session_manager::SessionManager};
 
-/// Tools exposed to the sandbox in v0. Picked to cover the most natural
-/// orchestration patterns (read layout → act on it). Easy to expand later
-/// — just add to this list and the dispatcher works.
-const EXPOSED_TOOLS: &[&str] = &[
-    "list_workspaces",
-    "list_tabs",
-    "list_panes",
-    "get_layout",
-    "list_agents",
+/// Every wmux MCP tool *except* wmux_eval itself, bound as global JS
+/// functions inside the sandbox. When MCP runs in code mode (the default),
+/// these are NOT individually visible to the agent — they're only callable
+/// from inside a wmux_eval script. To expose them as discrete MCP tools,
+/// set WMUX_MCP_MODE=full.
+pub const BOUND_TOOLS: &[&str] = &[
+    // Session / pane state
+    "get_blocks",
     "list_sessions",
+    "list_agents",
     "ask_agent",
+    "broadcast",
+    // Workspaces / tabs / panes (structural)
+    "list_workspaces",
+    "switch_workspace",
+    "new_workspace",
+    "close_workspace",
+    "list_tabs",
+    "create_tab",
+    "focus_tab",
+    "close_tab",
+    "move_tab",
+    "list_panes",
+    "split_pane",
+    "focus_pane",
+    "close_pane",
+    "get_layout",
+    // Pane I/O
     "pane_send_text",
     "pane_send_keys",
     "pane_read_screen",
+    // Workbook
+    "workbook_list",
+    "workbook_get",
+    "workbook_create",
+    "workbook_update",
+    "workbook_delete",
+    "workbook_open",
+    "workbook_add_chart",
+    "workbook_update_chart",
+    "workbook_remove_chart",
+    "workbook_reorder_charts",
+    // Browser / CEF
     "browser_list",
     "browser_open",
     "browser_navigate",
+    "browser_back",
+    "browser_forward",
+    "browser_close",
+    "browser_read_content",
+    "browser_get_url",
+    "browser_evaluate",
+    "browser_screenshot",
+    "browser_click",
+    "cef_helper_list",
 ];
 
 /// Execute a script and return its final value as a JSON string. Bindings
@@ -83,7 +121,7 @@ fn run_blocking(
     let started = Instant::now();
     let deadline = started + Duration::from_millis(deadline_ms);
 
-    for tool in EXPOSED_TOOLS {
+    for tool in BOUND_TOOLS {
         let tool_name = (*tool).to_string();
         let manager = manager.clone();
         let app = app.clone();

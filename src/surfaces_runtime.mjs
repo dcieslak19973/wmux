@@ -282,6 +282,12 @@ export function createSurfaceRuntime({
       history: Array.isArray(initialState.history) ? [...initialState.history] : [],
       historyIndex: Number.isInteger(initialState.historyIndex) ? initialState.historyIndex : -1,
       currentUrl: '',
+      // EXPERIMENTAL (spike-only): once the CEF helper has been activated
+      // for this pane, the iframe path is locked out so Enter/Go don't
+      // load google.com (or any other X-Frame-Options-protected page)
+      // into the iframe, where the failure overlaps with the CEF window
+      // and makes it impossible to tell which surface is failing.
+      cefActive: false,
     };
     if (browserState.historyIndex >= browserState.history.length) browserState.historyIndex = browserState.history.length - 1;
     if (browserState.historyIndex < 0 && browserState.history.length > 0) browserState.historyIndex = browserState.history.length - 1;
@@ -300,6 +306,29 @@ export function createSurfaceRuntime({
       const full = normalizeBrowserUrl(url);
       if (!full) return;
       urlInput.value = full;
+
+      // Spike-only: when CEF has been activated for this pane, route
+      // Enter/Go through the helper instead of the iframe. Avoids the
+      // visual confusion of iframe X-Frame-Options errors layering with
+      // the embedded CEF window. (Phase 3 IPC will turn this into a
+      // proper navigate(url) command to a long-lived helper rather
+      // than spawning a new helper fleet each click.)
+      if (browserState.cefActive) {
+        console.log(`%c[cef] navigateTo → helper (cefActive) url=${full}`, 'color:#fff;background:#7c6af7;padding:2px 6px;border-radius:3px');
+        invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
+          .then((pid) => console.log(`[cef] helper pid=${pid}`))
+          .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
+        browserState.currentUrl = full;
+        if (pushHistory) {
+          const nextHistory = browserState.history.slice(0, browserState.historyIndex + 1);
+          if (nextHistory[nextHistory.length - 1] !== full) nextHistory.push(full);
+          browserState.history = nextHistory;
+          browserState.historyIndex = browserState.history.length - 1;
+        }
+        updateNavButtons();
+        onLayoutChanged?.();
+        return;
+      }
 
       if (iframeEl.style.display === 'none') {
         // First navigation — show the iframe and hide the placeholder.
@@ -339,27 +368,44 @@ export function createSurfaceRuntime({
     });
     zoomBtn.addEventListener('click', () => toggleSurfaceZoom(browserEl));
     document.getElementById(`bb-cef-${label}`).addEventListener('click', (event) => {
-      // EXPERIMENTAL: see the button's title attribute. Spawns the
-      // out-of-process CEF helper parented to the wmux window. Phase 3 will
-      // replace the "spawn fresh on every click" flow with named-pipe IPC
-      // that drives a long-lived helper.
+      // EXPERIMENTAL: see the button's title attribute. Activates CEF
+      // mode for this pane — the iframe is destroyed and all future
+      // navigation routes through the out-of-process CEF helper. Phase 3
+      // will replace the "spawn fresh on every click" flow with named-pipe
+      // IPC that drives a long-lived helper.
       const target = (urlInput.value || browserState.currentUrl || '').trim();
       const full = normalizeBrowserUrl(target) || 'https://www.google.com/';
       console.log(`%c[cef] BUTTON CLICKED — about to spawn helper, url=${full}`, 'color:#fff;background:#7c6af7;padding:2px 6px;border-radius:3px;font-weight:bold');
 
-      // Visually mark the button as "armed" so the user can see the click
-      // registered, then unmark after spawn completes.
       const btn = event.currentTarget;
       btn.style.background = '#7c6af7';
       btn.style.color = '#fff';
 
-      // Hide the competing iframe + placeholder so the CEF window has the
-      // pane's visual real-estate uncontested. Eliminates the "is that error
-      // from iframe or CEF?" ambiguity. We restore them if CEF spawn fails.
-      const prevIframeDisplay = iframeEl.style.display;
-      iframeEl.style.display = 'none';
-      iframeEl.src = 'about:blank';
+      // Lock out the iframe path so Enter/Go go to CEF instead.
+      browserState.cefActive = true;
+
+      // Physically remove the iframe so it can't be re-shown by anything,
+      // including a stale navigateTo or browser internals. The pane
+      // content area will be empty afterward — the actual page is rendered
+      // by the CEF helper window which is parented to wmux at a fixed
+      // (0,0,800,600) and may be hidden behind wmux's own UI for now.
+      // (Phase 3+ adds geometry sync so the CEF window tracks the pane.)
+      try { iframeEl.remove?.(); } catch (_) {}
       placeholderEl?.remove?.();
+
+      // Replace placeholder with a clear "CEF active" indicator so the
+      // pane content area shows actionable info rather than going blank.
+      let indicator = browserEl.querySelector('.cef-active-indicator');
+      if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.className = 'cef-active-indicator';
+        indicator.style.cssText = 'padding:16px;color:#9ca3af;font-size:12px;line-height:1.5';
+        indicator.innerHTML = '<strong style="color:#7c6af7">CEF helper active for this pane.</strong><br>'
+          + 'The actual page is rendered in a separate Win32 child window parented to wmux. '
+          + 'If you do not see it, it may be positioned behind wmux UI (top-left of the wmux client area, behind tabs/sidebar).<br><br>'
+          + '<em>Spike limitation: geometry sync is Phase 3. For now use Alt+Tab or resize the wmux window to locate the CEF window.</em>';
+        browserEl.appendChild(indicator);
+      }
 
       invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
         .then((pid) => {
@@ -370,7 +416,6 @@ export function createSurfaceRuntime({
           console.error(`[cef] SPAWN FAILED: ${err}`);
           btn.style.background = '#f87171';
           btn.style.color = '#fff';
-          iframeEl.style.display = prevIframeDisplay;
           showError(`Could not spawn CEF helper: ${err}`);
         });
     });

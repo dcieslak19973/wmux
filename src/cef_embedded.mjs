@@ -6,8 +6,9 @@
 // it. We capture its rendered viewport with CDP `Page.startScreencast`
 // (JPEG over WebSocket) and paint each frame into the canvas.
 //
-// v0 scope: read-only embed. No input forwarding, no URL bar, no popups.
-// Just prove the pixel pipeline works visibly.
+// v1 scope: read+write embed. Mouse, keyboard, wheel forwarded via
+// CDP Input.dispatchMouseEvent / Input.dispatchKeyEvent. No URL bar
+// or popups yet.
 
 import { invoke } from '@tauri-apps/api/core';
 
@@ -62,6 +63,11 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
     if (canvas.height !== h) canvas.height = h;
   }
   syncCanvasSize();
+
+  // Make the canvas focusable so it receives keyboard events.
+  canvas.tabIndex = 0;
+  canvas.style.outline = 'none';
+  canvas.style.cursor = 'default';
 
   // --- 3. Find the page target and open a WebSocket -------------------------
   // CDP exposes /json with the list of targets; we want the first `type=page`.
@@ -144,7 +150,150 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
     void metadata;
   }
 
-  // --- 4. Handle resize -----------------------------------------------------
+  // --- 4. Input forwarding --------------------------------------------------
+  // Canvas events → CDP Input.dispatchMouseEvent / Input.dispatchKeyEvent.
+  // Coordinates: the canvas has both an internal pixel buffer size
+  // (canvas.width/height) and a CSS rendered size (getBoundingClientRect).
+  // We told CEF to render at the pixel-buffer size, so events captured in
+  // CSS pixels need scaling. In v1 we assume the two match because we
+  // sync them in syncCanvasSize() — but use a helper anyway in case a
+  // device pixel ratio difference creeps in later.
+  function eventToPagePoint(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    return { x: Math.round(x), y: Math.round(y) };
+  }
+  function mouseEventModifiers(e) {
+    // CDP modifiers bitmask: 1=Alt, 2=Ctrl, 4=Meta, 8=Shift.
+    return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  }
+  function mouseButton(e) {
+    // CDP wants the *name* of the button (not the JS numeric code):
+    //   0 = left, 1 = middle, 2 = right.
+    return ['left', 'middle', 'right'][e.button] ?? 'left';
+  }
+
+  let lastMouseButton = 'none';
+  let clickCount = 0;
+  let lastClickAt = 0;
+  let lastClickPos = { x: 0, y: 0 };
+
+  canvas.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    canvas.focus();
+    const pt = eventToPagePoint(e);
+    const button = mouseButton(e);
+    lastMouseButton = button;
+    // Track click count for double/triple click — CEF uses this to
+    // decide on word/line selection.
+    const now = performance.now();
+    if (now - lastClickAt < 500 && Math.hypot(pt.x - lastClickPos.x, pt.y - lastClickPos.y) < 4) {
+      clickCount += 1;
+    } else {
+      clickCount = 1;
+    }
+    lastClickAt = now;
+    lastClickPos = pt;
+    sendCdp('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: pt.x,
+      y: pt.y,
+      button,
+      buttons: e.buttons,
+      clickCount,
+      modifiers: mouseEventModifiers(e),
+    });
+  });
+  canvas.addEventListener('mouseup', (e) => {
+    e.preventDefault();
+    const pt = eventToPagePoint(e);
+    sendCdp('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: pt.x,
+      y: pt.y,
+      button: mouseButton(e),
+      buttons: e.buttons,
+      clickCount,
+      modifiers: mouseEventModifiers(e),
+    });
+    lastMouseButton = 'none';
+  });
+  canvas.addEventListener('mousemove', (e) => {
+    const pt = eventToPagePoint(e);
+    sendCdp('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: pt.x,
+      y: pt.y,
+      button: e.buttons ? lastMouseButton : 'none',
+      buttons: e.buttons,
+      modifiers: mouseEventModifiers(e),
+    });
+  });
+  canvas.addEventListener('contextmenu', (e) => {
+    // Don't show wmux's right-click menu over the embedded page.
+    e.preventDefault();
+  });
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const pt = eventToPagePoint(e);
+    // CDP expects deltaX/deltaY in CSS pixels. Browser wheel events are in
+    // pixels by default (deltaMode=0); for line-mode (1) and page-mode (2)
+    // we apply rough multipliers — enough for the v1 spike.
+    let dx = e.deltaX;
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) { dx *= 16; dy *= 16; }
+    if (e.deltaMode === 2) { dx *= canvas.width; dy *= canvas.height; }
+    sendCdp('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x: pt.x,
+      y: pt.y,
+      deltaX: -dx,
+      deltaY: -dy,
+      modifiers: mouseEventModifiers(e),
+    });
+  }, { passive: false });
+
+  // Keyboard. CDP Input.dispatchKeyEvent takes:
+  //   type: keyDown / keyUp / char / rawKeyDown
+  //   key: KeyboardEvent.key
+  //   code: KeyboardEvent.code
+  //   windowsVirtualKeyCode: legacy keyCode (good enough on Windows)
+  //   text: for printable chars, the actual character (sent on keydown)
+  //   modifiers: same bitmask as mouse
+  function keyEventModifiers(e) {
+    return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  }
+  canvas.addEventListener('keydown', (e) => {
+    // Don't preventDefault for browser shortcuts that we WANT to forward
+    // (Ctrl-C, Ctrl-V, etc.) — CDP handles them inside the page. Do
+    // preventDefault on common navigation keys so the wmux UI doesn't
+    // also scroll / page-down behind the canvas.
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', 'Space', 'Tab'].includes(e.key) || e.key === ' ') {
+      e.preventDefault();
+    }
+    const isChar = e.key.length === 1 && !e.ctrlKey && !e.metaKey;
+    sendCdp('Input.dispatchKeyEvent', {
+      type: isChar ? 'keyDown' : 'rawKeyDown',
+      key: e.key,
+      code: e.code,
+      windowsVirtualKeyCode: e.keyCode,
+      modifiers: keyEventModifiers(e),
+      text: isChar ? e.key : undefined,
+      unmodifiedText: isChar ? e.key : undefined,
+    });
+  });
+  canvas.addEventListener('keyup', (e) => {
+    sendCdp('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: e.key,
+      code: e.code,
+      windowsVirtualKeyCode: e.keyCode,
+      modifiers: keyEventModifiers(e),
+    });
+  });
+
+  // --- 5. Handle resize -----------------------------------------------------
   // When the pane resizes, we need to tell CEF to render to the new size.
   // ResizeObserver gives us the canvas's new dimensions; we re-issue
   // startScreencast with updated maxWidth/maxHeight (CDP doesn't have a

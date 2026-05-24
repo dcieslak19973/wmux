@@ -103,7 +103,8 @@ impl SimpleHandler {
         #[cfg(target_os = "windows")]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOP,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW,
             };
             let cef_hwnd = browser
                 .host()
@@ -121,6 +122,14 @@ impl SimpleHandler {
                     // so the renderer keeps its layout dimensions; the wmux
                     // pane will drive size via emulation later.
                     SetWindowPos(raw, HWND_TOP, -30000, -30000, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                    // Mark as a tool window so it doesn't appear in Alt-Tab
+                    // or the taskbar. Without this, the user can Alt-Tab
+                    // straight to the still-existing top-level Chromium
+                    // window and interact with its real selection/focus
+                    // — which leaks user gestures around the canvas
+                    // abstraction we're building.
+                    let ex = GetWindowLongPtrW(raw, GWL_EXSTYLE);
+                    SetWindowLongPtrW(raw, GWL_EXSTYLE, ex | (WS_EX_TOOLWINDOW as isize));
                 } else {
                     SetWindowPos(raw, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }

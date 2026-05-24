@@ -155,6 +155,7 @@ The auth model is intentionally lightweight: bearer tokens in the URL fragment, 
 - Short-lived (default 4 hours, configurable).
 - Scoped to a single named surface.
 - Read-only by default; host can promote a specific guest to read-write.
+- **Encoding: raw high-entropy secret carried in the URL fragment**, e.g. `https://collab.example/s/j3k-r9p#t=<256-bit-base64>`. Fragments aren't sent to the server in the HTTP request line and don't appear in server access logs. They do live in the viewer's browser history — but share tokens are short-lived and scoped enough that this is an acceptable trade for the "paste a link" UX.
 - Goes in a Slack DM / IM / paste.
 
 #### Self (personal-access) token
@@ -163,7 +164,8 @@ The auth model is intentionally lightweight: bearer tokens in the URL fragment, 
 - Long-lived (default 90 days, auto-renewed when the device connects; user can set "no expiry" or shorter).
 - Scoped to *all* of the host's surfaces — same trust as a desktop login.
 - Read-write.
-- Initial transfer to the new device via QR code or one-click "send to my phone" / password-manager save.
+- **Encoding: short-lived redemption code, not the raw token.** Host wmux shows a 6–8-character code (e.g. `3-foggy-puppet` style) as a QR + plaintext on screen. New device opens the rendezvous URL, presents the redemption code over WSS, and receives the real long-lived token + saves it to local secure storage (keychain on macOS, Credential Manager on Windows, equivalent on Linux). The redemption code expires after ~5 minutes whether it's been redeemed or not. The real long-lived token never appears in any URL or browser history.
+- Initial transfer to the new device: QR scan on phone, or copy-paste the short code if no camera handy.
 
 #### Storage
 
@@ -404,20 +406,41 @@ Each user (or team / org) runs their own rendezvous server — see the non-goals
 - "I don't have one yet" → opens the docs page with the Tier 1 deployment options + a 5-minute Fly.io walkthrough.
 - Future: a `wmux collab-server quickstart` CLI subcommand that runs through Fly.io setup interactively. Not in initial scope.
 
-### Mobile PWA
+### Mobile PWA — what it is and how it gets onto a phone
 
-The web viewer at `/s/:code` is built as a Progressive Web App from day one:
-- Web App Manifest with icons and `display: standalone`.
-- Service worker for offline-cache of the static assets (xterm.js + the page itself).
+The mobile viewer is a **Progressive Web App (PWA)**, not a native iOS/Android app. For the mobile-unfamiliar reader, the short version:
+
+A PWA is a regular web page with two extras: a small "manifest" file (icon, name, colors) and a "service worker" (cached JS that lets it load offline). Together they let mobile browsers treat the page as an installable app instead of a tab.
+
+**How a viewer ends up with the "app" on their phone:**
+
+1. Host sends them a share link (e.g. via Slack) or shows them a QR code.
+2. They open it in their phone's browser. Just a web page — no install yet.
+3. The browser sees the PWA manifest and offers "Add to Home Screen" (iOS Safari: share button → Add to Home Screen; Android Chrome: usually a banner prompt).
+4. They tap accept. An icon appears on their home screen.
+5. Tapping the icon launches the viewer in fullscreen mode (no browser address bar) — feels like a regular app.
+
+Subsequent launches are fast because the service worker has cached the assets locally. Updates happen automatically when wmux's rendezvous serves a new build.
+
+**Why we use a PWA instead of a native app:**
+
+- **One codebase.** The same files at `collab-server/static/` serve desktop browsers AND mobile, with only CSS / touch-handler differences. No iOS or Android project to maintain.
+- **No app stores.** No Apple Developer fees, no app review, no Google Play console. Users get the link, add to home screen, done.
+- **Updates are instant.** No release cycle — push a new version of the static files, users get it next launch.
+- **Works on iPad / desktop the same way.** Same code, same install flow on any platform.
+
+What PWAs can't do that we don't need: background processing, Bluetooth, push notifications on iOS (technically possible since iOS 16.4 but with restrictions). For "render a terminal and talk WebRTC," PWAs are fully sufficient.
+
+Concretely, the implementation work is:
+- Web App Manifest (`/manifest.webmanifest`) with icons + `display: standalone`.
+- Service worker (`/sw.js`) that caches xterm.js and the viewer page.
 - Touch-friendly xterm.js config: pinch-zoom, tap-and-hold-to-select, virtual-keyboard handling.
-- iOS Safari + Android Chrome both support PWAs adequately for this use case.
 
-Writing a native iOS/Android app is explicitly **not in scope** — the PWA covers the mobile use case at a fraction of the engineering cost.
+Writing a native iOS/Android app is a non-goal — the PWA covers the mobile case at a fraction of the engineering cost.
 
 ### Open questions
 
-1. **Token-secret transport.** URL fragments don't appear in server logs but *do* show up in browser history. Alternative: short-lived "redemption code" (a few digits) that's exchanged for the real long-lived token over WSS. Slightly more friction for the user; better security posture. Probably do the redemption-code variant for `self` tokens, raw token in fragment for `share` tokens.
-3. **TURN credentials.** TURN servers traditionally use short-lived credentials issued by the signaling server. Plenty of well-known patterns; needs a small implementation in the rendezvous.
+1. **TURN credentials.** TURN servers traditionally use short-lived credentials issued by the signaling server. Plenty of well-known patterns; needs a small implementation in the rendezvous.
 
 ---
 

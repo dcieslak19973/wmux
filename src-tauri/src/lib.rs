@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 mod browser_helpers;
+mod code_mode;
 mod control_bridge;
 mod commands;
 mod conpty;

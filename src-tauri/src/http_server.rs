@@ -103,7 +103,7 @@ const INFO_JSON: &str = r#"{
     {
       "method": "POST",
       "path": "/mcp",
-    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, list_workspaces, switch_workspace, new_workspace, close_workspace, list_tabs, create_tab, focus_tab, close_tab, move_tab, list_panes, split_pane, focus_pane, close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
+    "description": "MCP (Model Context Protocol) server — Streamable HTTP transport, JSON-RPC 2.0. Tools: get_blocks, list_sessions, list_agents, ask_agent, broadcast, list_workspaces, switch_workspace, new_workspace, close_workspace, list_tabs, create_tab, focus_tab, close_tab, move_tab, list_panes, split_pane, focus_pane, close_pane, get_layout, pane_send_text, pane_send_keys, pane_read_screen, wmux_eval, workbook_create, workbook_update, workbook_delete, workbook_open, workbook_list, workbook_get, workbook_add_chart, workbook_update_chart, workbook_remove_chart, workbook_reorder_charts, browser_list, browser_open, browser_navigate, browser_back, browser_forward, browser_close, browser_read_content. Configure in Claude Code with: claude mcp add --transport http wmux $WMUX_API_BASE/mcp"
     }
   ],
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
@@ -653,6 +653,18 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
                         }
                     },
                     {
+                        "name": "wmux_eval",
+                        "description": "**SPIKE — server-side script execution.** Run a JavaScript script in a sandboxed boa engine with selected wmux MCP tools bound as synchronous global functions. Lets you collapse multi-step workflows (e.g. 'new workspace + create tab + split twice + send commands') into a single MCP call. Bound tools (v0): list_workspaces, list_tabs, list_panes, get_layout, list_agents, list_sessions, ask_agent, pane_send_text, pane_send_keys, pane_read_screen, browser_list, browser_open, browser_navigate. Each is a synchronous JS function — call without `await`. Each takes a single optional object argument matching the tool's MCP input schema, and returns the tool's parsed JSON result. Throws on tool error. Script's final expression value is returned as JSON. Default 10s timeout, max 60s.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "script": { "type": "string", "description": "JS source. Example: `const ws = list_workspaces(); ws.length;` or `const tabs = list_tabs(); for (const t of tabs) { pane_send_text({pane_id: t.paneIds[0], text: 'date', append_enter: true}); } 'done';`. Sync API — no Promises, no await." },
+                                "timeout_ms": { "type": "integer", "description": "Wall-clock limit in ms (default 10000, max 60000)." }
+                            },
+                            "required": ["script"]
+                        }
+                    },
+                    {
                         "name": "pane_read_screen",
                         "description": "Return the current ANSI-stripped scrollback for a pane. Unlike get_blocks (which is OSC 133 prompt-bounded), this returns the raw terminal contents — useful when there's no prompt (TUIs, partial output, agents that don't emit OSC 133). Optionally limit to the last N lines.",
                         "inputSchema": {
@@ -944,7 +956,7 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
     (200, json_rpc_ok(id, result))
 }
 
-async fn dispatch_tool(
+pub async fn dispatch_tool(
     name: &str,
     args: &serde_json::Value,
     manager: &SessionManager,
@@ -1115,6 +1127,26 @@ async fn dispatch_tool(
         "get_layout" => {
             let result = bridge.request(app, "get-layout", serde_json::Value::Null).await?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        // ── Code Mode (spike) ──────────────────────────────────────────
+        // Runs an agent-supplied JS script with hand-picked MCP tools bound
+        // as global functions. See code_mode.rs for the bindings list.
+        "wmux_eval" => {
+            let script = args["script"]
+                .as_str()
+                .ok_or_else(|| "script is required".to_string())?;
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10_000);
+            crate::code_mode::eval_script(
+                script.to_string(),
+                timeout_ms,
+                manager.clone(),
+                app.clone(),
+                bridge.clone(),
+            )
+            .await
         }
         // ── Pane input/output tools ─────────────────────────────────────
         // Direct PTY access. write_to() bypasses the JS bridge — these are

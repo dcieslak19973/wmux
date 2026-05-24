@@ -36,6 +36,7 @@ import { createSurfaceRuntime } from './surfaces_runtime.mjs';
 import { createPrReviewRuntime } from './pr_review_runtime.mjs';
 import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
 import { createActivityLogRuntime } from './activity_log_runtime.mjs';
+import { createKeybindingsRuntime } from './keybindings_runtime.mjs';
 import { createPaneRegistry } from './pane_registry.mjs';
 import {
   createWorkspaceManager,
@@ -3566,174 +3567,352 @@ function closeCurrentSurface() {
 
 // Keyboard shortcuts
 
-document.addEventListener('keydown', (e) => {
-  const ctrl  = e.ctrlKey;
-  const shift = e.shiftKey;
-  const alt   = e.altKey;
-  const key   = e.key;
-  const editableTarget = isEditableTarget(e.target);
+// ─────────────────────────────────────────────────────────────────────────────
+// Global keybindings
+//
+// All app-level keyboard shortcuts go through `keybindingsRuntime`. Phase A:
+// pure refactor — every binding here was previously a hardcoded `if (ctrl &&
+// shift && ...)` branch in this file's keydown handler. Defaults preserved
+// exactly. Phase B will add user overrides from a JSON config; Phase C adds
+// a settings UI. See docs / project_roadmap.md "Customizable keybindings".
+//
+// Conventions:
+//   * Chord format: `[ctrl+][alt+][shift+][meta+]<key>` (modifiers
+//     alphabetical, key lowercased). e.g. `ctrl+shift+l`, `ctrl+alt+arrowleft`.
+//   * Multiple chords per command are supported (paste = ctrl+v AND
+//     shift+insert; h-split picker = ctrl+shift+\ AND ctrl+shift+| because of
+//     keyboard-layout shift-modify behavior).
+//   * Commands that need context gating (e.g. "Ctrl+L focuses the browser URL
+//     only when there's a browser pane to focus") return `false` from their
+//     handler when they don't actually consume the event, so the event falls
+//     through to OS / browser defaults.
+// ─────────────────────────────────────────────────────────────────────────────
 
-  if (!editableTarget && activePaneId && ((ctrl && !alt && !shift && key.toLowerCase() === 'v') || (!ctrl && !alt && shift && key === 'Insert'))) {
-    e.preventDefault();
+const keybindingsRuntime = createKeybindingsRuntime();
+
+keybindingsRuntime.register({
+  id: 'pane.paste',
+  label: 'Paste clipboard into active pane',
+  defaultBindings: ['ctrl+v', 'shift+insert'],
+  shouldRun: (e) => !isEditableTarget(e.target) && !!activePaneId,
+  handler: () => {
     void pasteClipboardIntoActivePane().catch((err) => {
       showError(`Could not paste clipboard: ${err}`);
     });
-    return;
-  }
+  },
+});
 
-  if (ctrl && shift && key === 'T') { e.preventDefault(); createTab(getDefaultTarget()); return; }
-  if (ctrl && shift && !alt && key.toUpperCase() === 'A') { e.preventDefault(); agentSidebarRuntime?.toggle(); return; }
-  if (ctrl && shift && key === 'W') { e.preventDefault(); closeCurrentSurface(); return; }
-  // Ctrl+W without shift: close active pane/surface. Intercepted here so WebView2's
-  // built-in "close window" shortcut doesn't fire and take down the whole app.
-  if (ctrl && !shift && !alt && key === 'w') { e.preventDefault(); if (!closeCurrentSurface() && activePaneId) closePane(activePaneId); return; }
+keybindingsRuntime.register({
+  id: 'tab.new',
+  label: 'New tab',
+  defaultBindings: ['ctrl+shift+t'],
+  handler: () => createTab(getDefaultTarget()),
+});
 
-  if (ctrl && shift && (key === '\\' || key === '|')) { e.preventDefault(); if (activePaneId) { const r = panes.get(activePaneId)?.domEl?.getBoundingClientRect(); if (r) showSplitTypePicker(activePaneId, 'h', r.left + r.width / 2 - 70, r.top + r.height / 2 - 40); } return; }
-  if (ctrl && shift && (key === '_' || key === '-')) { e.preventDefault(); if (activePaneId) { const r = panes.get(activePaneId)?.domEl?.getBoundingClientRect(); if (r) showSplitTypePicker(activePaneId, 'v', r.left + r.width / 2 - 70, r.top + r.height / 2 - 40); } return; }
+keybindingsRuntime.register({
+  id: 'sidebar.agent.toggle',
+  label: 'Toggle agent sidebar',
+  defaultBindings: ['ctrl+shift+a'],
+  handler: () => agentSidebarRuntime?.toggle(),
+});
 
-  if (ctrl && key === 'Tab') {
-    e.preventDefault();
-    const wsTabIds = [...tabs.values()]
-      .filter(t => t.workspaceId === activeWorkspaceId)
-      .map(t => t.tabId);
-    if (wsTabIds.length < 2) return;
-    const idx  = wsTabIds.indexOf(activeTabId);
-    const next = shift
-      ? wsTabIds[(idx - 1 + wsTabIds.length) % wsTabIds.length]
-      : wsTabIds[(idx + 1) % wsTabIds.length];
-    activateTab(next);
-    return;
-  }
+keybindingsRuntime.register({
+  id: 'surface.close',
+  label: 'Close current surface',
+  defaultBindings: ['ctrl+shift+w'],
+  handler: () => closeCurrentSurface(),
+});
 
-  if (ctrl && !shift && !alt && key === 'i') { e.preventDefault(); toggleNotifPanel(); return; }
-  if (ctrl && shift && !alt && key.toUpperCase() === 'L') { e.preventDefault(); activityLogRuntime?.toggle(); return; }
+keybindingsRuntime.register({
+  // Without shift: close active pane/surface. Intercepted so WebView2's built-in
+  // "close window" shortcut doesn't fire and take down the whole app.
+  id: 'pane.close',
+  label: 'Close active pane',
+  defaultBindings: ['ctrl+w'],
+  handler: () => { if (!closeCurrentSurface() && activePaneId) closePane(activePaneId); },
+});
 
-  if (ctrl && shift && !alt && key.toUpperCase() === 'O') {
-    e.preventDefault();
-    previewArtifactFromPane();
-    return;
-  }
+const showHSplitPicker = () => {
+  if (!activePaneId) return;
+  const r = panes.get(activePaneId)?.domEl?.getBoundingClientRect();
+  if (r) showSplitTypePicker(activePaneId, 'h', r.left + r.width / 2 - 70, r.top + r.height / 2 - 40);
+};
+keybindingsRuntime.register({
+  id: 'pane.split.horizontal',
+  label: 'Split pane horizontally',
+  // Both \ and | so the binding fires regardless of whether the layout's
+  // Shift+\ produces \ or |.
+  defaultBindings: ['ctrl+shift+\\', 'ctrl+shift+|'],
+  handler: showHSplitPicker,
+});
 
-  if (ctrl && shift && !alt && key.toUpperCase() === 'J') {
-    e.preventDefault();
-    void toggleSessionVaultPanel();
-    return;
-  }
+const showVSplitPicker = () => {
+  if (!activePaneId) return;
+  const r = panes.get(activePaneId)?.domEl?.getBoundingClientRect();
+  if (r) showSplitTypePicker(activePaneId, 'v', r.left + r.width / 2 - 70, r.top + r.height / 2 - 40);
+};
+keybindingsRuntime.register({
+  id: 'pane.split.vertical',
+  label: 'Split pane vertically',
+  defaultBindings: ['ctrl+shift+-', 'ctrl+shift+_'],
+  handler: showVSplitPicker,
+});
 
-  if (ctrl && shift && key === 'U') {
-    e.preventDefault();
+const cycleTab = (direction) => {
+  const wsTabIds = [...tabs.values()]
+    .filter((t) => t.workspaceId === activeWorkspaceId)
+    .map((t) => t.tabId);
+  if (wsTabIds.length < 2) return;
+  const idx = wsTabIds.indexOf(activeTabId);
+  const next = direction === 'prev'
+    ? wsTabIds[(idx - 1 + wsTabIds.length) % wsTabIds.length]
+    : wsTabIds[(idx + 1) % wsTabIds.length];
+  activateTab(next);
+};
+keybindingsRuntime.register({
+  id: 'tab.next',
+  label: 'Next tab',
+  defaultBindings: ['ctrl+tab'],
+  handler: () => cycleTab('next'),
+});
+keybindingsRuntime.register({
+  id: 'tab.prev',
+  label: 'Previous tab',
+  defaultBindings: ['ctrl+shift+tab'],
+  handler: () => cycleTab('prev'),
+});
+
+keybindingsRuntime.register({
+  id: 'panel.notifications.toggle',
+  label: 'Toggle notifications panel',
+  defaultBindings: ['ctrl+i'],
+  handler: () => toggleNotifPanel(),
+});
+
+// NB: the legacy code had TWO Ctrl+Shift+L bindings; the activity-log one
+// ran first and `return`ed, so the "open browser pane" binding at the same
+// chord was dead. Preserving that behavior: activity log keeps Ctrl+Shift+L,
+// browser-split has no default binding for now (TODO: pick a different chord).
+keybindingsRuntime.register({
+  id: 'panel.activity-log.toggle',
+  label: 'Toggle activity log',
+  defaultBindings: ['ctrl+shift+l'],
+  handler: () => activityLogRuntime?.toggle(),
+});
+keybindingsRuntime.register({
+  id: 'pane.browser.split',
+  label: 'Split with browser pane',
+  defaultBindings: [], // Was Ctrl+Shift+L in legacy code but shadowed by activity-log; left unbound.
+  handler: () => {
+    if (activePaneId) splitPaneWithBrowser(activePaneId, 'h');
+    else if (activeTabId) openBrowserSplitForTab(activeTabId);
+  },
+});
+
+keybindingsRuntime.register({
+  id: 'pane.artifact.preview',
+  label: 'Preview HTML artifact from active pane',
+  defaultBindings: ['ctrl+shift+o'],
+  handler: () => previewArtifactFromPane(),
+});
+
+keybindingsRuntime.register({
+  id: 'panel.session-vault.toggle',
+  label: 'Toggle session vault panel',
+  defaultBindings: ['ctrl+shift+j'],
+  handler: () => { void toggleSessionVaultPanel(); },
+});
+
+keybindingsRuntime.register({
+  id: 'notifications.jump-to-unread',
+  label: 'Jump to latest unread notification',
+  defaultBindings: ['ctrl+shift+u'],
+  handler: () => {
     const unread = [...tabs.values()]
-      .filter(t => t.workspaceId === activeWorkspaceId && unreadNotificationCount(t.tabId) > 0);
+      .filter((t) => t.workspaceId === activeWorkspaceId && unreadNotificationCount(t.tabId) > 0);
     if (unread.length > 0) activateTab(unread[unread.length - 1].tabId);
     else {
-      const allNotif = [...tabs.values()].filter(t => unreadNotificationCount(t.tabId) > 0);
+      const allNotif = [...tabs.values()].filter((t) => unreadNotificationCount(t.tabId) > 0);
       if (allNotif.length > 0) {
         const t = allNotif[allNotif.length - 1];
         switchWorkspace(t.workspaceId);
         activateTab(t.tabId);
       }
     }
-    return;
-  }
+  },
+});
 
-  if (ctrl && alt && key.toLowerCase() === 'h') { e.preventDefault(); showHistoryPicker(); return; }
-  if (ctrl && !shift && !alt && key === 'f') { e.preventDefault(); showFindBar(); return; }
+keybindingsRuntime.register({
+  id: 'pane.history.picker',
+  label: 'Show command-history picker',
+  defaultBindings: ['ctrl+alt+h'],
+  handler: () => showHistoryPicker(),
+});
 
-  if (ctrl && shift && !alt && key.toUpperCase() === 'L') {
-    e.preventDefault();
-    if (activePaneId) splitPaneWithBrowser(activePaneId, 'h');
-    else if (activeTabId) openBrowserSplitForTab(activeTabId);
-    return;
-  }
+keybindingsRuntime.register({
+  id: 'pane.find',
+  label: 'Find in active pane',
+  defaultBindings: ['ctrl+f'],
+  handler: () => showFindBar(),
+});
 
-  if (ctrl && shift && !alt && key.toUpperCase() === 'M') {
-    e.preventDefault();
+keybindingsRuntime.register({
+  id: 'pane.markdown.split',
+  label: 'Split with markdown pane',
+  defaultBindings: ['ctrl+shift+m'],
+  handler: () => {
     if (activePaneId) splitPaneWithMarkdown(activePaneId, 'h');
     else if (activeTabId) openMarkdownSplitForTab(activeTabId);
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key.toLowerCase() === 'l' && focusBrowserUrl()) {
-    e.preventDefault();
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key === '[' && browserNavigateRelative('back')) {
-    e.preventDefault();
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key === ']' && browserNavigateRelative('forward')) {
-    e.preventDefault();
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key.toLowerCase() === 'r' && reloadActiveBrowser()) {
-    e.preventDefault();
-    return;
-  }
-
-  if (ctrl && !shift && !alt && key === 'k') {
-    const pane = panes.get(activePaneId);
-    if (pane) { e.preventDefault(); pane.terminal.clear(); }
-    return;
-  }
-
-  if (ctrl && !shift && !alt) {
-    const pane = panes.get(activePaneId);
-    if (key === ',' && !pane) { e.preventDefault(); showSettingsPanel(); return; }
-    if (!pane) return;
-    if (key === '=' || key === '+') {
-      e.preventDefault();
-      const ns = Math.min(32, (pane.terminal.options.fontSize ?? 13) + 1);
-      for (const [id, p] of panes) { p.terminal.options.fontSize = ns; fitAndResizePane(id); }
-      const sv = loadSettings(); sv.fontSize = ns; saveSettings(sv);
-      return;
-    }
-    if (key === '-' || key === '_') {
-      e.preventDefault();
-      const ns = Math.max(8, (pane.terminal.options.fontSize ?? 13) - 1);
-      for (const [id, p] of panes) { p.terminal.options.fontSize = ns; fitAndResizePane(id); }
-      const sv = loadSettings(); sv.fontSize = ns; saveSettings(sv);
-      return;
-    }
-    if (key === '0') {
-      e.preventDefault();
-      const ns = SETTINGS_DEFAULTS.fontSize;
-      for (const [id, p] of panes) { p.terminal.options.fontSize = ns; fitAndResizePane(id); }
-      const sv = loadSettings(); sv.fontSize = ns; saveSettings(sv);
-      return;
-    }
-    if (key === ',') { e.preventDefault(); showSettingsPanel(); return; }
-  }
-
-  if (ctrl && alt && key.toLowerCase() === 'n') { e.preventDefault(); createWorkspace(); return; }
-  if (alt && ctrl && key === 'ArrowLeft') { e.preventDefault(); focusAdjacentSurface('left'); return; }
-  if (alt && ctrl && key === 'ArrowRight') { e.preventDefault(); focusAdjacentSurface('right'); return; }
-  if (alt && ctrl && key === 'ArrowUp') { e.preventDefault(); focusAdjacentSurface('up'); return; }
-  if (alt && ctrl && key === 'ArrowDown') { e.preventDefault(); focusAdjacentSurface('down'); return; }
-  if (ctrl && alt && (key === '[' || key === '{')) {
-    e.preventDefault();
-    const ids = orderedWorkspaceIds();
-    const i = ids.indexOf(activeWorkspaceId);
-    if (i > 0) switchWorkspace(ids[i - 1]);
-    return;
-  }
-  if (ctrl && alt && (key === ']' || key === '}')) {
-    e.preventDefault();
-    const ids = orderedWorkspaceIds();
-    const i = ids.indexOf(activeWorkspaceId);
-    if (i < ids.length - 1) switchWorkspace(ids[i + 1]);
-    return;
-  }
-  if (ctrl && alt && /^[1-9]$/.test(key)) {
-    e.preventDefault();
-    const n = parseInt(key, 10) - 1;
-    const ids = orderedWorkspaceIds();
-    if (ids[n]) switchWorkspace(ids[n]);
-    return;
-  }
+  },
 });
+
+keybindingsRuntime.register({
+  id: 'browser.url.focus',
+  label: 'Focus browser-pane URL bar',
+  defaultBindings: ['ctrl+l'],
+  // focusBrowserUrl returns truthy when there was a browser pane to focus;
+  // falsy means no browser pane => let the event fall through.
+  handler: () => focusBrowserUrl() || false,
+});
+
+keybindingsRuntime.register({
+  id: 'browser.back',
+  label: 'Browser back',
+  defaultBindings: ['ctrl+['],
+  handler: () => browserNavigateRelative('back') || false,
+});
+
+keybindingsRuntime.register({
+  id: 'browser.forward',
+  label: 'Browser forward',
+  defaultBindings: ['ctrl+]'],
+  handler: () => browserNavigateRelative('forward') || false,
+});
+
+keybindingsRuntime.register({
+  id: 'browser.reload',
+  label: 'Reload browser pane',
+  defaultBindings: ['ctrl+r'],
+  handler: () => reloadActiveBrowser() || false,
+});
+
+keybindingsRuntime.register({
+  id: 'pane.terminal.clear',
+  label: 'Clear active terminal pane',
+  defaultBindings: ['ctrl+k'],
+  shouldRun: () => !!panes.get(activePaneId),
+  handler: () => { panes.get(activePaneId)?.terminal?.clear(); },
+});
+
+keybindingsRuntime.register({
+  id: 'settings.open',
+  label: 'Open settings',
+  defaultBindings: ['ctrl+,'],
+  handler: () => showSettingsPanel(),
+});
+
+const adjustFontSize = (delta) => {
+  const pane = panes.get(activePaneId);
+  if (!pane) return false;
+  const current = pane.terminal.options.fontSize ?? 13;
+  const ns = delta === 'reset'
+    ? SETTINGS_DEFAULTS.fontSize
+    : Math.max(8, Math.min(32, current + delta));
+  for (const [id, p] of panes) { p.terminal.options.fontSize = ns; fitAndResizePane(id); }
+  const sv = loadSettings(); sv.fontSize = ns; saveSettings(sv);
+};
+keybindingsRuntime.register({
+  id: 'pane.font.increase',
+  label: 'Increase terminal font size',
+  // Legacy code required no-shift; user pressing Ctrl+= alone with no shift
+  // is the only case that fires. Some layouts produce '+' unmodified — kept
+  // as a defensive alias.
+  defaultBindings: ['ctrl+=', 'ctrl++'],
+  shouldRun: () => !!panes.get(activePaneId),
+  handler: () => adjustFontSize(1),
+});
+keybindingsRuntime.register({
+  id: 'pane.font.decrease',
+  label: 'Decrease terminal font size',
+  defaultBindings: ['ctrl+-', 'ctrl+_'],
+  shouldRun: () => !!panes.get(activePaneId),
+  handler: () => adjustFontSize(-1),
+});
+keybindingsRuntime.register({
+  id: 'pane.font.reset',
+  label: 'Reset terminal font size',
+  defaultBindings: ['ctrl+0'],
+  shouldRun: () => !!panes.get(activePaneId),
+  handler: () => adjustFontSize('reset'),
+});
+
+keybindingsRuntime.register({
+  id: 'workspace.new',
+  label: 'New workspace',
+  defaultBindings: ['ctrl+alt+n'],
+  handler: () => createWorkspace(),
+});
+
+keybindingsRuntime.register({
+  id: 'surface.focus.left',
+  label: 'Focus pane to the left',
+  defaultBindings: ['ctrl+alt+arrowleft'],
+  handler: () => focusAdjacentSurface('left'),
+});
+keybindingsRuntime.register({
+  id: 'surface.focus.right',
+  label: 'Focus pane to the right',
+  defaultBindings: ['ctrl+alt+arrowright'],
+  handler: () => focusAdjacentSurface('right'),
+});
+keybindingsRuntime.register({
+  id: 'surface.focus.up',
+  label: 'Focus pane above',
+  defaultBindings: ['ctrl+alt+arrowup'],
+  handler: () => focusAdjacentSurface('up'),
+});
+keybindingsRuntime.register({
+  id: 'surface.focus.down',
+  label: 'Focus pane below',
+  defaultBindings: ['ctrl+alt+arrowdown'],
+  handler: () => focusAdjacentSurface('down'),
+});
+
+const switchWorkspaceBy = (delta) => {
+  const ids = orderedWorkspaceIds();
+  const i = ids.indexOf(activeWorkspaceId);
+  const next = i + delta;
+  if (next >= 0 && next < ids.length) switchWorkspace(ids[next]);
+};
+keybindingsRuntime.register({
+  id: 'workspace.prev',
+  label: 'Previous workspace',
+  defaultBindings: ['ctrl+alt+[', 'ctrl+alt+{'],
+  handler: () => switchWorkspaceBy(-1),
+});
+keybindingsRuntime.register({
+  id: 'workspace.next',
+  label: 'Next workspace',
+  defaultBindings: ['ctrl+alt+]', 'ctrl+alt+}'],
+  handler: () => switchWorkspaceBy(1),
+});
+
+// Workspace 1-9 by number — registered as individual commands so each is
+// independently rebindable.
+for (let n = 1; n <= 9; n += 1) {
+  const idx = n - 1;
+  keybindingsRuntime.register({
+    id: `workspace.switch.${n}`,
+    label: `Switch to workspace ${n}`,
+    defaultBindings: [`ctrl+alt+${n}`],
+    handler: () => {
+      const ids = orderedWorkspaceIds();
+      if (ids[idx]) switchWorkspace(ids[idx]);
+    },
+  });
+}
+
+document.addEventListener('keydown', (e) => keybindingsRuntime.dispatch(e));
 
 // Boot
 

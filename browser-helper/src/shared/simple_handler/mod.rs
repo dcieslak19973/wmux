@@ -328,6 +328,49 @@ wrap_life_span_handler! {
             let mut inner = self.inner.lock().expect("Failed to lock inner");
             inner.on_before_close(browser);
         }
+
+        // Intercept popup creation when running offscreen. Without this,
+        // clicks on links with target=_blank (e.g. every Google search
+        // result) cause CEF to open a brand-new top-level Chromium window
+        // — which doesn't inherit --offscreen, so it shows in the taskbar
+        // and isn't captured by our screencast. We cancel the popup and
+        // load the target URL in the current main frame instead, so the
+        // canvas sees the navigation.
+        //
+        // Only applies when --offscreen is in effect — legitimate popup
+        // usage (OAuth windows, devtools, etc.) is preserved for the
+        // standalone CEF helper path.
+        fn on_before_popup(
+            &self,
+            browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _popup_id: i32,
+            target_url: Option<&CefString>,
+            _target_frame_name: Option<&CefString>,
+            _target_disposition: WindowOpenDisposition,
+            _user_gesture: i32,
+            _popup_features: Option<&PopupFeatures>,
+            _window_info: Option<&mut WindowInfo>,
+            _client: Option<&mut Option<Client>>,
+            _settings: Option<&mut BrowserSettings>,
+            _extra_info: Option<&mut Option<DictionaryValue>>,
+            _no_javascript_access: Option<&mut i32>,
+        ) -> i32 {
+            let offscreen = command_line_get_global()
+                .map(|cl| cl.has_switch(Some(&CefString::from("offscreen"))) != 0)
+                .unwrap_or(false);
+            if !offscreen {
+                // Standalone helper path — keep CEF's default behavior
+                // (create a separate top-level window for popups).
+                return 0;
+            }
+            if let (Some(browser), Some(url)) = (browser, target_url) {
+                if let Some(mut main_frame) = browser.main_frame() {
+                    main_frame.load_url(Some(url));
+                }
+            }
+            1 // cancel popup
+        }
     }
 }
 

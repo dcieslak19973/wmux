@@ -17,7 +17,7 @@ import { invoke } from '@tauri-apps/api/core';
  *
  * Returns an object with `dispose()` to tear down (kill helper, close WS).
  */
-export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = {}) {
+export async function createCefEmbeddedSurface(mountEl, url) {
   // --- 1. Spawn helper offscreen --------------------------------------------
   // `spawn_browser_helper` is the same Tauri command the existing CEF button
   // uses; we just pass offscreen=true so the window goes off-screen instead
@@ -50,14 +50,29 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
   mountEl.appendChild(container);
 
   const ctx = canvas.getContext('2d');
-  // Match the canvas pixel buffer to its rendered CSS size so the screencast
-  // frames map 1:1. We'll re-sync on resize.
-  function syncCanvasSize() {
+  // Match the canvas pixel buffer to device pixels (CSS pixels × DPR) so
+  // that on high-DPI displays the canvas doesn't internally upscale a
+  // smaller buffer. We'll also tell CEF to render at this size via
+  // Emulation.setDeviceMetricsOverride so screencast frames arrive at
+  // matching resolution — drawImage then does no upscaling and text
+  // stays crisp.
+  function getCanvasDims() {
     const rect = canvas.getBoundingClientRect();
-    const w = Math.max(1, Math.round(rect.width));
-    const h = Math.max(1, Math.round(rect.height));
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
+    const dpr = window.devicePixelRatio || 1;
+    const wCss = Math.max(1, Math.round(rect.width));
+    const hCss = Math.max(1, Math.round(rect.height));
+    return {
+      wCss,
+      hCss,
+      dpr,
+      wDev: Math.round(wCss * dpr),
+      hDev: Math.round(hCss * dpr),
+    };
+  }
+  function syncCanvasSize() {
+    const { wDev, hDev } = getCanvasDims();
+    if (canvas.width !== wDev) canvas.width = wDev;
+    if (canvas.height !== hDev) canvas.height = hDev;
   }
   syncCanvasSize();
 
@@ -88,10 +103,6 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
 
   ws.addEventListener('open', () => {
     status.textContent = 'Connected — waiting for first frame…';
-    // Page.enable is required before Page.* events (including
-    // screencastFrame) will be delivered. CDP queues requests in order, so
-    // we don't need to await a response — the enable will be processed
-    // before startScreencast.
     sendCdp('Page.enable');
     // Force the page to the foreground in Chromium's eyes. With the helper
     // window moved off-screen, the renderer can otherwise decide the page
@@ -99,11 +110,25 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
     // flags on the helper spawn path. bringToFront is the belt to those
     // flags' suspenders.
     sendCdp('Page.bringToFront');
+    // Tell CEF to render the page at the canvas's actual device-pixel
+    // dimensions. Without this, the helper renders at its native window
+    // size (~800×600 default popup) and screencast hands us a small JPEG
+    // that we then scale up — blurry text. With it, the rendered viewport
+    // matches the screencast capture matches the canvas buffer, 1:1.
+    const dims = getCanvasDims();
+    sendCdp('Emulation.setDeviceMetricsOverride', {
+      width: dims.wCss,
+      height: dims.hCss,
+      deviceScaleFactor: dims.dpr,
+      mobile: false,
+    });
+    // PNG instead of JPEG: lossless, so text stays sharp regardless of
+    // quality settings. Bandwidth is higher than JPEG but for typical
+    // browsing this is a much better tradeoff than fuzzy text.
     sendCdp('Page.startScreencast', {
-      format: 'jpeg',
-      quality,
-      maxWidth: canvas.width,
-      maxHeight: canvas.height,
+      format: 'png',
+      maxWidth: dims.wDev,
+      maxHeight: dims.hDev,
       everyNthFrame: 1,
     });
   });
@@ -170,7 +195,7 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
       // Still ack on decode failure so we don't deadlock the stream.
       sendCdp('Page.screencastFrameAck', { sessionId });
     };
-    img.src = 'data:image/jpeg;base64,' + data;
+    img.src = 'data:image/png;base64,' + data;
     // Reserved for future: metadata has scrollOffsetX/Y, pageScaleFactor,
     // deviceWidth/Height — useful when we wire input forwarding so click
     // coordinates correctly translate.
@@ -186,10 +211,15 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
   // sync them in syncCanvasSize() — but use a helper anyway in case a
   // device pixel ratio difference creeps in later.
   function eventToPagePoint(e) {
+    // CDP Input.dispatchMouseEvent x/y are CSS-pixel coordinates against
+    // the viewport set via Emulation.setDeviceMetricsOverride. Don't apply
+    // the canvas-to-device-pixel scaling here — clientX/Y minus the rect
+    // origin is already in CSS pixels.
     const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-    return { x: Math.round(x), y: Math.round(y) };
+    return {
+      x: Math.round(e.clientX - rect.left),
+      y: Math.round(e.clientY - rect.top),
+    };
   }
   function mouseEventModifiers(e) {
     // CDP modifiers bitmask: 1=Alt, 2=Ctrl, 4=Meta, 8=Shift.
@@ -328,12 +358,18 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
   const resizeObserver = new ResizeObserver(() => {
     syncCanvasSize();
     if (ws.readyState === WebSocket.OPEN) {
+      const dims = getCanvasDims();
       sendCdp('Page.stopScreencast');
+      sendCdp('Emulation.setDeviceMetricsOverride', {
+        width: dims.wCss,
+        height: dims.hCss,
+        deviceScaleFactor: dims.dpr,
+        mobile: false,
+      });
       sendCdp('Page.startScreencast', {
-        format: 'jpeg',
-        quality,
-        maxWidth: canvas.width,
-        maxHeight: canvas.height,
+        format: 'png',
+        maxWidth: dims.wDev,
+        maxHeight: dims.hDev,
         everyNthFrame: 1,
       });
     }

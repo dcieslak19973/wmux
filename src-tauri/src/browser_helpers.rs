@@ -15,6 +15,7 @@
 //!   the helper via CDP to read DOM/text)
 
 use std::collections::HashMap;
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -34,9 +35,14 @@ pub struct HelperEntry {
     pub cdp_url: String,
 }
 
+/// Two maps to keep `HelperInfo` (which is `Clone + Serialize`) decoupled from
+/// `Child` (which is neither). `infos` is the public registry queried via
+/// `get` / `snapshot`; `children` owns the Child handles so we can kill them
+/// on `kill(label)`.
 #[derive(Default, Clone)]
 pub struct BrowserHelpers {
-    inner: Arc<Mutex<HashMap<String, HelperInfo>>>,
+    infos: Arc<Mutex<HashMap<String, HelperInfo>>>,
+    children: Arc<Mutex<HashMap<String, Child>>>,
 }
 
 impl BrowserHelpers {
@@ -44,17 +50,32 @@ impl BrowserHelpers {
         Self::default()
     }
 
-    pub fn register(&self, label: String, info: HelperInfo) {
-        self.inner.lock().unwrap().insert(label, info);
+    pub fn register(&self, label: String, info: HelperInfo, child: Child) {
+        self.infos.lock().unwrap().insert(label.clone(), info);
+        self.children.lock().unwrap().insert(label, child);
     }
 
     pub fn get(&self, label: &str) -> Option<HelperInfo> {
-        self.inner.lock().unwrap().get(label).cloned()
+        self.infos.lock().unwrap().get(label).cloned()
+    }
+
+    /// Kill the helper process and remove its registry entry. Returns true if
+    /// a helper was registered under this label, false otherwise. Safe to call
+    /// when the helper has already exited (e.g. user closed the window) — we
+    /// best-effort kill and then `wait()` to reap.
+    pub fn kill(&self, label: &str) -> bool {
+        let child = self.children.lock().unwrap().remove(label);
+        let removed = self.infos.lock().unwrap().remove(label).is_some();
+        if let Some(mut c) = child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        removed
     }
 
     /// Flat list of all registered helpers, JSON-serializable.
     pub fn snapshot(&self) -> Vec<HelperEntry> {
-        self.inner
+        self.infos
             .lock()
             .unwrap()
             .iter()

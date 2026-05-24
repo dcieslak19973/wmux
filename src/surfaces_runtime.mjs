@@ -97,6 +97,13 @@ export function createSurfaceRuntime({
     const state = browserPanes.get(label);
     if (!state) return;
 
+    // If a CEF helper was spawned for this pane, kill it. Idempotent
+    // server-side — safe to call when the user already closed the helper
+    // window manually.
+    if (state.cefLabel) {
+      invoke('kill_browser_helper', { label: state.cefLabel }).catch(() => {});
+    }
+
     browserPanes.delete(label);
     const tab = tabs.get(state.tabId);
     tab?.browserLabels?.delete(label);
@@ -308,13 +315,32 @@ export function createSurfaceRuntime({
       urlInput.value = full;
 
       // When CEF mode is active for this pane, route Enter/Go through
-      // the helper instead of the iframe. Avoids iframe X-Frame-Options
-      // errors layering visually with the embedded CEF window.
-      // Phase 3 will swap this for a navigate(url) command to a
-      // long-lived helper rather than spawning a fresh helper fleet.
+      // the helper instead of the iframe. If a helper already exists,
+      // navigate it via CDP rather than spawning a fresh fleet. If the
+      // existing helper has been killed externally (user closed the
+      // window), the navigate call will fail and we fall back to a
+      // fresh spawn.
       if (browserState.cefActive) {
-        invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
-          .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
+        if (browserState.cefLabel) {
+          invoke('navigate_browser_helper', { label: browserState.cefLabel, url: full })
+            .catch(() => {
+              // Helper went away — spawn a fresh one.
+              browserState.cefLabel = null;
+              invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
+                .then((spawned) => {
+                  browserState.cefLabel = spawned.label;
+                  browserState.cefPort = spawned.cdp_port;
+                })
+                .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
+            });
+        } else {
+          invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
+            .then((spawned) => {
+              browserState.cefLabel = spawned.label;
+              browserState.cefPort = spawned.cdp_port;
+            })
+            .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
+        }
         browserState.currentUrl = full;
         if (pushHistory) {
           const nextHistory = browserState.history.slice(0, browserState.historyIndex + 1);
@@ -399,22 +425,37 @@ export function createSurfaceRuntime({
         browserEl.appendChild(indicator);
       }
 
-      invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
-        .then((spawned) => {
-          browserState.cefLabel = spawned.label;
-          browserState.cefPort = spawned.cdp_port;
-          // Surface the label / CDP port in the indicator so the user can
-          // copy them into manual MCP calls. MCP agents discover the same
-          // info via the cef_helper_list tool.
-          const ind = browserEl.querySelector('.cef-active-indicator');
-          if (ind) {
-            ind.innerHTML += `<br><br><code style="color:#4ade80">CEF label: ${spawned.label}</code><br>`
-              + `<code style="color:#4ade80">CDP: http://localhost:${spawned.cdp_port}/json</code>`;
-          }
-        })
-        .catch((err) => {
-          showError(`Could not spawn CEF helper: ${err}`);
-        });
+      // If a helper already exists for this pane, navigate it via CDP
+      // instead of spawning a fresh fleet.
+      if (browserState.cefLabel) {
+        invoke('navigate_browser_helper', { label: browserState.cefLabel, url: full })
+          .catch(() => {
+            // Existing helper went away — spawn fresh.
+            browserState.cefLabel = null;
+            spawnFreshHelper();
+          });
+        return;
+      }
+      spawnFreshHelper();
+
+      function spawnFreshHelper() {
+        invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
+          .then((spawned) => {
+            browserState.cefLabel = spawned.label;
+            browserState.cefPort = spawned.cdp_port;
+            // Surface the label / CDP port in the indicator so the user
+            // can copy them into manual MCP calls. MCP agents discover
+            // the same info via the cef_helper_list tool.
+            const ind = browserEl.querySelector('.cef-active-indicator');
+            if (ind) {
+              ind.innerHTML += `<br><br><code style="color:#4ade80">CEF label: ${spawned.label}</code><br>`
+                + `<code style="color:#4ade80">CDP: http://localhost:${spawned.cdp_port}/json</code>`;
+            }
+          })
+          .catch((err) => {
+            showError(`Could not spawn CEF helper: ${err}`);
+          });
+      }
     });
     document.getElementById(`bb-ext-${label}`).addEventListener('click', () => {
       const target = (urlInput.value || browserState.currentUrl || '').trim();

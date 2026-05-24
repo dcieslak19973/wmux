@@ -986,21 +986,18 @@ async fn dispatch_tool(
     }
 }
 
-/// Read content from a CEF helper via Chrome DevTools Protocol.
-///
-/// `port` is the helper's `--remote-debugging-port` value. `js_extract` is a
-/// JS expression (without a trailing semicolon) that produces the page-content
-/// string we want — e.g. `document.body.innerText.slice(0, 200000)`.
-///
-/// Returns the helper's reply as a JSON string `{url, title, content}` suitable
-/// for handing straight back to the MCP caller.
-async fn cdp_read_content(port: u16, js_extract: &str) -> Result<String, String> {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-
-    // Step 1: enumerate page targets via the HTTP endpoint. Retry briefly to
-    // tolerate the case where the helper was just spawned and CDP isn't ready
-    // yet (Chromium takes ~500ms to come up).
+/// Discover a page target and open a WebSocket to it via the helper's CDP
+/// endpoint. Retries the HTTP `/json` enumeration briefly so we tolerate
+/// being called immediately after the helper spawned. Returns the live
+/// WebSocket stream ready for JSON-RPC traffic.
+async fn cdp_open_page_ws(
+    port: u16,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    String,
+> {
     let client = reqwest::Client::new();
     let json_url = format!("http://127.0.0.1:{port}/json");
     let mut targets: Vec<serde_json::Value> = Vec::new();
@@ -1028,41 +1025,46 @@ async fn cdp_read_content(port: u16, js_extract: &str) -> Result<String, String>
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-
-    // Step 2: find a page-typed target with a webSocketDebuggerUrl.
     let page = targets
         .iter()
         .find(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
-        .ok_or_else(|| "no page target available in CDP — helper window may not be loaded yet".to_string())?;
+        .ok_or_else(|| {
+            "no page target available in CDP — helper window may not be loaded yet".to_string()
+        })?;
     let ws_url = page
         .get("webSocketDebuggerUrl")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "CDP page target has no webSocketDebuggerUrl".to_string())?;
-
-    // Step 3: open WebSocket and send Runtime.evaluate.
-    let (mut ws_stream, _resp) = tokio_tungstenite::connect_async(ws_url)
+    let (ws_stream, _resp) = tokio_tungstenite::connect_async(ws_url)
         .await
         .map_err(|e| format!("CDP WebSocket connect failed: {e}"))?;
+    Ok(ws_stream)
+}
 
-    let expression = format!(
-        "JSON.stringify({{url: location.href, title: document.title, content: ({js_extract})}})"
-    );
+/// Send a JSON-RPC method to an open CDP WebSocket and wait for the matching
+/// response. Returns the `result` value on success.
+async fn cdp_call(
+    ws_stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    method: &str,
+    params: serde_json::Value,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
     let request_id = 1u64;
     let request = serde_json::json!({
         "id": request_id,
-        "method": "Runtime.evaluate",
-        "params": {
-            "expression": expression,
-            "returnByValue": true,
-            "awaitPromise": false,
-        }
+        "method": method,
+        "params": params,
     });
     ws_stream
         .send(Message::Text(request.to_string()))
         .await
         .map_err(|e| format!("CDP WebSocket send failed: {e}"))?;
 
-    // Step 4: receive the matching response. Skip event notifications.
     let read_fut = async {
         while let Some(msg) = ws_stream.next().await {
             let msg = msg.map_err(|e| format!("CDP WebSocket recv failed: {e}"))?;
@@ -1080,26 +1082,67 @@ async fn cdp_read_content(port: u16, js_extract: &str) -> Result<String, String>
                 continue;
             }
             if let Some(err) = parsed.get("error") {
-                return Err(format!("CDP Runtime.evaluate error: {err}"));
+                return Err(format!("CDP {method} error: {err}"));
             }
-            // result.result.value holds the stringified JSON we asked for.
-            let val = parsed
-                .pointer("/result/result/value")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    format!("CDP response missing /result/result/value: {}", parsed)
-                })?;
-            return Ok(val.to_string());
+            return Ok(parsed
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
         }
-        Err("CDP WebSocket stream ended without a response".to_string())
+        Err(format!("CDP WebSocket stream ended without a response to {method}"))
     };
 
-    match tokio::time::timeout(std::time::Duration::from_secs(15), read_fut).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), read_fut).await {
         Ok(res) => res,
-        Err(_) => Err(format!(
-            "CDP Runtime.evaluate timed out on port {port}"
-        )),
+        Err(_) => Err(format!("CDP {method} timed out after {timeout_secs}s")),
     }
+}
+
+/// Navigate an existing CEF helper to a new URL via CDP `Page.navigate`.
+/// Public so `commands::navigate_browser_helper` can reuse the CDP plumbing.
+pub async fn cdp_navigate(port: u16, url: &str) -> Result<(), String> {
+    let mut ws = cdp_open_page_ws(port).await?;
+    let _result = cdp_call(
+        &mut ws,
+        "Page.navigate",
+        serde_json::json!({ "url": url }),
+        10,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Read content from a CEF helper via Chrome DevTools Protocol.
+///
+/// `port` is the helper's `--remote-debugging-port` value. `js_extract` is a
+/// JS expression (without a trailing semicolon) that produces the page-content
+/// string we want — e.g. `document.body.innerText.slice(0, 200000)`.
+///
+/// Returns the helper's reply as a JSON string `{url, title, content}` suitable
+/// for handing straight back to the MCP caller.
+async fn cdp_read_content(port: u16, js_extract: &str) -> Result<String, String> {
+    let mut ws = cdp_open_page_ws(port).await?;
+    let expression = format!(
+        "JSON.stringify({{url: location.href, title: document.title, content: ({js_extract})}})"
+    );
+    let result = cdp_call(
+        &mut ws,
+        "Runtime.evaluate",
+        serde_json::json!({
+            "expression": expression,
+            "returnByValue": true,
+            "awaitPromise": false,
+        }),
+        15,
+    )
+    .await?;
+    // Runtime.evaluate response shape: result.result.value (string due to
+    // returnByValue + we wrapped in JSON.stringify).
+    result
+        .pointer("/result/value")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("CDP response missing /result/value: {}", result))
 }
 
 fn json_rpc_ok(id: serde_json::Value, result: serde_json::Value) -> String {

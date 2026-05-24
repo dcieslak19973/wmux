@@ -228,16 +228,23 @@ wrap_browser_process_handler! {
 
                 #[cfg(target_os = "windows")]
                 let window_info = if let Some(parent_hwnd_value) = parent_hwnd {
-                    // Embedded path: become a Win32 child window of wmux's pane
-                    // HWND. The initial bounds are a placeholder — wmux is
-                    // expected to drive geometry via IPC (TODO) so the window
-                    // matches the pane rect as it resizes.
+                    // Embedded path: become a Win32 child window of wmux's
+                    // pane HWND. The initial bounds are a placeholder — wmux
+                    // is expected to drive geometry via IPC (Phase 3) so the
+                    // window matches the pane rect as it resizes.
+                    //
+                    // SPIKE: bumped from (0,0) to (300,200) so the window
+                    // lands roughly in the middle of wmux's content area
+                    // rather than hidden behind the top-left tab bar / sidebar.
+                    // SimpleHandler::on_after_created also pushes the window
+                    // to top of Z-order via SetWindowPos(HWND_TOP) so it
+                    // isn't covered by wmux's webview.
                     //
                     // cef-rs models HWND as a tuple struct around an opaque
                     // *mut HWND__ — construct one from the raw HWND value the
                     // caller passed on the command line.
                     let parent = cef::sys::HWND(parent_hwnd_value as *mut cef::sys::HWND__);
-                    let bounds = Rect { x: 0, y: 0, width: 800, height: 600 };
+                    let bounds = Rect { x: 300, y: 200, width: 900, height: 600 };
                     window_info.set_as_child(parent, &bounds)
                 } else {
                     // Standalone path (spike default + manual testing).

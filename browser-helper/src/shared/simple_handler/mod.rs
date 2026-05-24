@@ -86,6 +86,30 @@ impl SimpleHandler {
             }
         );
 
+        // SPIKE: bring CEF window to top of Z-order so it isn't hidden behind
+        // wmux's webview HWND (we're a sibling of the webview under wmux's
+        // main HWND, and default z-order leaves the more-recently-active
+        // window on top — that's typically the webview because the user
+        // clicks wmux UI). Without this the CEF window is alive and rendering
+        // but completely covered, which is what made the spike's google.com
+        // tests look like everything was broken.
+        #[cfg(target_os = "windows")]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            };
+            let cef_hwnd = browser
+                .host()
+                .expect("BrowserHost is None")
+                .window_handle();
+            // cef::sys::HWND wraps a `*mut HWND__`; pull out the inner pointer
+            // and re-cast to windows_sys's HWND alias.
+            let raw: *mut std::ffi::c_void = cef_hwnd.0 as *mut std::ffi::c_void;
+            unsafe {
+                SetWindowPos(raw, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+
         // Add to the list of existing browsers.
         self.browser_list.push(browser);
     }

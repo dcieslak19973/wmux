@@ -61,17 +61,12 @@ pub const BOUND_TOOLS: &[&str] = &[
     "pane_send_text",
     "pane_send_keys",
     "pane_read_screen",
-    // Workbook
-    "workbook_list",
-    "workbook_get",
-    "workbook_create",
-    "workbook_update",
-    "workbook_delete",
-    "workbook_open",
-    "workbook_add_chart",
-    "workbook_update_chart",
-    "workbook_remove_chart",
-    "workbook_reorder_charts",
+    // NOTE: workbook_* tools are deliberately *not* bound in Code Mode.
+    // Their JS-bridge path resolves to "open in external browser" when
+    // there's no UI focus context (which is the case from inside the
+    // sandbox), so calling them from a script pops up a browser instead
+    // of opening the workbook pane. Until that path is fixed, workbook
+    // ops are full-mode-only. Set WMUX_MCP_MODE=full to use them.
     // Browser / CEF
     "browser_list",
     "browser_open",

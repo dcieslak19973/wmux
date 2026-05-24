@@ -1136,7 +1136,12 @@ export function createUiPanelsRuntime({
 
     panel.querySelector('.settings-close').addEventListener('click', () => panel.remove());
     panel.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !kbCaptureRow) panel.remove(); });
-    makeDockable(panel, panel.querySelector('.settings-header'), 'settings');
+    // Settings is a transient modal — no dock, no drag. Docking made the
+    // keybindings list unusable at 340px sidebar width (cramped layout +
+    // nested-scroll trap from the kb list's own max-height inside the
+    // body's overflow). Other panels are content surfaces and dock cleanly;
+    // settings isn't, and didn't actually need it.
+    document.getElementById('app').appendChild(panel);
     setTimeout(() => {
       const onOut = (event) => {
         if (!panel.contains(event.target) && panel.parentElement?.id !== 'right-dock') {

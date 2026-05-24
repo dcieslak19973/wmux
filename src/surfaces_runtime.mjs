@@ -338,16 +338,41 @@ export function createSurfaceRuntime({
       if (currentUrl) navigateTo(currentUrl, { pushHistory: false });
     });
     zoomBtn.addEventListener('click', () => toggleSurfaceZoom(browserEl));
-    document.getElementById(`bb-cef-${label}`).addEventListener('click', () => {
+    document.getElementById(`bb-cef-${label}`).addEventListener('click', (event) => {
       // EXPERIMENTAL: see the button's title attribute. Spawns the
       // out-of-process CEF helper parented to the wmux window. Phase 3 will
       // replace the "spawn fresh on every click" flow with named-pipe IPC
       // that drives a long-lived helper.
       const target = (urlInput.value || browserState.currentUrl || '').trim();
       const full = normalizeBrowserUrl(target) || 'https://www.google.com/';
+      console.log(`%c[cef] BUTTON CLICKED — about to spawn helper, url=${full}`, 'color:#fff;background:#7c6af7;padding:2px 6px;border-radius:3px;font-weight:bold');
+
+      // Visually mark the button as "armed" so the user can see the click
+      // registered, then unmark after spawn completes.
+      const btn = event.currentTarget;
+      btn.style.background = '#7c6af7';
+      btn.style.color = '#fff';
+
+      // Hide the competing iframe + placeholder so the CEF window has the
+      // pane's visual real-estate uncontested. Eliminates the "is that error
+      // from iframe or CEF?" ambiguity. We restore them if CEF spawn fails.
+      const prevIframeDisplay = iframeEl.style.display;
+      iframeEl.style.display = 'none';
+      iframeEl.src = 'about:blank';
+      placeholderEl?.remove?.();
+
       invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
-        .then((pid) => console.log(`[cef] spawned helper pid=${pid} url=${full}`))
-        .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
+        .then((pid) => {
+          console.log(`%c[cef] HELPER SPAWNED pid=${pid} url=${full}`, 'color:#fff;background:#4ade80;padding:2px 6px;border-radius:3px;font-weight:bold');
+          btn.style.background = '#4ade80';
+        })
+        .catch((err) => {
+          console.error(`[cef] SPAWN FAILED: ${err}`);
+          btn.style.background = '#f87171';
+          btn.style.color = '#fff';
+          iframeEl.style.display = prevIframeDisplay;
+          showError(`Could not spawn CEF helper: ${err}`);
+        });
     });
     document.getElementById(`bb-ext-${label}`).addEventListener('click', () => {
       const target = (urlInput.value || browserState.currentUrl || '').trim();

@@ -93,6 +93,13 @@ impl SimpleHandler {
         // clicks wmux UI). Without this the CEF window is alive and rendering
         // but completely covered, which is what made the spike's google.com
         // tests look like everything was broken.
+        //
+        // When --offscreen is set (Path B embedded mode), we also yank the
+        // window way off-screen so the user doesn't see the standalone
+        // top-level window. The renderer still composes normally; we capture
+        // its output via CDP Page.startScreencast and draw to a canvas in a
+        // wmux pane. This is the "OSR via screencast" spike — a stepping
+        // stone toward true CEF OSR.
         #[cfg(target_os = "windows")]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -105,8 +112,18 @@ impl SimpleHandler {
             // cef::sys::HWND wraps a `*mut HWND__`; pull out the inner pointer
             // and re-cast to windows_sys's HWND alias.
             let raw: *mut std::ffi::c_void = cef_hwnd.0 as *mut std::ffi::c_void;
+            let offscreen = command_line_get_global()
+                .map(|cl| cl.has_switch(Some(&CefString::from("offscreen"))) != 0)
+                .unwrap_or(false);
             unsafe {
-                SetWindowPos(raw, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                if offscreen {
+                    // Move way off the visible desktop. Size is left intact
+                    // so the renderer keeps its layout dimensions; the wmux
+                    // pane will drive size via emulation later.
+                    SetWindowPos(raw, HWND_TOP, -30000, -30000, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                } else {
+                    SetWindowPos(raw, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
             }
         }
 

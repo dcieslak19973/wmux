@@ -1668,10 +1668,12 @@ pub async fn spawn_browser_helper(
     helpers: tauri::State<'_, crate::BrowserHelpers>,
     window_label: String,
     url: String,
+    offscreen: Option<bool>,
 ) -> Result<SpawnedHelper, String> {
     // window_label is retained in the signature for future use (e.g. SetParent
     // / OSR sync) but the spike spawns the helper as a top-level window.
     let _ = (&app, &window_label);
+    let offscreen = offscreen.unwrap_or(false);
 
     // Helper label = short uuid. Becomes the key in BrowserHelpers state.
     let label = format!("cef-helper-{}", uuid_short());
@@ -1719,10 +1721,18 @@ pub async fn spawn_browser_helper(
     // parent HWND isn't in its own view tree. Embedding inside the pane
     // requires off-screen rendering (Phase 3+). For now the helper opens
     // as a top-level Chromium window.
-    let child = std::process::Command::new(&helper_path)
-        .current_dir(helper_dir)
+    let mut cmd = std::process::Command::new(&helper_path);
+    cmd.current_dir(helper_dir)
         .arg(format!("--url={url}"))
-        .arg(format!("--user-data-dir={user_data_dir}"))
+        .arg(format!("--user-data-dir={user_data_dir}"));
+    if offscreen {
+        // Helper's on_after_created reads this switch and yanks the window
+        // off-screen via Win32 SetWindowPos so the user doesn't see the
+        // standalone top-level window. Rendering continues normally; the
+        // pane captures via CDP Page.startScreencast.
+        cmd.arg("--offscreen");
+    }
+    let child = cmd
         // --remote-debugging-port=0 lets Chromium pick a free port itself —
         // we previously tried picking the port in Rust via TcpListener bind
         // + drop, but the TCP TIME_WAIT race could leave CEF unable to bind

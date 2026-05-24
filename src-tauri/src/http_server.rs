@@ -1527,6 +1527,7 @@ pub async fn dispatch_tool(
                         helpers,
                         String::new(),
                         url.to_string(),
+                        None,
                     )
                     .await?;
                     serde_json::to_string_pretty(&serde_json::json!({

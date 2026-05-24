@@ -1731,6 +1731,19 @@ pub async fn spawn_browser_helper(
         // standalone top-level window. Rendering continues normally; the
         // pane captures via CDP Page.startScreencast.
         cmd.arg("--offscreen");
+        // When the window is moved off-screen, Chromium's occlusion tracking
+        // marks the page as not-visible (a Page.screencastVisibilityChanged
+        // {visible:false} event fires immediately after startScreencast) and
+        // pauses the compositor. screencast stops emitting frames. These
+        // flags keep painting alive regardless of window position:
+        //   CalculateNativeWinOcclusion — disables the Win32-level
+        //     occlusion detector that decides "this window is hidden".
+        //   backgrounding-occluded-windows / renderer-backgrounding —
+        //     keep the renderer process at normal priority even when
+        //     Chromium thinks the page is "background".
+        cmd.arg("--disable-features=CalculateNativeWinOcclusion");
+        cmd.arg("--disable-backgrounding-occluded-windows");
+        cmd.arg("--disable-renderer-backgrounding");
     }
     let child = cmd
         // --remote-debugging-port=0 lets Chromium pick a free port itself —

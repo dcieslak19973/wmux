@@ -93,6 +93,12 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
     // we don't need to await a response — the enable will be processed
     // before startScreencast.
     sendCdp('Page.enable');
+    // Force the page to the foreground in Chromium's eyes. With the helper
+    // window moved off-screen, the renderer can otherwise decide the page
+    // is hidden and pause the compositor — see the matching --disable
+    // flags on the helper spawn path. bringToFront is the belt to those
+    // flags' suspenders.
+    sendCdp('Page.bringToFront');
     sendCdp('Page.startScreencast', {
       format: 'jpeg',
       quality,

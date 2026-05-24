@@ -38,6 +38,15 @@ Both use the **same wire protocol and the same connection topology** — they di
 
 90%+ of sharing sessions are expected to be one host + one viewer. The long tail (1 host + several viewers, demo-style fan-out) is rare. This distribution shapes the architecture decision below.
 
+### Non-goals
+
+Decisions we are explicitly **not** doing, so they don't keep coming back as open questions:
+
+- **Voice / video calling inside wmux.** Users already have Zoom, Slack huddles, Teams, Discord. Building this in is meaningful complexity for marginal differentiation. Anyone who wants voice while pairing can keep a separate call open.
+- **Project-hosted community rendezvous service.** We won't run a "wmux.io/collab" instance ourselves — it's an ongoing operations + abuse-handling + security burden we're not signing up for. Self-hosting is the only supported path. See the "Hosting the rendezvous" section below for what we *do* support.
+- **Native mobile app.** A PWA web viewer covers the mobile use case at a fraction of the cost. No iOS or Android project.
+- **Per-user "device family" abstraction.** A self-token maps to exactly one (device, host) pair. Accessing N machines from one phone means generating N tokens. Unifying via a per-user account is the obvious refactor, but it's effectively reintroducing OAuth/accounts as a base requirement — we're keeping things simple instead. N tokens per device-host pair is by design, not a TODO.
+
 ---
 
 ## Survey of prior art
@@ -369,6 +378,32 @@ If self-hosted-TURN bandwidth becomes a problem:
 - Document Tailscale integration so users skip TURN entirely.
 - Server CPU is unaffected — TURN is dumb byte forwarding.
 
+### Hosting the rendezvous
+
+Each user (or team / org) runs their own rendezvous server — see the non-goals section. To make that as low-friction as possible, the project ships:
+
+**Tier 1 — supported, tested, recommended:**
+- **Docker image** (`ghcr.io/dcieslak19973/wmux-collab-server:latest`) bundling rendezvous + coturn TURN. Single command: `docker run -p 443:443/tcp -p 3478:3478/udp ...`. Runs on any VPS, k8s cluster, or NAS.
+- **Fly.io template** in `collab-server/deploy/fly.toml`. Free-tier eligible for a single-instance signaling-only deployment; small spend (~$5/mo) once TURN bandwidth kicks in.
+- **One-shot bootstrap script** in `collab-server/deploy/bootstrap.sh` that sets up coturn + the rendezvous on a fresh Ubuntu VPS, including a Let's Encrypt cert.
+
+**Tier 2 — documented, user-supported:**
+- **Cloudflare Tunnel + a home server.** Keeps everything on your LAN; tunnel exposes the rendezvous endpoint to the internet without a public IP. Cloudflare's free TURN tier covers most users' bandwidth.
+- **Tailscale assumption.** If host + viewers are already on the same tailnet, skip the rendezvous entirely — direct wmux↔wmux WebRTC over the tailnet works because there's no NAT to traverse.
+
+**Tier 3 — not supported but possible:**
+- Self-built rendezvous on Railway / Render / serverless-of-the-week. Probably works but we don't actively test against these.
+
+**What the rendezvous costs to run:**
+- **CPU / RAM:** trivial. A few hundred MB and minimal CPU. Even a `t2.nano`-class VPS is overkill.
+- **Bandwidth:** signaling alone is negligible (~KB per session). TURN is the variable: ~25% of sessions × ~50 KB/s × session duration. For a single user with occasional shares, well within free-tier limits everywhere. For a team with dozens of concurrent shares, expect ~$10–50/mo on commercial bandwidth.
+- **Storage:** SQLite database grows slowly (audit log + token table). Single-MB scale even after a year of heavy use.
+
+**Onboarding the first user:**
+- New wmux install prompts for a rendezvous URL on first attempt to share or generate a self-token.
+- "I don't have one yet" → opens the docs page with the Tier 1 deployment options + a 5-minute Fly.io walkthrough.
+- Future: a `wmux collab-server quickstart` CLI subcommand that runs through Fly.io setup interactively. Not in initial scope.
+
 ### Mobile PWA
 
 The web viewer at `/s/:code` is built as a Progressive Web App from day one:
@@ -381,11 +416,8 @@ Writing a native iOS/Android app is explicitly **not in scope** — the PWA cove
 
 ### Open questions
 
-1. **Hosted vs self-hosted rendezvous.** Do we run a community instance for OSS users so onboarding is "click a link"? Probably yes, behind a per-IP rate-limit. Hosting cost is low for a no-content-pass-through service; the TURN bandwidth is the only meaningful expense.
-2. **Token-secret transport.** URL fragments don't appear in server logs but *do* show up in browser history. Alternative: short-lived "redemption code" (a few digits) that's exchanged for the real long-lived token over WSS. Slightly more friction for the user; better security posture. Probably do the redemption-code variant for `self` tokens, raw token in fragment for `share` tokens.
-3. **Multi-host self-tokens.** A token currently maps to one host. If I want my phone to access *all* my machines, that's currently N tokens. Could unify via a per-user "device family" abstraction, but that's effectively re-introducing accounts. Probably keep simple in v1.
-4. **TURN credentials.** TURN servers traditionally use short-lived credentials issued by the signaling server. Plenty of well-known patterns; needs a small implementation in the rendezvous.
-5. **Voice / video.** LiveKit integration was floated in earlier drafts. Holding off — users have Zoom/Slack/Teams; building voice in adds significant complexity for marginal differentiation. Revisit if real demand emerges.
+1. **Token-secret transport.** URL fragments don't appear in server logs but *do* show up in browser history. Alternative: short-lived "redemption code" (a few digits) that's exchanged for the real long-lived token over WSS. Slightly more friction for the user; better security posture. Probably do the redemption-code variant for `self` tokens, raw token in fragment for `share` tokens.
+3. **TURN credentials.** TURN servers traditionally use short-lived credentials issued by the signaling server. Plenty of well-known patterns; needs a small implementation in the rendezvous.
 
 ---
 
@@ -400,6 +432,7 @@ Writing a native iOS/Android app is explicitly **not in scope** — the PWA cove
 | Mobile PWA on iOS Safari has subtle xterm.js bugs | medium | Plan a day in Phase 1 for mobile-specific QA. xterm.js has known mobile issues that mostly are addon-fit + virtual-keyboard related; well-trodden ground. |
 | `webrtc-rs` data channel reliability mode mismatches xterm output expectations | low | Use reliable+ordered mode (default). Same delivery semantics as TCP/WebSocket — no surprises. |
 | User generates a self-token, never revokes it, leaves company / loses phone | medium | UX nudges: "you have N tokens with no expiry; review them"; periodic reminders surfaced inside wmux. |
+| Self-hosting the rendezvous is a barrier to OSS adoption ("I just want to share my pane, do I really have to deploy a server?") | high | Make the deployment story very polished: tested Docker image, Fly.io template with one-command setup, in-product "I don't have a rendezvous yet" wizard that walks the user through Fly.io. Highlight the Tailscale-only path which sidesteps the rendezvous for users who already have a tailnet. |
 
 ---
 

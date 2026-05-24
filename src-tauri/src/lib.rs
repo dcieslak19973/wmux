@@ -1,3 +1,8 @@
+// Bumped from the default 128 because http_server::handle_mcp_request's
+// `tools/list` literal (~30 tool entries, each with a nested inputSchema)
+// pushes serde_json::json!{...} expansion past the default limit.
+#![recursion_limit = "256"]
+
 mod browser_helpers;
 mod control_bridge;
 mod commands;

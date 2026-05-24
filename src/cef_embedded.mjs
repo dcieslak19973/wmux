@@ -122,11 +122,12 @@ export async function createCefEmbeddedSurface(mountEl, url) {
       deviceScaleFactor: dims.dpr,
       mobile: false,
     });
-    // PNG instead of JPEG: lossless, so text stays sharp regardless of
-    // quality settings. Bandwidth is higher than JPEG but for typical
-    // browsing this is a much better tradeoff than fuzzy text.
+    // JPEG q=95 trades a tiny bit of text fidelity (vs PNG) for much
+    // lower per-frame bytes — at q=95 the artifacts are essentially
+    // invisible in normal use, and the wire savings keep frame rate up.
     sendCdp('Page.startScreencast', {
-      format: 'png',
+      format: 'jpeg',
+      quality: 95,
       maxWidth: dims.wDev,
       maxHeight: dims.hDev,
       everyNthFrame: 1,
@@ -183,7 +184,7 @@ export async function createCefEmbeddedSurface(mountEl, url) {
       // Still ack on decode failure so we don't deadlock the stream.
       sendCdp('Page.screencastFrameAck', { sessionId });
     };
-    img.src = 'data:image/png;base64,' + data;
+    img.src = 'data:image/jpeg;base64,' + data;
     // Reserved for future: metadata has scrollOffsetX/Y, pageScaleFactor,
     // deviceWidth/Height — useful when we wire input forwarding so click
     // coordinates correctly translate.
@@ -355,7 +356,8 @@ export async function createCefEmbeddedSurface(mountEl, url) {
         mobile: false,
       });
       sendCdp('Page.startScreencast', {
-        format: 'png',
+        format: 'jpeg',
+        quality: 95,
         maxWidth: dims.wDev,
         maxHeight: dims.hDev,
         everyNthFrame: 1,

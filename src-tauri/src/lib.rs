@@ -56,6 +56,7 @@ pub fn run() {
             commands::spawn_browser_helper,
             commands::kill_browser_helper,
             commands::navigate_browser_helper,
+            commands::find_cdp_page_ws_url,
             commands::resolve_localhost_url,
             commands::read_clipboard_text,
             commands::list_wsl_distros,

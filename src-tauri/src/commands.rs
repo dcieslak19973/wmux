@@ -1816,6 +1816,44 @@ pub async fn spawn_browser_helper(
     })
 }
 
+/// Discover the page-target WebSocket URL for a CEF helper's CDP endpoint.
+///
+/// JS callers can't hit the helper's `/json` directly because the wmux dev
+/// frontend runs at `http://localhost:1420` and Chromium blocks the
+/// cross-origin fetch (CDP HTTP endpoints don't return CORS headers). The
+/// WebSocket itself works fine cross-origin because the helper is spawned
+/// with `--remote-allow-origins=*`. So we do the HTTP-side discovery in
+/// Rust and hand the JS the ready-to-connect URL.
+///
+/// Mirrors the polling behavior in http_server::cdp_open_page_ws — retries
+/// briefly to tolerate being called immediately after the helper spawned.
+#[tauri::command]
+pub async fn find_cdp_page_ws_url(port: u16) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let json_url = format!("http://127.0.0.1:{port}/json");
+    for attempt in 0..30u32 {
+        if let Ok(resp) = client.get(&json_url).send().await {
+            if let Ok(targets) = resp.json::<Vec<serde_json::Value>>().await {
+                if let Some(page) = targets
+                    .iter()
+                    .find(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+                {
+                    if let Some(ws) = page.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
+                        return Ok(ws.to_string());
+                    }
+                }
+            }
+        }
+        if attempt == 29 {
+            return Err(format!(
+                "no page target on CDP port {port} after 6s — helper may have failed to start"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    unreachable!()
+}
+
 /// Kill a previously-spawned CEF browser helper and remove its registry
 /// entry. Idempotent — returns false (not Err) if no helper exists under
 /// this label, true if one was killed.

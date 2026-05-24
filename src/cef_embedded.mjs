@@ -12,9 +12,6 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-const CDP_FETCH_RETRY_MS = 200;
-const CDP_FETCH_MAX_ATTEMPTS = 30;
-
 /**
  * Create a CEF-embedded surface in `mountEl` showing `url`.
  *
@@ -70,16 +67,21 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
   canvas.style.cursor = 'default';
 
   // --- 3. Find the page target and open a WebSocket -------------------------
-  // CDP exposes /json with the list of targets; we want the first `type=page`.
-  // CEF may take a moment after spawn before /json responds with a page —
-  // poll with short retries.
-  const target = await fetchCdpPageTarget(port);
-  if (!target) {
-    status.textContent = 'CDP target not found — helper may have failed to start';
+  // Discover the page target's WebSocket URL via a Tauri command rather than
+  // a JS fetch. CDP's HTTP /json endpoint doesn't return CORS headers, so
+  // the cross-origin fetch from http://localhost:1420 (vite dev) → 127.0.0.1
+  // is blocked by the browser. The WebSocket connection itself works
+  // cross-origin because the helper is spawned with --remote-allow-origins=*.
+  let wsUrl;
+  try {
+    wsUrl = await invoke('find_cdp_page_ws_url', { port });
+  } catch (err) {
+    status.textContent = `CDP discovery failed: ${err}`;
+    console.warn('[cef-embed] find_cdp_page_ws_url failed', { port, err });
     return makeDisposable(spawned.label, null, container);
   }
 
-  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  const ws = new WebSocket(wsUrl);
   let nextRequestId = 1;
   let frameCount = 0;
   let lastFrameAt = 0;
@@ -327,36 +329,6 @@ export async function createCefEmbeddedSurface(mountEl, url, { quality = 80 } = 
       if (container.parentElement) container.remove();
     },
   };
-}
-
-async function fetchCdpPageTarget(port) {
-  let lastErr = null;
-  let lastTargets = null;
-  for (let attempt = 0; attempt < CDP_FETCH_MAX_ATTEMPTS; attempt++) {
-    try {
-      const resp = await fetch(`http://127.0.0.1:${port}/json`);
-      if (!resp.ok) {
-        lastErr = `HTTP ${resp.status} from /json`;
-      } else {
-        const targets = await resp.json();
-        lastTargets = targets;
-        if (Array.isArray(targets)) {
-          const page = targets.find((t) => t.type === 'page');
-          if (page && page.webSocketDebuggerUrl) return page;
-        }
-      }
-    } catch (err) {
-      lastErr = String(err?.message ?? err);
-    }
-    await new Promise((r) => setTimeout(r, CDP_FETCH_RETRY_MS));
-  }
-  console.warn('[cef-embed] CDP target not found after retries', {
-    port,
-    lastErr,
-    lastTargets,
-    lastTargetTypes: Array.isArray(lastTargets) ? lastTargets.map((t) => t.type) : null,
-  });
-  return null;
 }
 
 function makeDisposable(label, ws, container) {

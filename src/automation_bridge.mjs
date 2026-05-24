@@ -103,9 +103,9 @@ export function createAutomationBridge({
         await windowObject.wmux.browser.close(payload.label);
         return {};
       case 'open-workbook':
-        return openWorkbookPreview(payload.spec ?? payload.workbook ?? {}, { openInBrowser: payload.openInBrowser !== false });
+        return openWorkbookPreview(payload.spec ?? payload.workbook ?? {}, { openInBrowser: payload.openInBrowser === true });
       case 'open-workbook-demo':
-        return openWorkbookDemo({ openInBrowser: payload.openInBrowser !== false });
+        return openWorkbookDemo({ openInBrowser: payload.openInBrowser === true });
       case 'list-notifications':
         return windowObject.wmux.notifications.list(payload.tabId ?? getActiveTabId());
       case 'publish-notification':

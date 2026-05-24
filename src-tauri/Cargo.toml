@@ -37,6 +37,10 @@ futures-util = "0.3"
 # base64 for the MCP `browser_screenshot` tool — CDP returns PNG screenshots
 # base64-encoded; we decode before writing to disk.
 base64 = "0.22"
+# Embedded JS engine for the `wmux_eval` MCP tool (Code Mode spike). Pure
+# Rust, no native libs to bundle. Slower than v8 but adequate for short
+# orchestration scripts; revisit deno_core later if we outgrow it.
+boa_engine = "0.20"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

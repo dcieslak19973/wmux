@@ -401,9 +401,10 @@ export function createSurfaceRuntime({
         indicator.className = 'cef-active-indicator';
         indicator.style.cssText = 'padding:16px;color:#9ca3af;font-size:12px;line-height:1.5';
         indicator.innerHTML = '<strong style="color:#7c6af7">CEF helper active for this pane.</strong><br>'
-          + 'The actual page is rendered in a separate Win32 child window parented to wmux. '
-          + 'If you do not see it, it may be positioned behind wmux UI (top-left of the wmux client area, behind tabs/sidebar).<br><br>'
-          + '<em>Spike limitation: geometry sync is Phase 3. For now use Alt+Tab or resize the wmux window to locate the CEF window.</em>';
+          + 'The page is rendered in a separate top-level Chromium window — it should appear next to wmux.<br><br>'
+          + '<em>Spike note: embedding the CEF window <strong>inside</strong> the pane requires off-screen rendering (CEF renders to a pixel buffer, we paint it on a canvas via IPC). '
+          + 'Direct SetParent of CEF into wmux\'s HWND tree triggers Chromium compositor errors '
+          + '(<code>"Source has different root than target"</code>). That\'s deferred to Phase 3+.</em>';
         browserEl.appendChild(indicator);
       }
 

@@ -1535,9 +1535,25 @@ pub async fn spawn_browser_helper(
         .parent()
         .ok_or_else(|| "helper path has no parent dir".to_string())?;
 
+    // SPIKE FINDING: passing --parent-hwnd to make CEF a Win32 child of
+    // wmux's HWND triggers Chromium compositor errors of the form
+    //   "Source has different root than target: source chain=
+    //    [WebContentsViewAura]-[NativeViewHostAuraClip],
+    //    target chain=[ContentsWebView]"
+    // Chromium's compositor refuses to attach CEF's render layer when the
+    // parent HWND isn't in its own view tree. The page renders to memory
+    // (Google's JS runs, console.log fires) but never reaches pixels.
+    //
+    // Real fix is off-screen rendering (OSR): CEF renders to a pixel
+    // buffer, we receive it over IPC and paint into a <canvas> ourselves.
+    // That's Phase 3+ work. For now, spawn the helper as a top-level
+    // Chromium window (no --parent-hwnd) so the page is actually visible —
+    // proves the architecture works end-to-end and unblocks user testing.
+    // The parent_hwnd is still computed above; it'll be useful when we
+    // wire up SetParent post-creation or move to OSR.
+    let _ = parent_hwnd; // suppress unused-warning while embedding is disabled
     let child = std::process::Command::new(&helper_path)
         .current_dir(helper_dir)
-        .arg(format!("--parent-hwnd={parent_hwnd}"))
         .arg(format!("--url={url}"))
         .arg(format!("--user-data-dir={user_data_dir}"))
         // Chromium switches (consumed by CEF before our --url/--parent-hwnd).

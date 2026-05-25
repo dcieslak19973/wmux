@@ -37,6 +37,7 @@ import { createPrReviewRuntime } from './pr_review_runtime.mjs';
 import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
 import { createActivityLogRuntime } from './activity_log_runtime.mjs';
 import { createKeybindingsRuntime } from './keybindings_runtime.mjs';
+import { createCefEmbeddedSurface } from './cef_embedded.mjs';
 import { createPaneRegistry } from './pane_registry.mjs';
 import {
   createWorkspaceManager,
@@ -4081,6 +4082,14 @@ window.__wmux = window.__wmux ?? {};
 window.__wmux.reloadKeybindings = loadAndApplyKeybindingOverrides;
 window.__wmux.snapshotKeybindings = () => keybindingsRuntime.snapshot();
 window.__wmux.keybindings = keybindingsApi;
+
+// Path B / OSR-via-screencast spike. Call from devtools:
+//   const s = await window.__wmux.cefEmbed(document.body, 'https://example.com');
+//   // s.canvas now shows the page; s.dispose() to kill the helper.
+// A proper UI affordance (button next to the existing CEF button) comes
+// once the pixel pipeline is proven to work visibly. This devtools handle
+// is just for the v0 spike test.
+window.__wmux.cefEmbed = createCefEmbeddedSurface;
 
 // Boot
 

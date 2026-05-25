@@ -1668,10 +1668,12 @@ pub async fn spawn_browser_helper(
     helpers: tauri::State<'_, crate::BrowserHelpers>,
     window_label: String,
     url: String,
+    offscreen: Option<bool>,
 ) -> Result<SpawnedHelper, String> {
     // window_label is retained in the signature for future use (e.g. SetParent
     // / OSR sync) but the spike spawns the helper as a top-level window.
     let _ = (&app, &window_label);
+    let offscreen = offscreen.unwrap_or(false);
 
     // Helper label = short uuid. Becomes the key in BrowserHelpers state.
     let label = format!("cef-helper-{}", uuid_short());
@@ -1719,10 +1721,31 @@ pub async fn spawn_browser_helper(
     // parent HWND isn't in its own view tree. Embedding inside the pane
     // requires off-screen rendering (Phase 3+). For now the helper opens
     // as a top-level Chromium window.
-    let child = std::process::Command::new(&helper_path)
-        .current_dir(helper_dir)
+    let mut cmd = std::process::Command::new(&helper_path);
+    cmd.current_dir(helper_dir)
         .arg(format!("--url={url}"))
-        .arg(format!("--user-data-dir={user_data_dir}"))
+        .arg(format!("--user-data-dir={user_data_dir}"));
+    if offscreen {
+        // Helper's on_after_created reads this switch and yanks the window
+        // off-screen via Win32 SetWindowPos so the user doesn't see the
+        // standalone top-level window. Rendering continues normally; the
+        // pane captures via CDP Page.startScreencast.
+        cmd.arg("--offscreen");
+        // When the window is moved off-screen, Chromium's occlusion tracking
+        // marks the page as not-visible (a Page.screencastVisibilityChanged
+        // {visible:false} event fires immediately after startScreencast) and
+        // pauses the compositor. screencast stops emitting frames. These
+        // flags keep painting alive regardless of window position:
+        //   CalculateNativeWinOcclusion — disables the Win32-level
+        //     occlusion detector that decides "this window is hidden".
+        //   backgrounding-occluded-windows / renderer-backgrounding —
+        //     keep the renderer process at normal priority even when
+        //     Chromium thinks the page is "background".
+        cmd.arg("--disable-features=CalculateNativeWinOcclusion");
+        cmd.arg("--disable-backgrounding-occluded-windows");
+        cmd.arg("--disable-renderer-backgrounding");
+    }
+    let child = cmd
         // --remote-debugging-port=0 lets Chromium pick a free port itself —
         // we previously tried picking the port in Rust via TcpListener bind
         // + drop, but the TCP TIME_WAIT race could leave CEF unable to bind
@@ -1804,6 +1827,44 @@ pub async fn spawn_browser_helper(
         pid,
         cdp_port,
     })
+}
+
+/// Discover the page-target WebSocket URL for a CEF helper's CDP endpoint.
+///
+/// JS callers can't hit the helper's `/json` directly because the wmux dev
+/// frontend runs at `http://localhost:1420` and Chromium blocks the
+/// cross-origin fetch (CDP HTTP endpoints don't return CORS headers). The
+/// WebSocket itself works fine cross-origin because the helper is spawned
+/// with `--remote-allow-origins=*`. So we do the HTTP-side discovery in
+/// Rust and hand the JS the ready-to-connect URL.
+///
+/// Mirrors the polling behavior in http_server::cdp_open_page_ws — retries
+/// briefly to tolerate being called immediately after the helper spawned.
+#[tauri::command]
+pub async fn find_cdp_page_ws_url(port: u16) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let json_url = format!("http://127.0.0.1:{port}/json");
+    for attempt in 0..30u32 {
+        if let Ok(resp) = client.get(&json_url).send().await {
+            if let Ok(targets) = resp.json::<Vec<serde_json::Value>>().await {
+                if let Some(page) = targets
+                    .iter()
+                    .find(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+                {
+                    if let Some(ws) = page.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
+                        return Ok(ws.to_string());
+                    }
+                }
+            }
+        }
+        if attempt == 29 {
+            return Err(format!(
+                "no page target on CDP port {port} after 6s — helper may have failed to start"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    unreachable!()
 }
 
 /// Kill a previously-spawned CEF browser helper and remove its registry

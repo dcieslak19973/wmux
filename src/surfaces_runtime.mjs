@@ -1,3 +1,5 @@
+import { createCefEmbeddedSurface } from './cef_embedded.mjs';
+
 export function createSurfaceRuntime({
   invoke,
   document,
@@ -97,10 +99,13 @@ export function createSurfaceRuntime({
     const state = browserPanes.get(label);
     if (!state) return;
 
-    // If a CEF helper was spawned for this pane, kill it. Idempotent
-    // server-side — safe to call when the user already closed the helper
-    // window manually.
-    if (state.cefLabel) {
+    // If an embedded surface is mounted, dispose it cleanly (stops screencast,
+    // closes WebSocket, kills helper). Otherwise fall back to the bare helper
+    // kill — covers the case where the embed failed mid-spawn and only a
+    // label exists.
+    if (state.cefEmbedded?.dispose) {
+      try { state.cefEmbedded.dispose(); } catch (_) {}
+    } else if (state.cefLabel) {
       invoke('kill_browser_helper', { label: state.cefLabel }).catch(() => {});
     }
 
@@ -308,19 +313,20 @@ export function createSurfaceRuntime({
       fwdBtn.disabled = browserState.historyIndex < 0 || browserState.historyIndex >= browserState.history.length - 1;
     };
 
-    // Switch this pane into CEF mode and load `full` via the helper. Idempotent
-    // for cefActive=true; reuses the helper via CDP navigate when one exists,
-    // falls back to a fresh spawn if the navigate fails. Removes the iframe
-    // and shows the in-pane indicator on first activation. `reason` is
-    // either 'manual' (user clicked 🌐) or 'auto-iframe-blocked' (navigateTo's
-    // header check decided the site can't iframe); affects only the indicator
-    // copy so the user understands why a popup just appeared.
+    // Switch this pane into CEF mode and load `full`. Same trigger paths as
+    // before (manual 🌐 click + auto-fallback when iframe is blocked) but
+    // instead of launching a separate top-level Chromium window, we mount
+    // the new in-pane canvas surface from cef_embedded.mjs:
+    //   - Helper spawns off-screen (Win32 (-30000,-30000) + WS_EX_TOOLWINDOW)
+    //   - We open CDP, start screencast, paint JPEG frames into a <canvas>
+    //   - Mouse / keyboard / wheel forwarded to CEF via CDP Input.dispatch*
+    // `reason` is preserved for future surfacing in UI but currently unused
+    // since the pane embed makes the popup-explanation copy obsolete.
     const cefHelperForPane = (full, reason = 'manual') => {
+      void reason;
       const firstActivation = !browserState.cefActive;
-      browserState.cefActive = true;
 
-      // Persistent visual signal in the browser bar so the user can tell
-      // at-a-glance that further navigations in this pane will pop out.
+      // Persistent visual signal in the browser bar.
       const cefBtn = document.getElementById(`bb-cef-${label}`);
       if (cefBtn) {
         cefBtn.classList.add('cef-active');
@@ -328,74 +334,48 @@ export function createSurfaceRuntime({
         cefBtn.style.color = '#fff';
       }
 
+      // Already in CEF mode: navigate the existing embedded helper via the
+      // server-side CDP wrapper (same one MCP uses). The canvas continues
+      // showing frames from the same helper as it loads the new URL.
+      if (browserState.cefEmbedded && browserState.cefLabel) {
+        invoke('navigate_browser_helper', { label: browserState.cefLabel, url: full })
+          .catch((err) => showError(`CEF navigate failed: ${err}`));
+        return;
+      }
+
+      browserState.cefActive = true;
+
+      // First activation: tear down the iframe + placeholder so the canvas
+      // claims the surface area.
       if (firstActivation) {
         try { iframeEl.remove?.(); } catch (_) {}
         placeholderEl?.remove?.();
-        if (!browserEl.querySelector('.cef-active-indicator')) {
-          let host = '';
-          try { host = new URL(full).hostname; } catch (_) {}
-          const indicator = document.createElement('div');
-          indicator.className = 'cef-active-indicator';
-          indicator.style.cssText = 'padding:16px;color:#d1d5db;font-size:13px;line-height:1.55;max-width:560px';
-          if (reason === 'auto-iframe-blocked') {
-            indicator.innerHTML =
-              '<div style="font-size:15px;color:#fff;margin-bottom:8px">'
-              + `&#x1f310; Opened <strong>${host || 'this page'}</strong> in a separate window`
-              + '</div>'
-              + `<div>${host || 'This site'} doesn't allow being embedded inside other apps `
-              + '(it sends <code>X-Frame-Options</code> or a <code>frame-ancestors</code> CSP). '
-              + 'wmux launched it in its own Chromium window — drag it wherever you want.</div>'
-              + '<div style="margin-top:10px;color:#9ca3af">'
-              + 'Any further <strong>Enter</strong> / <strong>Go</strong> in this pane will reuse that window. '
-              + 'Close the pane and reopen it to reset to in-pane iframe mode.'
-              + '</div>';
-          } else {
-            indicator.innerHTML =
-              '<div style="font-size:15px;color:#fff;margin-bottom:8px">'
-              + '&#x1f310; Chromium window active for this pane'
-              + '</div>'
-              + '<div>You clicked &#x1f310; — the page is rendering in a separate Chromium window. '
-              + 'Drag it wherever you want.</div>'
-              + '<div style="margin-top:10px;color:#9ca3af">'
-              + 'Any further <strong>Enter</strong> / <strong>Go</strong> in this pane will reuse that window. '
-              + 'Close the pane and reopen it to reset to in-pane iframe mode.'
-              + '</div>';
-          }
-          browserEl.appendChild(indicator);
-        }
       }
 
-      const recordSpawn = (spawned) => {
-        browserState.cefLabel = spawned.label;
-        browserState.cefPort = spawned.cdp_port;
-        const ind = browserEl.querySelector('.cef-active-indicator');
-        if (ind && !ind.dataset.labeled) {
-          ind.dataset.labeled = '1';
-          ind.innerHTML +=
-            '<div style="margin-top:14px;padding-top:10px;border-top:1px solid #374151;color:#9ca3af;font-size:11px">'
-            + 'For agents (MCP): this page is now readable via '
-            + '<code>browser_read_content</code> with the label below.'
-            + `<br><code style="color:#4ade80">CEF label: ${spawned.label}</code>`
-            + `<br><code style="color:#4ade80">CDP: http://localhost:${spawned.cdp_port}/json</code>`
-            + '</div>';
-        }
-      };
-
-      const spawnFresh = () => {
-        invoke('spawn_browser_helper', { windowLabel: getWindowLabel(), url: full })
-          .then(recordSpawn)
-          .catch((err) => showError(`Could not spawn CEF helper: ${err}`));
-      };
-
-      if (browserState.cefLabel) {
-        invoke('navigate_browser_helper', { label: browserState.cefLabel, url: full })
-          .catch(() => {
-            browserState.cefLabel = null;
-            spawnFresh();
-          });
-      } else {
-        spawnFresh();
+      // While the helper spawns, show a transient "loading" message so the
+      // user knows something's happening. createCefEmbeddedSurface() also
+      // shows its own status text inside the canvas; this is a brief stand-in.
+      let loadingEl = browserEl.querySelector('.cef-embed-loading');
+      if (!loadingEl) {
+        loadingEl = document.createElement('div');
+        loadingEl.className = 'cef-embed-loading';
+        loadingEl.style.cssText = 'padding:16px;color:#9ca3af;font-size:12px';
+        loadingEl.textContent = 'Spawning CEF helper for in-pane rendering…';
+        browserEl.appendChild(loadingEl);
       }
+
+      createCefEmbeddedSurface(browserEl, full)
+        .then((surface) => {
+          loadingEl?.remove?.();
+          browserState.cefEmbedded = surface;
+          browserState.cefLabel = surface.label;
+          browserState.cefPort = surface.cdpPort;
+        })
+        .catch((err) => {
+          loadingEl?.remove?.();
+          browserState.cefActive = false;
+          showError(`Could not embed CEF: ${err}`);
+        });
     };
 
     const navigateTo = (url, { pushHistory = true } = {}) => {

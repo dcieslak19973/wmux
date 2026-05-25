@@ -34,9 +34,30 @@ html, body {
 main#term {
   height: calc(100% - 32px);
   padding: 8px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  padding-left: max(8px, env(safe-area-inset-left));
+  padding-right: max(8px, env(safe-area-inset-right));
   box-sizing: border-box;
 }
 
 main#term .xterm {
   height: 100%;
+}
+
+/* Touch-friendly selection: xterm.js renders selection over a canvas
+ * layer that doesn't always honour native long-press. Bump the selection
+ * indicator opacity slightly on coarse-pointer devices so it's visible
+ * once it's there. */
+@media (pointer: coarse) {
+  .xterm .xterm-selection div { opacity: 0.45 !important; }
+  .topbar { padding: 8px 12px; }
+  .status { font-size: 13px; }
+}
+
+/* Phones (≤480px wide): bump base font so xterm.js's "13px" doesn't
+ * shrink unreadably after viewport scaling, and pad the topbar so taps
+ * have a comfortable hit area. */
+@media (max-width: 480px) {
+  main#term { padding: 4px; }
 }

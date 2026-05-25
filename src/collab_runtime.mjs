@@ -13,6 +13,7 @@ const REFRESH_INTERVAL_MS = 2000;
 export function createCollabRuntime({
   document,
   invoke,
+  listen,
   panes,
   escHtml,
   showError,
@@ -273,6 +274,7 @@ export function createCollabRuntime({
       const mint = await invoke('share_pane', {
         targetPaneId: paneId,
         ttlSeconds: DEFAULT_TTL_SECONDS,
+        requireMutualConfirm: getRequireApproval(),
       });
       cachedPort = mint.server_port;
       ttlByCode.set(mint.code, DEFAULT_TTL_SECONDS);
@@ -314,12 +316,21 @@ export function createCollabRuntime({
         <div class="collab-panel-section is-active" data-section="shares"></div>
         <div class="collab-panel-section" data-section="audit"></div>
       </div>
+      <div class="collab-panel-footer">
+        <label class="collab-panel-pref" title="When on, every new device viewing a new share triggers an Allow/Deny dialog.">
+          <input type="checkbox" class="collab-panel-require-approval" />
+          <span>Require approval for new devices on new shares</span>
+        </label>
+      </div>
     `;
     document.body.appendChild(panelEl);
     makeDockable(panelEl, panelEl.querySelector('.collab-panel-header'), 'collab-panel');
 
     panelEl.querySelector('.collab-panel-close').addEventListener('click', hidePanel);
     panelEl.querySelector('.collab-panel-refresh').addEventListener('click', refresh);
+    const approvalChk = panelEl.querySelector('.collab-panel-require-approval');
+    approvalChk.checked = getRequireApproval();
+    approvalChk.addEventListener('change', () => setRequireApproval(approvalChk.checked));
     for (const tabBtn of panelEl.querySelectorAll('.collab-panel-tab')) {
       tabBtn.addEventListener('click', () => {
         for (const t of panelEl.querySelectorAll('.collab-panel-tab')) t.classList.toggle('is-active', t === tabBtn);
@@ -445,6 +456,70 @@ export function createCollabRuntime({
     }
   }
 
+  // ── Mutual-confirm (2.6) ─────────────────────────────────────────────
+
+  const APPROVAL_PREF_KEY = 'wmux.collab.requireApproval';
+  function getRequireApproval() {
+    try { return localStorage.getItem(APPROVAL_PREF_KEY) === '1'; } catch { return false; }
+  }
+  function setRequireApproval(on) {
+    try { localStorage.setItem(APPROVAL_PREF_KEY, on ? '1' : '0'); } catch {}
+  }
+
+  function showApprovalDialog(req) {
+    // req: { code, fingerprint, peer_ip, ua_hint, ua_full }
+    const dialog = document.createElement('div');
+    dialog.className = 'collab-approval-dialog';
+    dialog.innerHTML = `
+      <div class="collab-approval-header">New device wants to view this share</div>
+      <div class="collab-approval-body">
+        <div class="collab-approval-row"><span class="collab-approval-label">Share</span><span class="mono">${escHtml(req.code)}</span></div>
+        <div class="collab-approval-row"><span class="collab-approval-label">Device</span><span>${escHtml(req.ua_hint)}</span></div>
+        <div class="collab-approval-row"><span class="collab-approval-label">From</span><span class="mono">${escHtml(req.peer_ip)}</span></div>
+        <div class="collab-approval-help">If you didn't expect this, click Deny. Approving adds this device's fingerprint to the allow-list for this share until it expires.</div>
+        <div class="collab-approval-actions">
+          <button class="collab-share-btn" data-allow="false">Deny</button>
+          <button class="collab-share-btn collab-share-btn-primary" data-allow="true">Allow</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(dialog);
+    const respond = async (allow) => {
+      dialog.remove();
+      try {
+        await invoke('respond_to_collab_approval', {
+          code: req.code,
+          fingerprint: req.fingerprint,
+          allow,
+        });
+      } catch (err) {
+        showError?.(`Approval response failed: ${err}`);
+      }
+    };
+    dialog.querySelector('[data-allow="true"]').addEventListener('click', () => respond(true));
+    dialog.querySelector('[data-allow="false"]').addEventListener('click', () => respond(false));
+    // Auto-deny after 25s so the user-facing dialog doesn't outlive the
+    // backend's 30s wait. Better to deny than leave it hanging.
+    setTimeout(() => {
+      if (document.body.contains(dialog)) {
+        respond(false).catch(() => {});
+      }
+    }, 25_000);
+  }
+
+  // Subscribe to backend approval requests as soon as the runtime boots.
+  // Best-effort: if `listen` isn't available (e.g. testing in plain browser)
+  // we just don't hook anything; mutual-confirm becomes a no-op visually
+  // and the backend times out.
+  if (listen) {
+    listen('collab-approval-needed', (event) => {
+      const req = event?.payload;
+      if (req && typeof req === 'object' && req.code && req.fingerprint) {
+        showApprovalDialog(req);
+      }
+    }).catch(() => {});
+  }
+
   // Fire an initial refresh on instantiation so badges work even when the
   // panel is never opened.
   refresh();
@@ -457,5 +532,7 @@ export function createCollabRuntime({
     refresh,
     presenceForPane,
     stopRefreshing,
+    getRequireApproval,
+    setRequireApproval,
   };
 }

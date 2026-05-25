@@ -2891,17 +2891,26 @@ pub struct ShareMintResult {
 /// the frontend can assemble the share URL.
 #[tauri::command]
 pub async fn share_pane(
+    app: AppHandle,
     target_pane_id: String,
     ttl_seconds: u64,
+    require_mutual_confirm: Option<bool>,
     store: State<'_, ShareSessionStore>,
     handle: State<'_, CollabServerHandle>,
 ) -> Result<ShareMintResult, String> {
     let port = match handle.port() {
         Some(p) => p,
         None => {
+            let emitter_app = app.clone();
+            let emitter: crate::collab_server::CollabEventEmitter = std::sync::Arc::new(
+                move |event: &str, payload: serde_json::Value| {
+                    let _ = emitter_app.emit(event, payload);
+                },
+            );
             let (addr, _h) = crate::collab_server::serve(
                 ([0, 0, 0, 0], 0).into(),
                 store.inner().clone(),
+                Some(emitter),
             )
             .await
             .map_err(|e| format!("collab server bind failed: {e}"))?;
@@ -2919,6 +2928,7 @@ pub async fn share_pane(
             target_pane_id,
             SharePermission::Read,
             std::time::Duration::from_secs(ttl_seconds.max(60)),
+            require_mutual_confirm.unwrap_or(false),
         )
         .await;
 
@@ -2970,6 +2980,22 @@ pub async fn list_audit_entries(
     store: State<'_, ShareSessionStore>,
 ) -> Result<Vec<AuditEntry>, String> {
     Ok(store.inner().audit_entries().await)
+}
+
+/// Host's response to a `collab-approval-needed` Tauri event. Returns
+/// `true` if a pending waiter was signalled, `false` if there was no
+/// matching request (e.g. it already timed out or was answered).
+#[tauri::command]
+pub async fn respond_to_collab_approval(
+    code: String,
+    fingerprint: String,
+    allow: bool,
+    store: State<'_, ShareSessionStore>,
+) -> Result<bool, String> {
+    Ok(store
+        .inner()
+        .respond_to_approval(&SessionCode(code), &fingerprint, allow)
+        .await)
 }
 
 #[tauri::command]

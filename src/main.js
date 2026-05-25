@@ -3405,6 +3405,7 @@ agentSidebarRuntime = createAgentSidebarRuntime({
 collabRuntime = createCollabRuntime({
   document,
   invoke,
+  listen,
   panes,
   escHtml,
   showError,

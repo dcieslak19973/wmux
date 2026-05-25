@@ -13,20 +13,40 @@ function setStatus(text, cls) {
   statusEl.className = `status${cls ? ' ' + cls : ''}`;
 }
 
+// Bump the default font on touch-pointer devices so xterm.js renders at
+// a thumb-friendly size on phones without forcing the page-zoom.
+const isCoarsePointer = window.matchMedia?.('(pointer: coarse)').matches;
 const term = new window.Terminal({
-  fontSize: 13,
+  fontSize: isCoarsePointer ? 15 : 13,
   fontFamily: 'ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace',
   cursorBlink: true,
   disableStdin: true,
   convertEol: false,
   scrollback: 5000,
+  rightClickSelectsWord: true,
   theme: { background: '#1e1e1e' },
 });
 const fitAddon = new window.FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 term.open(termEl);
 fitAddon.fit();
-window.addEventListener('resize', () => fitAddon.fit());
+
+// iOS Safari fires both 'resize' and 'orientationchange' on rotate;
+// belt-and-suspenders. Also fits when the visual viewport changes
+// (e.g. when the virtual keyboard appears, which shouldn't happen here
+// because input is disabled, but mobile browsers sometimes nudge it).
+function refit() { fitAddon.fit(); }
+window.addEventListener('resize', refit);
+window.addEventListener('orientationchange', refit);
+window.visualViewport?.addEventListener('resize', refit);
+
+// Prevent double-tap-to-zoom on the terminal (iOS Safari default).
+// Pinch-zoom on the page still works via the viewport meta.
+termEl.addEventListener('touchend', (e) => {
+  if (e.touches.length === 0 && e.changedTouches.length === 1) {
+    e.preventDefault();
+  }
+}, { passive: false });
 
 // Parse the share URL: /s/<code> with secret in the fragment as #t=<secret>
 const pathParts = window.location.pathname.split('/').filter(Boolean);

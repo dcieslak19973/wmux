@@ -3612,6 +3612,76 @@ body.has-tabs #empty-state { display: none; }
 .collab-audit-Revoked    .collab-audit-event { color: #d97706; }
 .collab-audit-Expired    .collab-audit-event { color: var(--text-muted, #9aa); }
 .collab-audit-AuthFailed .collab-audit-event { color: #d96a6a; }
+.collab-audit-ApprovalRequested .collab-audit-event { color: #c0e8ff; }
+.collab-audit-ApprovalGranted .collab-audit-event { color: #6ec06e; }
+.collab-audit-ApprovalDenied .collab-audit-event { color: #d96a6a; }
+.collab-audit-ApprovalTimedOut .collab-audit-event { color: var(--text-muted, #9aa); }
+
+/* ── Collab panel footer (settings) ─────────────────────────────────── */
+.collab-panel-footer {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border, #333);
+  background: rgba(0,0,0,0.15);
+}
+.collab-panel-pref {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted, #9aa);
+  cursor: pointer;
+  user-select: none;
+}
+.collab-panel-pref input[type="checkbox"] { margin: 0; }
+
+/* ── Approval dialog (mutual-confirm) ───────────────────────────────── */
+.collab-approval-dialog {
+  position: fixed;
+  top: 56px;
+  right: 24px;
+  width: 320px;
+  background: var(--panel-bg, #1f2228);
+  border: 1px solid rgba(56,189,248,0.45);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(56,189,248,0.15);
+  z-index: 10000;
+  font-size: 12px;
+}
+.collab-approval-header {
+  padding: 10px 12px;
+  font-weight: 600;
+  background: rgba(56,189,248,0.12);
+  border-bottom: 1px solid rgba(56,189,248,0.3);
+  border-radius: 6px 6px 0 0;
+}
+.collab-approval-body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.collab-approval-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.collab-approval-label {
+  flex: 0 0 64px;
+  color: var(--text-muted, #9aa);
+  font-size: 11px;
+}
+.collab-approval-help {
+  font-size: 11px;
+  color: var(--text-muted, #9aa);
+  line-height: 1.5;
+  padding-top: 4px;
+}
+.collab-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 6px;
+}
 
 
 

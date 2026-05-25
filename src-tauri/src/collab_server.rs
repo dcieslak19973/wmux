@@ -26,18 +26,26 @@
 //! 5. After Auth + Hello, the server sends the cached snapshot (if any)
 //!    as the first `OutputChunk`, then enters the pump loop.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+
+/// Callback for emitting events to the host frontend. Concrete impl is
+/// constructed in `lib.rs` from a `tauri::AppHandle::emit` closure; we keep
+/// this module Tauri-free so test binaries don't pull in WebView2 at link
+/// time (Windows `STATUS_ENTRYPOINT_NOT_FOUND` if they do).
+pub type CollabEventEmitter = std::sync::Arc<
+    dyn Fn(&str, serde_json::Value) + Send + Sync + 'static,
+>;
 use collab_proto::{ParticipantId, SessionCode, SessionMessage, PROTOCOL_VERSION};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -142,6 +150,18 @@ pub struct ShareSession {
     /// screen rather than the screen at share-creation time. std::sync
     /// because start_session_stream feeds this from a sync closure.
     pub replay_buffer: Arc<std::sync::Mutex<ReplayBuffer>>,
+    /// Phase 2.6: when true, the host has to approve every new
+    /// IP+UA fingerprint before its WebSocket proceeds past Auth.
+    pub mutual_confirm: bool,
+    /// Fingerprints already approved by the host for this share. Keyed
+    /// by short hex of `sha256(ip + ua)`. Skipped when `mutual_confirm`
+    /// is false. Resets when the share is revoked.
+    pub seen_fingerprints: Arc<Mutex<HashSet<String>>>,
+    /// Pending approval requests — fingerprint → oneshot::Sender<bool>.
+    /// The WS handler creates the channel and stashes the sender here,
+    /// then awaits the receiver. The host's `respond_to_collab_approval`
+    /// Tauri command (or a test) plucks the sender out and signals.
+    pub pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
 }
 
 impl ShareSession {
@@ -170,6 +190,10 @@ pub enum AuditEventKind {
     Connected,
     Disconnected,
     AuthFailed,
+    ApprovalRequested,
+    ApprovalGranted,
+    ApprovalDenied,
+    ApprovalTimedOut,
 }
 
 /// Lightweight serialisable projection of a [`ShareSession`] for the Tauri
@@ -183,6 +207,7 @@ pub struct ShareInfo {
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub presence: usize,
+    pub mutual_confirm: bool,
     /// Path component for the viewer URL — `/s/<code>`. Host doesn't know
     /// its own IP for sure, so the frontend assembles the full URL.
     pub path: String,
@@ -203,6 +228,7 @@ impl ShareInfo {
             created_at_ms,
             expires_at_ms: now_ms.saturating_add(remaining_ms),
             presence: s.presence_count(),
+            mutual_confirm: s.mutual_confirm,
             path: format!("/s/{}", s.code.0),
         }
     }
@@ -256,6 +282,7 @@ impl ShareSessionStore {
         target_pane_id: String,
         permission: SharePermission,
         ttl: Duration,
+        mutual_confirm: bool,
     ) -> MintedShare {
         let secret = random_secret();
         let secret_hash = sha256(secret.as_bytes());
@@ -271,6 +298,9 @@ impl ShareSessionStore {
             presence: Arc::new(AtomicUsize::new(0)),
             snapshot: Arc::new(Mutex::new(None)),
             replay_buffer: Arc::new(std::sync::Mutex::new(ReplayBuffer::default())),
+            mutual_confirm,
+            seen_fingerprints: Arc::new(Mutex::new(HashSet::new())),
+            pending_approvals: Arc::new(Mutex::new(HashMap::new())),
         };
         let mut inner = self.inner.write().await;
         inner.sessions.insert(code.clone(), session.clone());
@@ -329,6 +359,26 @@ impl ShareSessionStore {
         inner.entries_to_vec()
     }
 
+    /// Resolve a pending mutual-confirm prompt. Returns `true` if a waiter
+    /// was found and signalled; `false` if there was no pending request for
+    /// this (code, fingerprint) pair — e.g. it already timed out, or the
+    /// host clicked Allow/Deny twice.
+    pub async fn respond_to_approval(
+        &self,
+        code: &SessionCode,
+        fingerprint: &str,
+        allow: bool,
+    ) -> bool {
+        let Some(session) = self.get(code).await else { return false };
+        let tx = session.pending_approvals.lock().await.remove(fingerprint);
+        if let Some(tx) = tx {
+            let _ = tx.send(allow);
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn push_audit(&self, entry: AuditEntry) {
         self.inner.write().await.audit.push(entry);
     }
@@ -376,6 +426,9 @@ impl StoreInner {
 #[derive(Clone)]
 struct AppState {
     store: ShareSessionStore,
+    /// `None` in tests; when present, the WS handler invokes it to
+    /// emit `collab-approval-needed` events to the host frontend.
+    emitter: Option<CollabEventEmitter>,
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────
@@ -387,13 +440,65 @@ async fn health() -> &'static str {
 async fn ws_handler(
     Path(code): Path<String>,
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let code = SessionCode(code);
-    ws.on_upgrade(move |socket| handle_socket(socket, state.store, code))
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    ws.on_upgrade(move |socket| {
+        handle_socket(socket, state.store, state.emitter, code, peer_addr, ua)
+    })
 }
 
-async fn handle_socket(mut socket: WebSocket, store: ShareSessionStore, code: SessionCode) {
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalRequest {
+    pub code: String,
+    pub fingerprint: String,
+    pub peer_ip: String,
+    pub ua_hint: String,
+    pub ua_full: String,
+}
+
+fn ua_hint(ua: &str) -> String {
+    let lower = ua.to_lowercase();
+    let device = if lower.contains("iphone") { "iPhone" }
+        else if lower.contains("ipad") { "iPad" }
+        else if lower.contains("android") { "Android" }
+        else if lower.contains("macintosh") || lower.contains("mac os") { "Mac" }
+        else if lower.contains("windows") { "Windows" }
+        else if lower.contains("linux") { "Linux" }
+        else { "Device" };
+    let browser = if lower.contains("firefox") { "Firefox" }
+        else if lower.contains("edg/") { "Edge" }
+        else if lower.contains("chrome") { "Chrome" }
+        else if lower.contains("safari") { "Safari" }
+        else { "Browser" };
+    format!("{device} {browser}")
+}
+
+fn fingerprint_of(peer: &SocketAddr, ua: &str) -> String {
+    // Use IP only (not port) so the fingerprint is stable across reconnects.
+    let ip_str = peer.ip().to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(ip_str.as_bytes());
+    hasher.update(b"|");
+    hasher.update(ua.as_bytes());
+    hex(&hasher.finalize())[..16].to_string()
+}
+
+async fn handle_socket(
+    mut socket: WebSocket,
+    store: ShareSessionStore,
+    emitter: Option<CollabEventEmitter>,
+    code: SessionCode,
+    peer_addr: SocketAddr,
+    ua: String,
+) {
     // Auth phase: first frame must be Auth carrying the secret.
     let Some(Ok(first)) = socket.recv().await else { return };
     let Message::Text(first_text) = first else { return };
@@ -412,6 +517,50 @@ async fn handle_socket(mut socket: WebSocket, store: ShareSessionStore, code: Se
     if !constant_time_eq(&sha256(secret.as_bytes()), &session.secret_hash) {
         push_audit(&store, &code.0, None, AuditEventKind::AuthFailed).await;
         return;
+    }
+
+    // Mutual-confirm gate (Phase 2.6). If enabled AND we haven't seen this
+    // fingerprint before for this share, ring the host's bell and wait up
+    // to 30 s for a decision.
+    if session.mutual_confirm {
+        let fp = fingerprint_of(&peer_addr, &ua);
+        let already_approved = session.seen_fingerprints.lock().await.contains(&fp);
+        if !already_approved {
+            let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+            session.pending_approvals.lock().await.insert(fp.clone(), tx);
+
+            if let Some(emit) = &emitter {
+                let req = ApprovalRequest {
+                    code: code.0.clone(),
+                    fingerprint: fp.clone(),
+                    peer_ip: peer_addr.ip().to_string(),
+                    ua_hint: ua_hint(&ua),
+                    ua_full: ua.clone(),
+                };
+                if let Ok(payload) = serde_json::to_value(&req) {
+                    emit("collab-approval-needed", payload);
+                }
+            }
+            push_audit(&store, &code.0, Some(fp.clone()), AuditEventKind::ApprovalRequested).await;
+
+            let decision = tokio::time::timeout(Duration::from_secs(30), rx).await;
+            // Always clear the pending entry, regardless of outcome.
+            session.pending_approvals.lock().await.remove(&fp);
+            match decision {
+                Ok(Ok(true)) => {
+                    session.seen_fingerprints.lock().await.insert(fp.clone());
+                    push_audit(&store, &code.0, Some(fp), AuditEventKind::ApprovalGranted).await;
+                }
+                Ok(Ok(false)) => {
+                    push_audit(&store, &code.0, Some(fp), AuditEventKind::ApprovalDenied).await;
+                    return;
+                }
+                _ => {
+                    push_audit(&store, &code.0, Some(fp), AuditEventKind::ApprovalTimedOut).await;
+                    return;
+                }
+            }
+        }
     }
 
     // Hello handshake.
@@ -566,22 +715,23 @@ fn static_response(body: &'static [u8], content_type: &str) -> Response {
         .unwrap()
 }
 
-pub fn router(store: ShareSessionStore) -> Router {
+pub fn router(store: ShareSessionStore, emitter: Option<CollabEventEmitter>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ws/:code", get(ws_handler))
         .route("/s/:code", get(viewer_index))
         .route("/s/:code/:name", get(viewer_asset))
-        .with_state(AppState { store })
+        .with_state(AppState { store, emitter })
 }
 
 pub async fn serve(
     addr: SocketAddr,
     store: ShareSessionStore,
+    emitter: Option<CollabEventEmitter>,
 ) -> std::io::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
-    let app = router(store);
+    let app = router(store, emitter).into_make_service_with_connect_info::<SocketAddr>();
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -650,6 +800,13 @@ mod tests {
     async fn mint_and_serve(
         pane_id: &str,
     ) -> (String, ShareSession, ShareSessionStore, SocketAddr) {
+        mint_and_serve_opts(pane_id, false).await
+    }
+
+    async fn mint_and_serve_opts(
+        pane_id: &str,
+        mutual_confirm: bool,
+    ) -> (String, ShareSession, ShareSessionStore, SocketAddr) {
         let store = ShareSessionStore::new();
         let MintedShare { secret, session } = store
             .create(
@@ -657,9 +814,10 @@ mod tests {
                 pane_id.to_string(),
                 SharePermission::Read,
                 Duration::from_secs(30),
+                mutual_confirm,
             )
             .await;
-        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store.clone())
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store.clone(), None)
             .await
             .expect("server binds");
         (secret, session, store, addr)
@@ -687,7 +845,7 @@ mod tests {
         serde_json::from_str(&text).unwrap()
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auth_then_hello_then_output_chunk() {
         let (secret, session, _store, addr) = mint_and_serve("pane-1").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
@@ -735,7 +893,7 @@ mod tests {
         assert_eq!(chunks[0], b"this is too big");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn replay_buffer_replays_to_reconnecting_viewer() {
         let store = ShareSessionStore::new();
         let MintedShare { secret, session } = store
@@ -744,6 +902,7 @@ mod tests {
                 "pane-rep".to_string(),
                 SharePermission::Read,
                 Duration::from_secs(30),
+                false,
             )
             .await;
 
@@ -754,7 +913,7 @@ mod tests {
             buf.push(b"early-2 ".to_vec());
         }
 
-        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store).await.unwrap();
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None).await.unwrap();
         let mut ws = connect_and_auth(addr, "rep", &secret).await;
 
         // Server hello.
@@ -776,7 +935,7 @@ mod tests {
         assert_eq!(bytes(m3), b"live!");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn snapshot_sent_as_first_chunk_when_present() {
         let (secret, _session, store, addr) = mint_and_serve("pane-snap").await;
         let saved = store.set_snapshot(&SessionCode("smoke-abc".to_string()), b"PRELOADED".to_vec()).await;
@@ -792,7 +951,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn presence_increments_and_decrements() {
         let (secret, session, _store, addr) = mint_and_serve("pane-p").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
@@ -808,14 +967,14 @@ mod tests {
         assert_eq!(session.presence_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn for_each_share_on_pane_iterates_only_matching() {
         let store = ShareSessionStore::new();
         let m1 = store
-            .create(SessionCode("a".to_string()), "pane-1".into(), SharePermission::Read, Duration::from_secs(60))
+            .create(SessionCode("a".to_string()), "pane-1".into(), SharePermission::Read, Duration::from_secs(60), false)
             .await;
         let _m2 = store
-            .create(SessionCode("b".to_string()), "pane-2".into(), SharePermission::Read, Duration::from_secs(60))
+            .create(SessionCode("b".to_string()), "pane-2".into(), SharePermission::Read, Duration::from_secs(60), false)
             .await;
 
         let mut hits: Vec<String> = Vec::new();
@@ -827,7 +986,7 @@ mod tests {
         let _ = m1; // suppress unused warning
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn audit_log_records_lifecycle() {
         let (secret, _session, store, addr) = mint_and_serve("pane-audit").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
@@ -842,7 +1001,7 @@ mod tests {
         assert!(kinds.iter().any(|k| k == "Disconnected"), "missing Disconnected: {kinds:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auth_with_bad_secret_records_audit_and_closes() {
         let (_secret, _session, store, addr) = mint_and_serve("pane-bad").await;
         let url = format!("ws://{addr}/ws/smoke-abc");
@@ -859,11 +1018,11 @@ mod tests {
         assert!(kinds.iter().any(|k| k == "AuthFailed"), "missing AuthFailed: {kinds:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn expiry_sweeper_drops_stale_entries() {
         let store = ShareSessionStore::new();
         let _m = store
-            .create(SessionCode("exp".to_string()), "pane-x".into(), SharePermission::Read, Duration::from_millis(10))
+            .create(SessionCode("exp".to_string()), "pane-x".into(), SharePermission::Read, Duration::from_millis(10), false)
             .await;
         assert!(store.get(&SessionCode("exp".to_string())).await.is_some());
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -873,15 +1032,74 @@ mod tests {
         assert!(kinds.iter().any(|k| k == "Expired"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mutual_confirm_blocks_until_approved() {
+        let (secret, _session, store, addr) = mint_and_serve_opts("pane-mc", true).await;
+        // Spawn the connect on a task so we can poke the store while it's waiting.
+        let secret_for_task = secret.clone();
+        let connect_task = tokio::spawn(async move {
+            let mut ws = connect_and_auth(addr, "smoke-abc", &secret_for_task).await;
+            // After approval the server should send its Hello.
+            next_message(&mut ws).await
+        });
+
+        // Give the WS handler a moment to enter the wait state and emit the
+        // ApprovalRequested audit entry.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let entries = store.audit_entries().await;
+        let kinds: Vec<_> = entries.iter().map(|e| format!("{:?}", e.event)).collect();
+        assert!(kinds.iter().any(|k| k == "ApprovalRequested"), "missing ApprovalRequested: {kinds:?}");
+
+        // Find the pending fingerprint and approve it.
+        let session = store.get(&SessionCode("smoke-abc".to_string())).await.unwrap();
+        let pending = session.pending_approvals.lock().await;
+        let fp = pending.keys().next().cloned().expect("pending approval present");
+        drop(pending);
+        let ok = store.respond_to_approval(&SessionCode("smoke-abc".to_string()), &fp, true).await;
+        assert!(ok);
+
+        // The connect should now complete with a server Hello.
+        let msg = connect_task.await.unwrap();
+        assert!(matches!(msg, SessionMessage::Hello { .. }));
+
+        // Reconnect from the same fingerprint should not require a fresh
+        // approval (fingerprint cached in seen_fingerprints).
+        let mut ws2 = connect_and_auth(addr, "smoke-abc", &secret).await;
+        assert!(matches!(next_message(&mut ws2).await, SessionMessage::Hello { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mutual_confirm_denied_closes_socket() {
+        let (secret, _session, store, addr) = mint_and_serve_opts("pane-deny", true).await;
+        let connect_task = tokio::spawn(async move {
+            let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
+            // Server should close without a Hello.
+            ws.next().await
+        });
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let session = store.get(&SessionCode("smoke-abc".to_string())).await.unwrap();
+        let fp = session.pending_approvals.lock().await.keys().next().cloned().unwrap();
+        store.respond_to_approval(&SessionCode("smoke-abc".to_string()), &fp, false).await;
+
+        // Server dropped the socket without a Close frame; tokio-tungstenite
+        // reports that as None / a Close message / a ResetWithoutClosing
+        // protocol error depending on timing. All three mean "denied,
+        // socket gone" — accept any of them.
+        let _final_msg = connect_task.await.unwrap();
+        let kinds: Vec<_> = store.audit_entries().await.iter().map(|e| format!("{:?}", e.event)).collect();
+        assert!(kinds.iter().any(|k| k == "ApprovalDenied"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewer_index_404s_for_unknown_code() {
         let store = ShareSessionStore::new();
-        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store).await.unwrap();
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None).await.unwrap();
         let resp = reqwest::get(format!("http://{addr}/s/missing")).await.unwrap();
         assert_eq!(resp.status(), 404);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewer_index_serves_html_for_known_code() {
         let (_secret, _session, _store, addr) = mint_and_serve("pane-html").await;
         let resp = reqwest::get(format!("http://{addr}/s/smoke-abc")).await.unwrap();
@@ -893,7 +1111,7 @@ mod tests {
         assert!(body.to_lowercase().contains("wmux"), "expected 'wmux' in viewer HTML, got: {body:.120}…");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewer_asset_serves_javascript() {
         let (_secret, _session, _store, addr) = mint_and_serve("pane-js").await;
         let resp = reqwest::get(format!("http://{addr}/s/smoke-abc/viewer.mjs")).await.unwrap();

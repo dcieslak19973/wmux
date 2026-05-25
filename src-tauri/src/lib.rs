@@ -120,6 +120,7 @@ pub fn run() {
             commands::get_collab_server_port,
             commands::list_local_addresses,
             commands::detect_tailscale_status,
+            commands::respond_to_collab_approval,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

@@ -335,24 +335,26 @@ export function createCollabRuntime({
     if (!wsId) return;
     const wsShare = activeWorkspaceSharesByHostWs.get(wsId);
     if (!wsShare) return;
-
-    // Find every shareable pane currently in this workspace's active tab.
     if (!tabs) return;
-    let activeTab = null;
+
+    // Collect every tab belonging to this workspace, preserving order.
+    const orderedTabs = [];
+    let activeTabId = null;
     for (const tab of tabs.values()) {
       if (tab.workspaceId !== wsId) continue;
-      if (tab.contentEl?.classList?.contains('visible')) { activeTab = tab; break; }
-      if (!activeTab) activeTab = tab; // first-found fallback
+      orderedTabs.push(tab);
+      if (tab.contentEl?.classList?.contains('visible')) {
+        activeTabId = tab.id;
+      }
     }
-    if (!activeTab) return;
-    const rootEl = activeTab.contentEl?.querySelector?.('.pane-leaf, .pane-split');
-    if (!rootEl) return;
+    if (orderedTabs.length === 0) return;
+    if (!activeTabId) activeTabId = orderedTabs[0].id;
 
-    // For each pane that isn't yet shared, mint a pane share and add it
-    // to the workspace bundle. Skip non-terminal panes.
+    // Walk every tab; collect pane IDs that need a fresh share share-mint.
     const newPaneIds = [];
+    const tabRoots = []; // [{ tab, rootEl }]
     const visited = new Set();
-    function walk(el) {
+    function walkForNewPanes(el) {
       if (!el || visited.has(el)) return;
       visited.add(el);
       if (el.classList?.contains('pane-leaf')) {
@@ -363,17 +365,25 @@ export function createCollabRuntime({
         return;
       }
       if (el.classList?.contains('pane-split')) {
-        for (const child of el.children) walk(child);
+        for (const child of el.children) walkForNewPanes(child);
         return;
       }
-      if (el.firstElementChild) walk(el.firstElementChild);
+      if (el.firstElementChild) walkForNewPanes(el.firstElementChild);
     }
-    walk(rootEl);
+    for (const tab of orderedTabs) {
+      const root = tab.contentEl?.querySelector?.('.pane-leaf, .pane-split');
+      if (!root) continue;
+      tabRoots.push({ tab, rootEl: root });
+      walkForNewPanes(root);
+    }
+    if (tabRoots.length === 0) return;
 
+    // Mint pane shares for every pane that doesn't already have one.
     for (const sid of newPaneIds) {
       try {
         const pane = panes.get(sid);
-        const tabTitle = activeTab.title || 'Tab';
+        const owningTab = orderedTabs.find((t) => (t.paneIds || []).includes(sid));
+        const tabTitle = owningTab?.title || 'Tab';
         const detail = pane?.cwd || pane?.title || '';
         const label = detail ? `${tabTitle} · ${detail}` : tabTitle;
         const res = await invoke('add_pane_to_workspace_share', {
@@ -385,7 +395,6 @@ export function createCollabRuntime({
           requireMutualConfirm: getRequireApproval(),
         });
         wsShare.paneIdToCode.set(sid, res.code);
-        // Push a fresh snapshot for the new pane.
         const snap = captureSnapshot(sid);
         if (snap) {
           invoke('provide_share_snapshot', { code: res.code, snapshot: snap }).catch(() => {});
@@ -395,12 +404,23 @@ export function createCollabRuntime({
       }
     }
 
-    const layout = buildViewerLayout(rootEl, wsShare.paneIdToCode);
-    if (layout) {
-      invoke('provide_workspace_layout', { code: wsShare.code, layout }).catch((err) => {
-        console.warn('[collab] provide_workspace_layout failed:', err);
-      });
+    // Build the multi-tab layout shape:
+    //   { kind: 'workspace', tabs: [{ id, title, layout }], active_tab_id }
+    const tabPayloads = [];
+    for (const { tab, rootEl } of tabRoots) {
+      const layout = buildViewerLayout(rootEl, wsShare.paneIdToCode);
+      if (!layout) continue;
+      tabPayloads.push({ id: tab.id, title: tab.title || 'Tab', layout });
     }
+    if (tabPayloads.length === 0) return;
+    const payload = {
+      kind: 'workspace',
+      tabs: tabPayloads,
+      active_tab_id: activeTabId,
+    };
+    invoke('provide_workspace_layout', { code: wsShare.code, layout: payload }).catch((err) => {
+      console.warn('[collab] provide_workspace_layout failed:', err);
+    });
   }
 
   // Hook called by main.js whenever the layout dirties — splits, closes,

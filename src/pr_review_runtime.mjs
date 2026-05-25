@@ -166,7 +166,8 @@ export function createPrReviewRuntime({
       selectedPath: null,
       rawDiff: '',
       selectedContext: null,
-      askAgent: null, // null = Claude (API); key string = terminal agent
+      askAgent: 'claude',     // agent key (matches a FIX_AGENTS entry)
+      askMode: 'inline',      // 'inline' → ask_agent_oneshot; 'terminal' → write to pane
     };
     if (state.cwd) cwdInput.value = state.cwd;
     prReviewPanes.set(label, state);
@@ -191,28 +192,28 @@ export function createPrReviewRuntime({
       selBadge.style.display = 'none';
     });
 
+    const setAgentSelection = (agent, mode) => {
+      state.askAgent = agent.key;
+      state.askMode = mode;
+      agentBtn.textContent = `${agent.label}${mode === 'terminal' ? ' (term)' : ''}`;
+      agentBtn.style.color = agent.color ?? '';
+    };
+
     // ── Agent picker ──────────────────────────────────────────────────────
     if (agentBtn && fixAgents && showContextMenu) {
       agentBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         const r = agentBtn.getBoundingClientRect();
+        const inlineAgents = fixAgents.filter((a) => a.oneshot);
         const items = [
-          {
-            label: 'Claude (inline)',
-            action: () => {
-              state.askAgent = null;
-              agentBtn.textContent = 'Claude';
-              agentBtn.style.color = '';
-            },
-          },
+          ...inlineAgents.map((agent) => ({
+            label: `${agent.label} (inline)`,
+            action: () => setAgentSelection(agent, 'inline'),
+          })),
           { type: 'separator' },
           ...fixAgents.map((agent) => ({
             label: `${agent.label} (terminal)`,
-            action: () => {
-              state.askAgent = agent.key;
-              agentBtn.textContent = agent.label;
-              agentBtn.style.color = agent.color ?? '';
-            },
+            action: () => setAgentSelection(agent, 'terminal'),
           })),
         ];
         showContextMenu(items, r.left, r.bottom + 4);
@@ -224,11 +225,11 @@ export function createPrReviewRuntime({
       const question = askInput.value.trim();
       if (!question) return;
       const context = state.selectedContext || state.rawDiff;
+      const agent = fixAgents?.find((a) => a.key === state.askAgent);
+      if (!agent) return;
 
-      // Non-Claude agents: write command to active terminal pane
-      if (state.askAgent && fixAgents) {
-        const agent = fixAgents.find((a) => a.key === state.askAgent);
-        if (!agent) return;
+      // Terminal mode: write a command to the active pane for an interactive follow-up.
+      if (state.askMode === 'terminal') {
         const filePart = state.selectedPath ? ` [${state.selectedPath}]` : '';
         const body = `${question}${filePart}`;
         const activePaneId = getActivePaneId?.();
@@ -241,21 +242,28 @@ export function createPrReviewRuntime({
         return;
       }
 
-      // Claude: use API
+      // Inline mode: spawn the agent CLI one-shot and render its stdout.
+      if (!agent.oneshot) {
+        askResponseEl.innerHTML = `<p class="pr-review-empty">${escHtml(agent.label)} has no one-shot mode. Pick a different agent or use (terminal) mode.</p>`;
+        askResponseEl.style.display = '';
+        return;
+      }
       if (!context) {
         askResponseEl.innerHTML = '<p class="pr-review-empty">Select a file first.</p>';
         askResponseEl.style.display = '';
         return;
       }
-      const agentLabel = state.askAgent ? (fixAgents?.find((a) => a.key === state.askAgent)?.label ?? 'AI') : 'Claude';
-      askResponseEl.innerHTML = `<p class="pr-review-empty">Asking ${escHtml(agentLabel)}…</p>`;
+      askResponseEl.innerHTML = `<p class="pr-review-empty">Asking ${escHtml(agent.label)}…</p>`;
       askResponseEl.style.display = '';
       askBtn.disabled = true;
       try {
-        const response = await invoke('ask_claude_about_diff', {
+        const response = await invoke('ask_agent_oneshot', {
+          cmd: agent.oneshot.cmd,
+          args: agent.oneshot.args ?? [],
           question,
           diffContext: context,
           filePath: state.selectedPath ?? '',
+          cwd: state.cwd || null,
         });
         askResponseEl.innerHTML = renderAiMarkdown(response);
       } catch (err) {

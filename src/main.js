@@ -161,17 +161,24 @@ const SETTINGS_DEFAULTS = {
 
 const SAVED_SSH_TARGETS_KEY = 'wmux-saved-ssh-targets';
 
-// Agent invocation templates, per shell flavour.
+// Agent invocation templates.
+//
+// Interactive (terminal) mode — written to a pane via write_to_session. Quoting
+// rules vary by shell flavour:
 //   bash  → bash + zsh (both accept $'…' ANSI-C quoting)
 //   ps    → PowerShell + pwsh (backtick is the escape char)
 //   fish  → fish (no $'…'; uses double-quoted strings with \n + \\ escapes)
+//
+// One-shot (inline) mode — invoked via ask_agent_oneshot. The prompt is passed
+// as the final argv item by the backend; `oneshot` provides the leading argv
+// (executable + flags). Set to null when an agent has no one-shot mode.
 const FIX_AGENTS = [
-  { key: 'claude',   label: 'Claude',   color: '#d97706', bash: (b) => `claude $'${b}'`,           ps: (b) => `claude "${b}"`,           fish: (b) => `claude "${b}"` },
-  { key: 'codex',    label: 'Codex',    color: '#10b981', bash: (b) => `codex $'${b}'`,            ps: (b) => `codex "${b}"`,            fish: (b) => `codex "${b}"` },
-  { key: 'gemini',   label: 'Gemini',   color: '#4285f4', bash: (b) => `gemini $'${b}'`,           ps: (b) => `gemini "${b}"`,           fish: (b) => `gemini "${b}"` },
-  { key: 'opencode', label: 'OpenCode', color: '#a78bfa', bash: (b) => `opencode $'${b}'`,         ps: (b) => `opencode "${b}"`,         fish: (b) => `opencode "${b}"` },
-  { key: 'aider',    label: 'Aider',    color: '#ec4899', bash: (b) => `aider --message $'${b}'`,  ps: (b) => `aider --message "${b}"`,  fish: (b) => `aider --message "${b}"` },
-  { key: 'amp',      label: 'Amp',      color: '#f59e0b', bash: (b) => `amp $'${b}'`,              ps: (b) => `amp "${b}"`,              fish: (b) => `amp "${b}"` },
+  { key: 'claude',   label: 'Claude',   color: '#d97706', bash: (b) => `claude $'${b}'`,           ps: (b) => `claude "${b}"`,           fish: (b) => `claude "${b}"`,           oneshot: { cmd: 'claude',   args: ['-p'] } },
+  { key: 'codex',    label: 'Codex',    color: '#10b981', bash: (b) => `codex $'${b}'`,            ps: (b) => `codex "${b}"`,            fish: (b) => `codex "${b}"`,            oneshot: { cmd: 'codex',    args: ['exec'] } },
+  { key: 'gemini',   label: 'Gemini',   color: '#4285f4', bash: (b) => `gemini $'${b}'`,           ps: (b) => `gemini "${b}"`,           fish: (b) => `gemini "${b}"`,           oneshot: { cmd: 'gemini',   args: ['-p'] } },
+  { key: 'opencode', label: 'OpenCode', color: '#a78bfa', bash: (b) => `opencode $'${b}'`,         ps: (b) => `opencode "${b}"`,         fish: (b) => `opencode "${b}"`,         oneshot: { cmd: 'opencode', args: ['run'] } },
+  { key: 'aider',    label: 'Aider',    color: '#ec4899', bash: (b) => `aider --message $'${b}'`,  ps: (b) => `aider --message "${b}"`,  fish: (b) => `aider --message "${b}"`,  oneshot: { cmd: 'aider',    args: ['--no-pretty', '--no-stream', '--yes-always', '--message'] } },
+  { key: 'amp',      label: 'Amp',      color: '#f59e0b', bash: (b) => `amp $'${b}'`,              ps: (b) => `amp "${b}"`,              fish: (b) => `amp "${b}"`,              oneshot: null },
 ];
 
 function loadSettings() {

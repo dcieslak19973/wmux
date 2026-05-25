@@ -760,10 +760,12 @@ fn build_remote_tmux_state_from_outputs(
 pub async fn start_session_stream(
     app: AppHandle,
     manager: State<'_, SessionManager>,
+    collab_store: State<'_, ShareSessionStore>,
     id: String,
 ) -> Result<(), String> {
     let session = manager.get(&id).await.ok_or("session not found")?;
     let block_store = manager.get_block_store(&id).await.ok_or("session not found")?;
+    let collab_store = collab_store.inner().clone();
 
     // Take the initial receiver — created at spawn time, so it has all output
     // buffered since the session started.
@@ -796,6 +798,15 @@ pub async fn start_session_stream(
                     if app.emit(&event_id, b64).is_err() {
                         break;
                     }
+
+                    // Fan the raw bytes to any active share viewers attached
+                    // to this pane. Send errors mean no viewers are listening
+                    // on a given share — ignore; reconnect will resubscribe.
+                    collab_store
+                        .for_each_share_on_pane(&id_clone, |share| {
+                            let _ = share.output_tx.send(chunk.clone());
+                        })
+                        .await;
 
                     for (url, is_oauth) in url_detector::extract_notable_urls(&chunk) {
                         if seen_urls.insert(url.clone()) {
@@ -2829,4 +2840,152 @@ print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get
         .output()
         .map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
+}
+
+// ── Collab share commands (Phase 1) ─────────────────────────────────────
+//
+// See `src/collab_server.rs` and `docs/multiplayer-design.md`. The server
+// starts lazily on the first `share_pane` call and stays up for the lifetime
+// of wmux. Output forwarding into share broadcast channels is wired in
+// `start_session_stream` (search for `for_each_share_on_pane`).
+
+use crate::collab_server::{
+    AuditEntry, ShareInfo, SharePermission, ShareSessionStore,
+};
+use collab_proto::SessionCode;
+
+/// Tracks whether the collab HTTP/WS server has been bound, and on what
+/// port. Managed as Tauri state; populated on first `share_pane` call.
+#[derive(Default)]
+pub struct CollabServerHandle {
+    state: std::sync::Mutex<Option<u16>>,
+}
+
+impl CollabServerHandle {
+    fn port(&self) -> Option<u16> {
+        *self.state.lock().unwrap()
+    }
+
+    fn set_port(&self, port: u16) {
+        *self.state.lock().unwrap() = Some(port);
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShareMintResult {
+    pub code: String,
+    pub secret: String,
+    pub server_port: u16,
+    pub path: String,
+    pub share_info: ShareInfo,
+}
+
+/// Mint a new read-only share scoped to `target_pane_id`. Starts the collab
+/// server if it isn't already running. Returns the share code + secret so
+/// the frontend can assemble the share URL.
+#[tauri::command]
+pub async fn share_pane(
+    target_pane_id: String,
+    ttl_seconds: u64,
+    store: State<'_, ShareSessionStore>,
+    handle: State<'_, CollabServerHandle>,
+) -> Result<ShareMintResult, String> {
+    let port = match handle.port() {
+        Some(p) => p,
+        None => {
+            let (addr, _h) = crate::collab_server::serve(
+                ([0, 0, 0, 0], 0).into(),
+                store.inner().clone(),
+            )
+            .await
+            .map_err(|e| format!("collab server bind failed: {e}"))?;
+            handle.set_port(addr.port());
+            addr.port()
+        }
+    };
+
+    let code_str = short_session_code();
+    let code = SessionCode(code_str.clone());
+    let minted = store
+        .inner()
+        .create(
+            code,
+            target_pane_id,
+            SharePermission::Read,
+            std::time::Duration::from_secs(ttl_seconds.max(60)),
+        )
+        .await;
+
+    let share_info = store
+        .inner()
+        .list()
+        .await
+        .into_iter()
+        .find(|s| s.code == code_str)
+        .ok_or_else(|| "share vanished immediately after mint".to_string())?;
+
+    Ok(ShareMintResult {
+        code: code_str.clone(),
+        secret: minted.secret,
+        server_port: port,
+        path: format!("/s/{code_str}"),
+        share_info,
+    })
+}
+
+#[tauri::command]
+pub async fn revoke_share(
+    code: String,
+    store: State<'_, ShareSessionStore>,
+) -> Result<bool, String> {
+    Ok(store.inner().revoke(&SessionCode(code)).await)
+}
+
+#[tauri::command]
+pub async fn list_active_shares(
+    store: State<'_, ShareSessionStore>,
+    handle: State<'_, CollabServerHandle>,
+) -> Result<Vec<ShareInfo>, String> {
+    let _ = handle; // port is informational; ShareInfo carries the path only
+    Ok(store.inner().list().await)
+}
+
+#[tauri::command]
+pub async fn provide_share_snapshot(
+    code: String,
+    snapshot: Vec<u8>,
+    store: State<'_, ShareSessionStore>,
+) -> Result<bool, String> {
+    Ok(store.inner().set_snapshot(&SessionCode(code), snapshot).await)
+}
+
+#[tauri::command]
+pub async fn list_audit_entries(
+    store: State<'_, ShareSessionStore>,
+) -> Result<Vec<AuditEntry>, String> {
+    Ok(store.inner().audit_entries().await)
+}
+
+#[tauri::command]
+pub async fn get_collab_server_port(
+    handle: State<'_, CollabServerHandle>,
+) -> Result<Option<u16>, String> {
+    Ok(handle.port())
+}
+
+/// Tiny URL-safe code generator (~40 bits). Sufficient: this is the path
+/// component; the bearer secret in the URL fragment carries the entropy.
+fn short_session_code() -> String {
+    const ALPHA: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut value = now ^ (std::process::id() as u128);
+    let mut out = String::with_capacity(8);
+    for _ in 0..8 {
+        out.push(ALPHA[(value as usize) & 0x1f] as char);
+        value >>= 5;
+    }
+    out
 }

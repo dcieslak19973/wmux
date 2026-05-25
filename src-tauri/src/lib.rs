@@ -35,6 +35,8 @@ pub fn run() {
     let tunnel_manager = TunnelManager::new();
     let browser_content_pending = BrowserContentPending::new();
     let browser_helpers = BrowserHelpers::new();
+    let collab_store = collab_server::ShareSessionStore::new();
+    let collab_handle = commands::CollabServerHandle::default();
 
     tauri::Builder::default()
         .plugin(UpdaterPluginBuilder::new().build())
@@ -43,6 +45,8 @@ pub fn run() {
         .manage(tunnel_manager)
         .manage(browser_content_pending)
         .manage(browser_helpers)
+        .manage(collab_store)
+        .manage(collab_handle)
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
             commands::probe_remote_tmux_metadata,
@@ -108,6 +112,12 @@ pub fn run() {
             commands::check_claude_hooks,
             commands::install_claude_hooks_wsl,
             commands::check_claude_hooks_wsl,
+            commands::share_pane,
+            commands::revoke_share,
+            commands::list_active_shares,
+            commands::provide_share_snapshot,
+            commands::list_audit_entries,
+            commands::get_collab_server_port,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

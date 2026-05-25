@@ -30,8 +30,15 @@ pub struct SessionCode(pub String);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionMessage {
-    /// First frame each side sends after the WS opens. Negotiates protocol
-    /// version and identifies the participant.
+    /// First frame from a viewer. Presents the share secret read from the
+    /// share URL's fragment. Kept distinct from `Hello` so the secret never
+    /// appears in URL paths / query strings / access logs.
+    Auth {
+        secret: String,
+    },
+    /// First frame from the host (after a viewer's successful Auth), or
+    /// from a viewer immediately after Auth. Negotiates protocol version
+    /// and identifies the participant.
     Hello {
         protocol_version: u32,
         participant: ParticipantId,
@@ -56,6 +63,18 @@ pub enum SessionMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_round_trips() {
+        let msg = SessionMessage::Auth { secret: "secret-abc".to_string() };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"auth\""));
+        let back: SessionMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionMessage::Auth { secret } => assert_eq!(secret, "secret-abc"),
+            _ => panic!("wrong variant"),
+        }
+    }
 
     #[test]
     fn hello_round_trips() {

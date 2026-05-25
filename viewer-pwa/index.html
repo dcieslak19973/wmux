@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>wmux share</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="xterm.css" />
+  <link rel="stylesheet" href="viewer.css" />
+  <script src="xterm.js"></script>
+  <script src="addon-fit.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">wmux</span>
+    <span class="status" id="status">connecting…</span>
+  </header>
+  <main id="term"></main>
+  <script type="module" src="viewer.mjs"></script>
+</body>
+</html>

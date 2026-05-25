@@ -45,6 +45,8 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 const OUTPUT_BROADCAST_CAPACITY: usize = 256;
 const AUDIT_RING_CAPACITY: usize = 1024;
+const REPLAY_BUFFER_MAX_BYTES: usize = 4 * 1024 * 1024; // ~4 MB
+const REPLAY_BUFFER_MAX_AGE: Duration = Duration::from_secs(5 * 60); // 5 minutes
 
 /// What a viewer is allowed to do on a share. Read-only in Phase 1; the
 /// read-write variant exists so the wire format and the Tauri command
@@ -54,6 +56,72 @@ const AUDIT_RING_CAPACITY: usize = 1024;
 pub enum SharePermission {
     Read,
     ReadWrite,
+}
+
+/// Bounded ring of recent PTY chunks. Replayed verbatim to any connecting
+/// or reconnecting viewer. Bounded by total byte count and per-entry age
+/// (whichever fires first). Cheap pushes: O(1) amortised, no allocations
+/// for the chunk itself (caller hands us the Vec).
+pub struct ReplayBuffer {
+    entries: std::collections::VecDeque<(Instant, Vec<u8>)>,
+    total_bytes: usize,
+    max_bytes: usize,
+    max_age: Duration,
+}
+
+impl Default for ReplayBuffer {
+    fn default() -> Self {
+        Self::new(REPLAY_BUFFER_MAX_BYTES, REPLAY_BUFFER_MAX_AGE)
+    }
+}
+
+impl ReplayBuffer {
+    pub fn new(max_bytes: usize, max_age: Duration) -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+            total_bytes: 0,
+            max_bytes,
+            max_age,
+        }
+    }
+
+    pub fn push(&mut self, chunk: Vec<u8>) {
+        let now = Instant::now();
+        self.total_bytes += chunk.len();
+        self.entries.push_back((now, chunk));
+        // Prune entries older than max_age.
+        let age_cutoff = now.checked_sub(self.max_age).unwrap_or(now);
+        while let Some((t, _)) = self.entries.front() {
+            if *t < age_cutoff {
+                let (_, c) = self.entries.pop_front().unwrap();
+                self.total_bytes = self.total_bytes.saturating_sub(c.len());
+            } else {
+                break;
+            }
+        }
+        // Then prune by total size — always keep at least the just-pushed
+        // entry so a single oversized chunk doesn't leave the buffer empty.
+        while self.total_bytes > self.max_bytes && self.entries.len() > 1 {
+            let (_, c) = self.entries.pop_front().unwrap();
+            self.total_bytes = self.total_bytes.saturating_sub(c.len());
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<Vec<u8>> {
+        self.entries.iter().map(|(_, b)| b.clone()).collect()
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// Single live share session. Cloning is cheap — only the cached snapshot
@@ -69,6 +137,11 @@ pub struct ShareSession {
     pub output_tx: broadcast::Sender<Vec<u8>>,
     pub presence: Arc<AtomicUsize>,
     pub snapshot: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Rolling ring of recent PTY bytes. Replayed to any connecting (or
+    /// reconnecting) viewer so a dropped WebSocket reopens to the current
+    /// screen rather than the screen at share-creation time. std::sync
+    /// because start_session_stream feeds this from a sync closure.
+    pub replay_buffer: Arc<std::sync::Mutex<ReplayBuffer>>,
 }
 
 impl ShareSession {
@@ -197,6 +270,7 @@ impl ShareSessionStore {
             output_tx,
             presence: Arc::new(AtomicUsize::new(0)),
             snapshot: Arc::new(Mutex::new(None)),
+            replay_buffer: Arc::new(std::sync::Mutex::new(ReplayBuffer::default())),
         };
         let mut inner = self.inner.write().await;
         inner.sessions.insert(code.clone(), session.clone());
@@ -365,6 +439,24 @@ async fn handle_socket(mut socket: WebSocket, store: ShareSessionStore, code: Se
     // Send the cached snapshot, if any, as the first OutputChunk so the
     // viewer renders the current buffer rather than waiting for new bytes.
     if let Some(bytes) = session.snapshot.lock().await.clone() {
+        let frame = SessionMessage::OutputChunk { bytes };
+        if socket
+            .send(Message::Text(serde_json::to_string(&frame).unwrap()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+
+    // Replay the recent-output ring so a (re)connecting viewer catches up
+    // to the current pane state without the host having to push fresh
+    // bytes. Bounded ~4 MB / ~5 minutes — see [`ReplayBuffer`].
+    let replay_chunks = {
+        let buf = session.replay_buffer.lock().unwrap();
+        buf.snapshot()
+    };
+    for bytes in replay_chunks {
         let frame = SessionMessage::OutputChunk { bytes };
         if socket
             .send(Message::Text(serde_json::to_string(&frame).unwrap()))
@@ -609,6 +701,79 @@ mod tests {
             SessionMessage::OutputChunk { bytes } => assert_eq!(bytes, b"hello viewer"),
             other => panic!("expected OutputChunk, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn replay_buffer_prunes_by_age() {
+        let mut buf = ReplayBuffer::new(usize::MAX, Duration::from_millis(20));
+        buf.push(b"old".to_vec());
+        std::thread::sleep(Duration::from_millis(60));
+        buf.push(b"new".to_vec());
+        let chunks = buf.snapshot();
+        assert_eq!(chunks, vec![b"new".to_vec()]);
+    }
+
+    #[test]
+    fn replay_buffer_prunes_by_size() {
+        let mut buf = ReplayBuffer::new(10, Duration::from_secs(60));
+        buf.push(b"AAAAA".to_vec()); // 5
+        buf.push(b"BBBBB".to_vec()); // 5 → 10 total, at cap
+        buf.push(b"CCCCC".to_vec()); // 5 → would be 15, drops AAAAA
+        let chunks = buf.snapshot();
+        assert_eq!(chunks, vec![b"BBBBB".to_vec(), b"CCCCC".to_vec()]);
+        assert_eq!(buf.total_bytes(), 10);
+    }
+
+    #[test]
+    fn replay_buffer_keeps_just_pushed_even_if_oversized() {
+        // Single oversized chunk must remain in the buffer; otherwise a
+        // reconnecting viewer would see nothing at all.
+        let mut buf = ReplayBuffer::new(4, Duration::from_secs(60));
+        buf.push(b"this is too big".to_vec());
+        let chunks = buf.snapshot();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], b"this is too big");
+    }
+
+    #[tokio::test]
+    async fn replay_buffer_replays_to_reconnecting_viewer() {
+        let store = ShareSessionStore::new();
+        let MintedShare { secret, session } = store
+            .create(
+                SessionCode("rep".to_string()),
+                "pane-rep".to_string(),
+                SharePermission::Read,
+                Duration::from_secs(30),
+            )
+            .await;
+
+        // Simulate output that arrived BEFORE any viewer connected.
+        {
+            let mut buf = session.replay_buffer.lock().unwrap();
+            buf.push(b"early-1 ".to_vec());
+            buf.push(b"early-2 ".to_vec());
+        }
+
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store).await.unwrap();
+        let mut ws = connect_and_auth(addr, "rep", &secret).await;
+
+        // Server hello.
+        assert!(matches!(next_message(&mut ws).await, SessionMessage::Hello { .. }));
+
+        // Then the two replay entries, in order.
+        let m1 = next_message(&mut ws).await;
+        let m2 = next_message(&mut ws).await;
+        let bytes = |m: SessionMessage| match m {
+            SessionMessage::OutputChunk { bytes } => bytes,
+            other => panic!("expected OutputChunk, got {other:?}"),
+        };
+        assert_eq!(bytes(m1), b"early-1 ");
+        assert_eq!(bytes(m2), b"early-2 ");
+
+        // Live broadcast still works after replay drains.
+        session.output_tx.send(b"live!".to_vec()).unwrap();
+        let m3 = next_message(&mut ws).await;
+        assert_eq!(bytes(m3), b"live!");
     }
 
     #[tokio::test]

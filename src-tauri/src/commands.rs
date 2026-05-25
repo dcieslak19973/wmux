@@ -800,10 +800,16 @@ pub async fn start_session_stream(
                     }
 
                     // Fan the raw bytes to any active share viewers attached
-                    // to this pane. Send errors mean no viewers are listening
-                    // on a given share — ignore; reconnect will resubscribe.
+                    // to this pane: append to the replay buffer (so a future
+                    // (re)connecting viewer catches up to the live screen),
+                    // then broadcast for live viewers. Send errors mean no
+                    // viewers are listening on a given share — ignore;
+                    // reconnect will resubscribe.
                     collab_store
                         .for_each_share_on_pane(&id_clone, |share| {
+                            if let Ok(mut buf) = share.replay_buffer.lock() {
+                                buf.push(chunk.clone());
+                            }
                             let _ = share.output_tx.send(chunk.clone());
                         })
                         .await;

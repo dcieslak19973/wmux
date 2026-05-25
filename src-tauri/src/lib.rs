@@ -118,6 +118,7 @@ pub fn run() {
             commands::provide_share_snapshot,
             commands::list_audit_entries,
             commands::get_collab_server_port,
+            commands::list_local_addresses,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

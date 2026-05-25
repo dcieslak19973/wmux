@@ -2973,6 +2973,29 @@ pub async fn get_collab_server_port(
     Ok(handle.port())
 }
 
+/// Enumerate IPv4 addresses a viewer on the same network could reach.
+/// Excludes loopback / link-local / unspecified; the share dialog renders
+/// one URL per returned address.
+#[tauri::command]
+pub async fn list_local_addresses() -> Result<Vec<String>, String> {
+    use local_ip_address::list_afinet_netifas;
+    use std::net::IpAddr;
+
+    let ifaces = list_afinet_netifas().map_err(|e| e.to_string())?;
+    let mut addrs: Vec<String> = ifaces
+        .into_iter()
+        .filter_map(|(_, ip)| match ip {
+            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() && !v4.is_unspecified() => {
+                Some(v4.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    Ok(addrs)
+}
+
 /// Tiny URL-safe code generator (~40 bits). Sufficient: this is the path
 /// component; the bearer secret in the URL fragment carries the entropy.
 fn short_session_code() -> String {

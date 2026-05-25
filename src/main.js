@@ -35,6 +35,7 @@ import { createUiPanelsRuntime } from './ui_panels_runtime.mjs';
 import { createSurfaceRuntime } from './surfaces_runtime.mjs';
 import { createPrReviewRuntime } from './pr_review_runtime.mjs';
 import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
+import { createCollabRuntime } from './collab_runtime.mjs';
 import { createActivityLogRuntime } from './activity_log_runtime.mjs';
 import { createKeybindingsRuntime } from './keybindings_runtime.mjs';
 import { createCefEmbeddedSurface } from './cef_embedded.mjs';
@@ -92,6 +93,7 @@ let surfaceRuntime = null;
 let panelsRuntime = null;
 let prReviewRuntime = null;
 let agentSidebarRuntime = null;
+let collabRuntime = null;
 let activityLogRuntime = null;
 let paneAuxRuntime = null;
 
@@ -1465,6 +1467,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-hooks" data-action="hooks" title="Install Claude Code hooks for live agent state">HK</button>' : ''}
     <button class="pane-tb-btn pane-tb-agent" data-action="agent" title="Set preferred AI agent for this pane">AI</button>
     <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
+    <button class="pane-tb-btn pane-tb-share" data-action="share" title="Share this pane (read-only)">SH</button>
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
   toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); showSplitTypePicker(sessionId, 'h', r.left, r.bottom + 4); });
@@ -1473,6 +1476,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.querySelector('[data-action="markdown"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithMarkdown(sessionId, 'h'); });
   toolbarEl.querySelector('[data-action="artifact"]').addEventListener('click', (e) => { e.stopPropagation(); previewArtifactFromPane(sessionId); });
   toolbarEl.querySelector('[data-action="workbook"]').addEventListener('click', (e) => { e.stopPropagation(); panelsRuntime?.openWorkbookDemo?.().catch((err) => showError(`Could not open workbook: ${err}`)); });
+  toolbarEl.querySelector('[data-action="share"]').addEventListener('click',   (e) => { e.stopPropagation(); collabRuntime?.startShareForPane(sessionId); });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   if (isBlocksCapable) {
     const blocksBtn = toolbarEl.querySelector('[data-action="blocks"]');
@@ -3398,6 +3402,15 @@ agentSidebarRuntime = createAgentSidebarRuntime({
   clearPaneNotifications,
 });
 
+collabRuntime = createCollabRuntime({
+  document,
+  invoke,
+  panes,
+  escHtml,
+  showError,
+  showToast,
+});
+
 void listen('agent-hook-event', (event) => {
   agentSidebarRuntime?.handleHookEvent(event.payload);
   activityLogRuntime?.onHookEvent(event.payload);
@@ -4097,6 +4110,7 @@ btnNewTab.addEventListener('click', () => createTab(getDefaultTarget()));
 btnNewTabMore.addEventListener('click', showNewTabPopover);
 updateNewTabTooltip();
 document.getElementById('btn-agent-sidebar')?.addEventListener('click', () => agentSidebarRuntime?.toggle());
+document.getElementById('btn-collab')?.addEventListener('click', () => collabRuntime?.togglePanel());
 document.getElementById('btn-activity-log')?.addEventListener('click', () => activityLogRuntime?.toggle());
 document.getElementById('btn-session-vault')?.addEventListener('click', () => { void toggleSessionVaultPanel(); });
 document.getElementById('btn-settings')?.addEventListener('click', showSettingsPanel);

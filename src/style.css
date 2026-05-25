@@ -55,6 +55,7 @@ html, body, #app {
 #right-dock .session-vault-panel,
 #right-dock .artifact-panel,
 #right-dock .notif-panel,
+#right-dock .collab-panel,
 #right-dock .settings-panel {
   position: static !important;
   width: 100% !important;
@@ -75,6 +76,7 @@ html, body, #app {
 #right-dock .session-vault-panel:last-child,
 #right-dock .artifact-panel:last-child,
 #right-dock .notif-panel:last-child,
+#right-dock .collab-panel:last-child,
 #right-dock .settings-panel:last-child {
   border-bottom: none !important;
 }
@@ -3257,5 +3259,308 @@ body.has-tabs #empty-state { display: none; }
   font-family: monospace;
   font-size: 11px;
 }
+
+/* ── Collab: pane share badge ───────────────────────────────────────────── */
+.pane-share-badge {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  color: #c0e8ff;
+  background: rgba(56,189,248,0.15);
+  border: 1px solid rgba(56,189,248,0.35);
+  border-radius: 10px;
+  user-select: none;
+}
+
+/* ── Collab: share dialog ──────────────────────────────────────────────── */
+.collab-share-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg, #1f2228);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  z-index: 9999;
+  overflow: hidden;
+}
+
+.collab-share-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.04);
+  border-bottom: 1px solid var(--border, #333);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.collab-share-dialog-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #9aa);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+}
+.collab-share-dialog-close:hover { color: var(--text-primary, #eee); }
+
+.collab-share-dialog-body {
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.collab-share-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.collab-share-row-stack { flex-direction: column; align-items: stretch; }
+
+.collab-share-label {
+  flex: 0 0 90px;
+  color: var(--text-muted, #9aa);
+  font-size: 11px;
+}
+
+.collab-share-value { flex: 1 1 auto; }
+.collab-share-value.mono, .mono { font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; }
+
+.collab-share-urls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.collab-share-url-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+
+.collab-share-url {
+  flex: 1 1 auto;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.collab-share-copy {
+  flex: 0 0 auto;
+  background: rgba(56,189,248,0.15);
+  border: 1px solid rgba(56,189,248,0.35);
+  border-radius: 3px;
+  color: #c0e8ff;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.collab-share-copy:hover { background: rgba(56,189,248,0.25); }
+
+.collab-share-empty, .collab-empty {
+  font-size: 12px;
+  color: var(--text-muted, #9aa);
+  padding: 12px;
+  text-align: center;
+}
+
+.collab-share-help {
+  font-size: 11px;
+  color: var(--text-muted, #9aa);
+  line-height: 1.5;
+  padding: 6px 0;
+}
+
+.collab-share-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.collab-share-btn {
+  background: transparent;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  color: var(--text-primary, #eee);
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.collab-share-btn:hover { background: rgba(255,255,255,0.08); }
+.collab-share-btn-primary {
+  background: rgba(56,189,248,0.18);
+  border-color: rgba(56,189,248,0.45);
+  color: #c0e8ff;
+}
+.collab-share-btn-primary:hover { background: rgba(56,189,248,0.28); }
+
+/* ── Collab: dockable panel ────────────────────────────────────────────── */
+.collab-panel {
+  position: fixed;
+  top: 80px;
+  right: 24px;
+  width: 380px;
+  max-height: calc(100vh - 120px);
+  background: var(--panel-bg, #1f2228);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  display: none;
+  flex-direction: column;
+  z-index: 9000;
+}
+.collab-panel.is-visible { display: flex; }
+
+.collab-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.04);
+  border-bottom: 1px solid var(--border, #333);
+  cursor: move;
+  user-select: none;
+}
+
+.collab-panel-title { font-size: 13px; font-weight: 600; }
+
+.collab-panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.collab-panel-header-actions button {
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #9aa);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+}
+.collab-panel-header-actions button:hover { color: var(--text-primary, #eee); }
+
+.collab-panel-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border, #333);
+  background: rgba(0,0,0,0.15);
+}
+
+.collab-panel-tab {
+  flex: 1 1 auto;
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #9aa);
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.collab-panel-tab.is-active {
+  color: var(--text-primary, #eee);
+  border-bottom-color: rgba(56,189,248,0.6);
+}
+.collab-panel-tab:hover { background: rgba(255,255,255,0.04); }
+
+.collab-panel-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 120px;
+}
+
+.collab-panel-section { display: none; padding: 6px; }
+.collab-panel-section.is-active { display: block; }
+
+/* Shares list */
+.collab-share-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-size: 12px;
+}
+.collab-share-list-row:last-child { border-bottom: none; }
+
+.collab-share-list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.collab-share-list-code { font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; }
+.collab-share-list-pane { color: var(--text-muted, #9aa); font-size: 10px; }
+
+.collab-share-list-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.collab-share-list-presence { font-size: 11px; color: #c0e8ff; }
+.collab-share-list-expires { font-size: 11px; color: var(--text-muted, #9aa); }
+.collab-share-list-perm {
+  font-size: 10px;
+  background: rgba(255,255,255,0.08);
+  padding: 1px 6px;
+  border-radius: 2px;
+  color: var(--text-muted, #9aa);
+}
+
+.collab-share-list-revoke {
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #9aa);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.collab-share-list-revoke:hover { color: #ff6b6b; }
+
+/* Audit list */
+.collab-audit-row {
+  display: grid;
+  grid-template-columns: 64px 90px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.collab-audit-row:last-child { border-bottom: none; }
+
+.collab-audit-time { color: var(--text-muted, #9aa); font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; }
+.collab-audit-event { font-weight: 500; }
+.collab-audit-code { font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; color: var(--text-muted, #9aa); }
+.collab-audit-participant { color: var(--text-muted, #9aa); }
+
+.collab-audit-Created    .collab-audit-event { color: #6ec06e; }
+.collab-audit-Connected  .collab-audit-event { color: #c0e8ff; }
+.collab-audit-Disconnected .collab-audit-event { color: var(--text-muted, #9aa); }
+.collab-audit-Revoked    .collab-audit-event { color: #d97706; }
+.collab-audit-Expired    .collab-audit-event { color: var(--text-muted, #9aa); }
+.collab-audit-AuthFailed .collab-audit-event { color: #d96a6a; }
+
 
 

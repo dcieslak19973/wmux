@@ -28,7 +28,7 @@ Legend: ✅ shipped first-party · ⚠️ partial / opinionated punt · ❌ not 
 | MCP client (consume external MCP servers) | ⚠️ via Claude Code in pane | ✅ Streamable HTTPS + SSE + OAuth | ⚠️ via agent in pane | ✅ via agent | ⚠️ via agent | ⚠️ via agent | ⚠️ via agent |
 | tmux compatibility shim | ✅ `tmux.exe` | ❌ | ❌ | ❌ | native tmux | ❌ | ❌ |
 | Multi-agent in one window | ✅ sidebar + cross-workspace rollup | ✅ Universal Agent Support (tabs side-by-side) | ✅ vertical workspace tabs | ✅ Parallel Agents — threads sidebar | ✅ ~14 agent integrations | ✅ sub-agents + Best-of-N | ✅ |
-| Agent-CLI lifecycle hooks (authoritative state) | ✅ Claude Code only → "live" badge | ✅ for built-in agent surfaces | ✅ resume hooks for Claude/Codex/OpenCode/Grok | ⚠️ via ACP-aware agents | ✅ socket forwarding for ~14 agents (blocked/working/done) | partial | ❌ |
+| Agent-CLI lifecycle hooks (authoritative state) | ✅ Claude Code only → "live" badge | ✅ for built-in agent surfaces | ✅ lifecycle hooks (SessionStart/Stop/PreToolUse/PermissionRequest/…) across 14+ agents | ⚠️ via ACP-aware agents | ✅ socket forwarding for 14+ agents, 4-state (idle/working/blocked/done) | partial | ❌ |
 | Screen-content state fallback for any TUI agent | ✅ shell-prompt + bottom-rows heuristic | ✅ (own surface) | ✅ | n/a | ✅ | ❌ | ❌ |
 | Browser surface in pane | ✅ iframe + auto-fallback to in-pane CEF (CDP screencast) | ❌ | ✅ scriptable browser (separate window) | ❌ | ❌ | ✅ browser tabs for live sessions | ❌ |
 | Markdown / notebook surface in pane | ✅ | ✅ Notebooks | ❌ | ✅ in-editor | ❌ | ❌ | ⚠️ diff viewer |
@@ -94,13 +94,13 @@ Warp ships a Rust GPU renderer; cmux on libghostty; Zed on Rust + Metal/D3D11. w
 
 ### Universal agent-lifecycle adapter
 
-wmux has Claude Code lifecycle hooks (`PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `UserPromptSubmit`) and uses them to drive the "live" badge in the sidebar. Other agents fall back to the shell-prompt heuristic. Meanwhile:
+wmux captures Claude Code's 5 lifecycle hooks (`PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `UserPromptSubmit`) with tool name + notification message + timestamp per pane. The "live" badge in the sidebar uses only two of those (`working`, `completed`); the rest of the wmux state machine (`ready` / `idle` / `blocked`) comes from screen-scraping, not from hooks. Other agents fall back entirely to the shell-prompt heuristic. Meanwhile:
 
-- **herdr** has a socket API that normalizes semantic state (blocked / working / done) across ~14 agent integrations.
-- **cmux** ships resume hooks for Claude Code, Codex, OpenCode, and Grok.
-- **Zed** gets it for free from ACP-aware agents.
+- **cmux** installs lifecycle hooks for 14+ agents (Codex, Grok, OpenCode, Pi, Amp, Cursor, Gemini, Antigravity, RovoDev, Hermes, Copilot, CodeBuddy, Factory, Qoder) plus a Claude Code wrapper, capturing `SessionStart` / `Stop` / `UserPromptSubmit` / `Notification` / `PreToolUse` / `PermissionRequest`. Broadest *and* deepest hook integration in the matrix.
+- **herdr** has a socket API that forwards a 4-state machine (idle / working / blocked / done) across 14+ agent integrations — less per-event detail than cmux, but bidirectional and well-documented.
+- **Zed** gets lifecycle state for free from ACP-aware agents.
 
-wmux's hook integration is deeper for Claude Code specifically, but narrower in breadth than herdr's. A normalized adapter layer across multiple harnesses would close this.
+Honest read: wmux is narrower than cmux on agent coverage *and* narrower than cmux on event detail (cmux captures `PermissionRequest`, which is genuinely useful and which wmux doesn't surface). wmux is narrower than herdr on coverage but captures somewhat richer per-event data on the one harness it does support (Claude Code). The cleanest path forward is a per-harness adapter layer that maps each agent's lifecycle events into the existing `AgentHookState` shape — cmux has already done the integration work, so the per-agent hook recipes are at least demonstrable.
 
 ### Editor integration
 
@@ -122,7 +122,7 @@ The 800-pound gorilla, and as of April 30 2026 also open source (AGPLv3 core + M
 
 ### cmux ([manaflow-ai/cmux](https://github.com/manaflow-ai/cmux))
 
-macOS-only, GPL-3.0-or-later (not AGPL — correcting earlier versions of this doc), libghostty renderer, ~19k stars. Differentiators: vertical-tab workspace sidebar with PR linkage, agent-specific resume hooks for Claude Code / Codex / OpenCode / Grok (broader than wmux's Claude-only hook integration), `cmux claude-teams`, in-app scriptable browser ported from vercel-labs/agent-browser, browser-data import from 20+ browsers, persistent scrollback. **Worktree NOT first-class** — issue #156 is open. **No first-party MCP server**; a community `cmux-mcp` exposes `write_to_terminal` / `read_terminal_output` / `send_control_character`. SSH workspace attachment shipped; Cloud VMs + iOS app advertised but not GA.
+macOS-only, GPL-3.0-or-later (not AGPL — correcting earlier versions of this doc), libghostty renderer, ~19k stars. Differentiators: vertical-tab workspace sidebar with PR linkage, an in-app scriptable browser ported from vercel-labs/agent-browser, browser-data import from 20+ browsers, persistent scrollback. **Lifecycle-hook installer for 14+ agents** (Codex, Grok, OpenCode, Pi, Amp, Cursor, Gemini, Antigravity, RovoDev, Hermes, Copilot, CodeBuddy, Factory, Qoder) plus a Claude Code wrapper. Hooks capture `SessionStart` / `Stop` / `UserPromptSubmit` / `Notification` / `PreToolUse` / `PermissionRequest` and feed both session-resume and a permission-request "Feed" sidebar — this is the broadest + deepest hook integration in the matrix, by a wide margin. **Worktree NOT first-class** — issue #156 is open. **No first-party MCP server**; a community `cmux-mcp` exposes `write_to_terminal` / `read_terminal_output` / `send_control_character`. SSH workspace attachment shipped; Cloud VMs + iOS app advertised but not GA.
 
 ### Zed ([zed-industries/zed](https://github.com/zed-industries/zed))
 
@@ -153,7 +153,7 @@ Real gaps to close, in priority order:
 
 1. **First-party git worktree isolation per pane.** The previous version of this doc called this an intentional non-feature; that's no longer credible given universal adoption across Warp / Zed / mux / herdr / t3code. Cross-pane parallel-agent use is a real workflow and wmux makes the user do it manually.
 2. **GPU-accelerated terminal renderer.** Warp going open-source removes the prior "proprietary" framing — Warp/cmux/Zed all ship native renderers and the perception gap widens every release. Ghostty/wgpu replacement is still the candidate.
-3. **Universal agent-lifecycle adapter.** wmux has deep Claude Code hook integration; herdr has shallower but broader normalization across ~14 harnesses; cmux has agent-specific resume hooks for four agents. A normalized lifecycle layer would extend the "live state" badge beyond Claude Code without abandoning the depth we have.
+3. **Multi-harness agent-lifecycle hooks.** wmux supports 1 harness (Claude Code) via hooks. cmux supports 14+ harnesses with richer event coverage (including `PermissionRequest`); herdr supports 14+ harnesses with a normalized 4-state machine. wmux is behind on both axes — per-harness adapter recipes that map each agent's lifecycle events into the existing `AgentHookState` shape would close this. cmux's open-source hook installer is a reference for what to wire up.
 4. **Polish-tier UX investments** (command palette, structured output inspector, autosuggest). Lower priority — these are obvious "we're not Warp" gaps, not features that win specific users.
 
 Everything else in the matrix (in-pane browser, MCP surface depth, OSC notifications, multi-shell support, workbook/charts, automation API breadth) is already competitive or ahead of field.

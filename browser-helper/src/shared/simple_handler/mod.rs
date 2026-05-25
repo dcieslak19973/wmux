@@ -365,7 +365,7 @@ wrap_life_span_handler! {
                 return 0;
             }
             if let (Some(browser), Some(url)) = (browser, target_url) {
-                if let Some(mut main_frame) = browser.main_frame() {
+                if let Some(main_frame) = browser.main_frame() {
                     main_frame.load_url(Some(url));
                 }
             }

@@ -867,10 +867,10 @@ const WORKSPACE_MJS: &str = include_str!("../../viewer-pwa/workspace.mjs");
 async fn viewer_index(State(state): State<AppState>, Path(code): Path<String>) -> Response {
     // 404 fast if the code doesn't exist so we don't ship the viewer to
     // someone who's just guessing.
-    if state.store.get(&SessionCode(code)).await.is_none() {
+    if state.store.get(&SessionCode(code.clone())).await.is_none() {
         return (StatusCode::NOT_FOUND, "no such share").into_response();
     }
-    static_response(VIEWER_INDEX.as_bytes(), "text/html; charset=utf-8")
+    html_with_base(VIEWER_INDEX, &format!("/s/{code}/"))
 }
 
 async fn viewer_asset(Path((_code, name)): Path<(String, String)>) -> Response {
@@ -891,10 +891,35 @@ async fn workspace_index(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> Response {
-    if state.store.get_workspace(&SessionCode(code)).await.is_none() {
+    if state.store.get_workspace(&SessionCode(code.clone())).await.is_none() {
         return (StatusCode::NOT_FOUND, "no such workspace share").into_response();
     }
-    static_response(WORKSPACE_INDEX.as_bytes(), "text/html; charset=utf-8")
+    html_with_base(WORKSPACE_INDEX, &format!("/w/{code}/"))
+}
+
+/// Inject a `<base href="…">` into the static viewer HTML so relative
+/// asset paths (`workspace.mjs`, `viewer.mjs`, `xterm.js`, etc.) always
+/// resolve to the per-code asset directory, regardless of whether the
+/// page URL has a trailing slash. Without this, `/w/<code>` resolves
+/// `workspace.mjs` to `/w/workspace.mjs` (which routes back to
+/// `workspace_index` with code="workspace.mjs" and returns 404).
+fn html_with_base(html: &str, base_href: &str) -> Response {
+    let tag = format!("<base href=\"{base_href}\">");
+    let body = if let Some(idx) = html.find("<head>") {
+        let head_close = idx + "<head>".len();
+        let mut out = String::with_capacity(html.len() + tag.len());
+        out.push_str(&html[..head_close]);
+        out.push_str(&tag);
+        out.push_str(&html[head_close..]);
+        out
+    } else {
+        html.to_string()
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(axum::body::Body::from(body))
+        .unwrap()
 }
 
 async fn workspace_asset(Path((_code, name)): Path<(String, String)>) -> Response {

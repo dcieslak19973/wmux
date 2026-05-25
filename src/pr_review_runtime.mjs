@@ -59,6 +59,9 @@ export function createPrReviewRuntime({
     if (shell === 'bash') {
       const escaped = body.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
       return agent.bash(escaped);
+    } else if (shell === 'fish') {
+      const escaped = body.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/\n/g, '\\n');
+      return (agent.fish ?? agent.bash)(escaped);
     } else {
       const escaped = body.replace(/`/g, '``').replace(/"/g, '`"').replace(/\n/g, '`n');
       return agent.ps(escaped);

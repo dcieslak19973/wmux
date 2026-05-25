@@ -234,7 +234,7 @@ export function createPrReviewRuntime({
         const activePaneId = getActivePaneId?.();
         const pane = activePaneId ? panes.get(activePaneId) : null;
         const kind = pane ? getTargetKind?.(pane.target) : null;
-        const shell = (kind === 'wsl' || kind === 'ssh') ? 'bash' : 'powershell';
+        const shell = pane?.shellFlavor ?? ((kind === 'wsl' || kind === 'ssh') ? 'bash' : 'powershell');
         const cmd = buildAgentAskCmd(agent, body, shell);
         const targetId = activePaneId ?? '';
         if (targetId) invoke('write_to_session', { id: targetId, data: cmd }).catch(() => {});

@@ -1277,9 +1277,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
         btn.style.pointerEvents = 'auto';
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
-          const shell = isWsl || isSsh ? 'bash' : 'powershell';
+          const pane = panes.get(sessionId);
+          const shell = pane?.shellFlavor ?? (isWsl || isSsh ? 'bash' : 'powershell');
           const body = buildFixBody(block.rustBlock);
-          const preferred = panes.get(sessionId)?.preferredAgent;
+          const preferred = pane?.preferredAgent;
           const fixAgent = preferred ? FIX_AGENTS.find((a) => a.key === preferred) : null;
           if (fixAgent) {
             invoke('write_to_session', { id: sessionId, data: buildFixCmd(fixAgent, body, shell) }).catch(() => {});
@@ -1749,6 +1750,11 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     gitContext: null,
     labelOverride: initialState?.labelOverride ?? null,
     preferredAgent: null,
+    // Quoting flavour for fix-agent / ask-agent commands. Defaults to
+    // the target-kind heuristic (wsl/ssh → bash, local → powershell);
+    // detected at runtime for WSL/SSH via getent so fish users get
+    // fish-shape commands. Values: 'bash' | 'fish' | 'powershell'.
+    shellFlavor: (getTargetKind(target) === 'wsl' || getTargetKind(target) === 'ssh') ? 'bash' : 'powershell',
     tbFlash,
     fbFlash,
     lastSessionVaultEntryId: typeof initialState?.vaultEntryId === 'string' ? initialState.vaultEntryId : null,
@@ -1765,6 +1771,32 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   };
   panes.set(sessionId, paneState);
   renderPaneContextBadge(sessionId);
+
+  // Best-effort detect of the remote login shell for WSL/SSH targets so
+  // fix-agent / ask-agent commands dispatch with the right quoting.
+  // Fire-and-forget; the default 'bash' is right for bash + zsh users
+  // (both accept $'…'), so this is only meaningful when it lands on
+  // 'fish'. No-op for local/remote_tmux/etc.
+  if (getTargetKind(target) === 'wsl') {
+    invoke('detect_login_shell_wsl', { distro: target.distro ?? null })
+      .then((flavor) => {
+        const pane = panes.get(sessionId);
+        if (pane && (flavor === 'bash' || flavor === 'fish')) pane.shellFlavor = flavor;
+      })
+      .catch(() => {});
+  } else if (getTargetKind(target) === 'ssh') {
+    invoke('detect_login_shell_ssh', {
+      host: target.host,
+      user: target.user ?? null,
+      port: target.port ?? null,
+      identityFile: target.identity_file ?? null,
+    })
+      .then((flavor) => {
+        const pane = panes.get(sessionId);
+        if (pane && (flavor === 'bash' || flavor === 'fish')) pane.shellFlavor = flavor;
+      })
+      .catch(() => {});
+  }
   // Eagerly fetch git context for the initial cwd so the badge shows
   // repo/worktree info without waiting for the first OSC 7 event.
   // For fresh panes without a restoredCwd, fall back to the tab's current cwd.

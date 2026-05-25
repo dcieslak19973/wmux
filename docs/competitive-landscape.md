@@ -2,136 +2,158 @@
 
 Maintainer-facing comparison of wmux against the closest tools in the agent-terminal and AI-coding-workspace category. Snapshot date: **2026-05-25**.
 
-> **Methodology note.** wmux state is verified against the current repo (HEAD on `main`, recent merged PRs through #52). Other tools are described from publicly available info at the snapshot date; where the maintainer has not personally verified recent changes for a given competitor, the entry says so.
+> **Methodology.** wmux state is verified against the current repo (HEAD on `main`). Other tools are summarized from their public repos, release notes, and docs as of the snapshot date; sources are linked inline below. Where claims couldn't be confirmed, the entry says so.
 
 ## Tools covered
 
-| Tool | Category | Platform | License |
-|---|---|---|---|
-| **wmux** | Agent-aware terminal multiplexer | Windows-native (WSL/SSH-aware) | AGPL-3.0 |
-| **Warp** | Agent-first terminal | macOS, Linux, Windows | Closed; freemium + subscription |
-| **cmux** | macOS agent terminal (libghostty) | macOS only | AGPL |
-| **zed** | GPU-accelerated code editor + agent panel | macOS, Linux (Windows: preview) | GPL |
-| **herdr** | TUI agent runtime/multiplexer | Linux/macOS (POSIX) | Open source |
-| **mux** (coder) | Isolated parallel-agent desktop | macOS, Windows | Open source |
-| **t3code** | GUI front-end for CLI agents | Mac/Win/Linux | Open source |
+| Tool | Category | Platform | License | Repo |
+|---|---|---|---|---|
+| **wmux** | Agent-aware terminal multiplexer | Windows-native (WSL/SSH-aware) | AGPL-3.0 | (this repo) |
+| **Warp** | Agent-first terminal + cloud orchestration platform | macOS, Linux, Windows (all GA) | AGPL-3.0 core / MIT UI crates ([open-sourced Apr 30 2026](https://www.warp.dev/blog/warp-is-now-open-source)) | [warpdotdev/warp](https://github.com/warpdotdev/warp) |
+| **cmux** | macOS agent terminal | macOS only | GPL-3.0-or-later | [manaflow-ai/cmux](https://github.com/manaflow-ai/cmux) |
+| **Zed** | GPU-accelerated code editor + agent panel | macOS, Linux, Windows (all stable) | GPL-3.0 editor / AGPL-3.0 server / Apache-2.0 GPUI | [zed-industries/zed](https://github.com/zed-industries/zed) |
+| **herdr** | TUI agent runtime/multiplexer | Linux, macOS (POSIX) | AGPL-3.0 | [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) |
+| **mux** (coder) | Parallel-agent desktop with worktree isolation | macOS, Linux | AGPL-3.0 | [coder/mux](https://github.com/coder/mux) |
+| **t3code** | GUI harness for official agent CLIs | macOS, Linux, Windows | MIT | [pingdotgg/t3code](https://github.com/pingdotgg/t3code) |
 
 ## Feature matrix
 
-| Dimension | wmux | Warp | cmux | zed | herdr | mux | t3code |
+Legend: ✅ shipped first-party · ⚠️ partial / opinionated punt · ❌ not shipped
+
+| Dimension | wmux | Warp | cmux | Zed | herdr | mux | t3code |
 |---|---|---|---|---|---|---|---|
-| Windows-native | ✅ first-class | ✅ GA | ❌ | preview | ❌ | ✅ Electron | ✅ Electron |
-| Multi-agent sidebar | ✅ + cross-workspace rollup | ✅ Agent threads | ✅ | ✅ Threads | ✅ TUI | ✅ | ✅ |
-| Authoritative agent state (lifecycle events) | ✅ Claude Code hooks → "live" badge | partial (proprietary agent only) | ❌ screen-scrape | partial (ACP) | socket API | ❌ | ❌ |
-| Screen-content state fallback for any TUI agent | ✅ shell-prompt + bottom-rows heuristic | ✅ (own agent only) | ✅ | n/a | ❌ | ❌ | ❌ |
-| MCP server (callable by external agents) | ✅ HTTP `:7766/mcp` + named pipe | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Code Mode (server-side JS over MCP tools) | ✅ `wmux_eval` default surface | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Windows GA / stable | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| MCP **server** (callable by external agents) | ✅ HTTP `:7766/mcp` + named pipe | ❌ MCP **client** only | ❌ (community `cmux-mcp` exists) | ❌ | ❌ | ❌ | ❌ |
+| Code Mode (server-side JS sandbox over MCP tools) | ✅ `wmux_eval` default surface | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| MCP client (consume external MCP servers) | ⚠️ via Claude Code in pane | ✅ Streamable HTTPS + SSE + OAuth | ⚠️ via agent in pane | ✅ via agent | ⚠️ via agent | ⚠️ via agent | ⚠️ via agent |
 | tmux compatibility shim | ✅ `tmux.exe` | ❌ | ❌ | ❌ | native tmux | ❌ | ❌ |
-| Browser surface in pane | ✅ iframe + auto-fallback to in-pane CEF (CDP screencast) | ❌ | ✅ Chromium/Playwright (separate window) | ❌ | ❌ | ❌ | ❌ |
-| Markdown surface in pane | ✅ | ✅ Notebooks | ❌ | ✅ in-editor | ❌ | ❌ | ✅ diff viewer |
-| Activity log (tool calls w/ I/O) | ✅ + per-pane agent timeline | ✅ Blocks history | ❌ | ✅ thread history | ❌ | partial | ✅ |
-| Per-pane inline ask any agent CLI (one-shot) | ✅ Claude/Codex/Gemini/OpenCode/Aider | ✅ (own agent) | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Multi-device live collab (real-time pane/workspace share) | ✅ Tailscale-aware, PWA viewer, read/write | ✅ Warp Drive sessions (cloud-mediated) | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Customizable keybindings (JSON file, hot-reload) | ✅ | ✅ | partial | ✅ | ✅ | partial | ❌ |
-| Git worktree isolation | ⚠️ delegated — relies on Claude Code's native `isolation: "worktree"` | ❌ | ❌ | ✅ per agent | ❌ | ✅ core feature | ✅ |
-| Session restore | ✅ full layout graph + per-pane state | ✅ via Drive | ✅ | partial | ✅ detach/reattach | ✅ | ❌ |
-| SSH / remote terminal | ✅ ConPTY + WSL + SSH spawn | ✅ Warp SSH | ❌ | ❌ | ✅ SSH attach | ✅ SSH mode | ❌ |
-| Multi-shell support (bash/zsh/fish/PowerShell) | ✅ per-pane shell flavor detection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| GPU terminal renderer | xterm.js over WebView2 (Ghostty/wgpu on roadmap) | ✅ Rust/Metal-class native | libghostty ✅ | ✅ Rust/Metal | terminal host | Electron | Electron |
-| Automation API | ✅ named pipe + HTTP + MCP | Warp Drive API (cloud) | Unix socket | ACP open spec | socket | VS Code ext | ❌ |
-| OSC notification ring (9/99/777) | ✅ | partial | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Workbook/charts via MCP | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| PR review pane | ✅ inline Ask AI via any agent CLI | ❌ | ❌ | ✅ in-editor diff | ❌ | ❌ | ✅ |
-| Open source | ✅ AGPL-3.0 | ❌ proprietary | ✅ AGPL | ✅ GPL | ✅ | ✅ | ✅ |
-| Cloud / login required for full feature set | ❌ local-first | ✅ for AI/Drive/sessions | ❌ | ❌ | ❌ | ❌ | optional |
+| Multi-agent in one window | ✅ sidebar + cross-workspace rollup | ✅ Universal Agent Support (tabs side-by-side) | ✅ vertical workspace tabs | ✅ Parallel Agents — threads sidebar | ✅ ~14 agent integrations | ✅ sub-agents + Best-of-N | ✅ |
+| Agent-CLI lifecycle hooks (authoritative state) | ✅ Claude Code only → "live" badge | ✅ for built-in agent surfaces | ✅ resume hooks for Claude/Codex/OpenCode/Grok | ⚠️ via ACP-aware agents | ✅ socket forwarding for ~14 agents (blocked/working/done) | partial | ❌ |
+| Screen-content state fallback for any TUI agent | ✅ shell-prompt + bottom-rows heuristic | ✅ (own surface) | ✅ | n/a | ✅ | ❌ | ❌ |
+| Browser surface in pane | ✅ iframe + auto-fallback to in-pane CEF (CDP screencast) | ❌ | ✅ scriptable browser (separate window) | ❌ | ❌ | ✅ browser tabs for live sessions | ❌ |
+| Markdown / notebook surface in pane | ✅ | ✅ Notebooks | ❌ | ✅ in-editor | ❌ | ❌ | ⚠️ diff viewer |
+| Activity log (per-agent tool calls + I/O) | ✅ + per-pane agent timeline | ✅ Blocks history | partial | ✅ thread history | ⚠️ | partial | ✅ |
+| Per-pane one-shot ask against any installed agent CLI | ✅ Claude/Codex/Gemini/OpenCode/Aider | ✅ (own agent) | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Real-time multi-device collab (live pane / workspace share) | ✅ Tailscale-aware, PWA viewer, read/write, local-first | ✅ live multi-cursor/viewer — **cloud-only via Warp backend** | ❌ | ✅ DeltaDB CRDT (human + agent character-level) | ❌ | ❌ | ❌ |
+| Git worktree isolation per agent (first-party) | ❌ delegated to Claude Code's `isolation:"worktree"` | ✅ auto-detect + per-worktree review/indexing | ❌ ([issue #156](https://github.com/manaflow-ai/cmux/issues/156) open) | ✅ per-thread, detached HEAD | ✅ worktree CLI + socket API | ✅ core runtime mode | ✅ task isolation |
+| Customizable keybindings (JSON, hot-reload) | ✅ | ✅ | partial | ✅ | ✅ | partial | ❌ |
+| Session restore (layout + scrollback + state) | ✅ full layout graph | ✅ via Drive | ✅ (incl. scrollback + browser history) | partial | ✅ detach/reattach | ✅ | ❌ |
+| SSH / remote terminal | ✅ ConPTY + WSL + SSH spawn | ✅ Warp SSH | ✅ SSH workspace attach | ⚠️ basic | ✅ first-class thin client | ✅ runtime mode | ❌ |
+| Multi-shell (bash / zsh / fish / PowerShell, per-pane flavor) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| GPU-accelerated terminal renderer | xterm.js over WebView2 | ✅ Rust GPU | ✅ libghostty | ✅ Rust/Metal/D3D11 | terminal host | Electron | Electron |
+| OSC notification ring (9 / 99 / 777) | ✅ | partial | ✅ | ❌ | ✅ | ❌ | ❌ |
+| Workbook / charts via MCP | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| PR review pane | ✅ with multi-CLI inline Ask AI | ⚠️ via cloud agent | ⚠️ via PR linkage in sidebar | ✅ in-editor diff | ❌ | ✅ integrated review pane | ✅ |
+| Cloud / login required for full feature set | ❌ local-first | ✅ (Active AI / Agent Mode / Oz / Shared Sessions all cloud) | ❌ | optional | ❌ | optional | optional |
 
 ## Where wmux is ahead
 
-### Multi-device real-time collab over Tailscale (PRs #37–#49)
+### MCP server (not just client) + Code Mode
 
-The most distinctive recent shift. wmux runs an in-app HTTP/WebSocket server that surfaces a PWA viewer for any pane or whole workspace. Tailscale-aware URLs (uses the 100.x tailnet IP when available); read/write share with mutual confirmation on first device; viewer reconnect with per-share replay buffer; layout mirrored across multi-tab workspaces; mobile-viewport polish; agent timeline panel in the viewer. **Local-first**: no cloud, no broker, no account. Warp has multi-device sessions via Warp Drive but they are cloud-mediated and require login. cmux, zed, herdr, mux, t3code have no equivalent.
+Every other tool in this list is, at best, an MCP **client** — they consume external MCP servers (Warp is the most aggressive consumer with OAuth installs and hot-add) but none of them expose themselves as an MCP server for an external agent to drive. wmux is the only one. On top of that, the default MCP surface is **Code Mode** (`wmux_eval`): an agent writes a JS script in a `boa_engine` sandbox where every other wmux tool is a bound function — collapsing N tool-call round-trips into one. Nothing else here does this.
 
-### MCP server + Code Mode + 20+ structured tools
+### Multi-device collab over Tailscale, local-first
 
-wmux ships an MCP HTTP endpoint exposing: pane I/O (`pane_send_text`, `pane_send_keys`, `pane_read_screen`), structural (`list_workspaces`, `list_tabs`, `split_pane`, …), workspace orchestration, browser CDP tools (`browser_screenshot`, `browser_evaluate`, `browser_click`, …), agent-to-agent messaging (`ask_agent`, `broadcast`), and `get_blocks` for terminal history. The default MCP mode is **Code Mode** (`wmux_eval`, PR #30) — agents write a JS script that calls every other tool as a bound function, collapsing N round-trips into one call. No other tool in this list has an MCP server, let alone a JS-sandbox tool layer.
+wmux runs an in-app HTTP/WebSocket server that surfaces a PWA viewer for any pane or whole workspace. Tailscale-aware URLs (uses the 100.x tailnet IP when available); read/write share with mutual confirmation on first device; viewer reconnect with per-share replay buffer; layout mirrored across multi-tab workspaces; agent timeline panel in the viewer. **No cloud, no broker, no account.**
 
-### Authoritative agent state via Claude Code hooks
-
-cmux, herdr, and mux infer agent state by screen-scraping or idle timeouts. wmux receives Claude Code lifecycle events (`PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `UserPromptSubmit`) directly via an installable hooks adapter, persists them per-pane, and shows a "live" badge in the sidebar for hook-derived state. Panes running other CLIs (Codex, Gemini, Aider, OpenCode, Amp) gracefully fall back to the shell-prompt + bottom-rows heuristic.
+Warp's Shared Sessions are live and multi-viewer but require publishing to Warp's cloud — no self-host, no Tailscale, no LAN-only option documented. Zed's DeltaDB tackles a different angle (real-time CRDT sync of code/state with agents and humans) but isn't a pane-share surface. cmux, mux, herdr, t3code don't ship multi-device collab.
 
 ### tmux.exe shim
 
-Agent harnesses that drive tmux commands (Claude Code's own session management, many automation scripts) work on Windows without modification. wmux ships a `tmux.exe` binary that maps the practical agent-facing tmux subset onto the wmux automation API. No other tool in this list does this.
+Agent harnesses that drive tmux commands (Claude Code's own session management, many automation scripts) work on Windows without modification because wmux ships a `tmux.exe` that maps the agent-facing tmux subset onto the wmux automation API. herdr targets real tmux; nobody else in this list ships a shim.
 
-### Browser-in-pane with iframe → CEF auto-fallback (PR #32)
+### Browser-in-pane with iframe → CEF auto-fallback
 
-Headers like `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors` kill the cheap iframe path. wmux auto-detects header-blocked navigation and re-opens the page in an out-of-process CEF helper, embedded in the pane via CDP `Page.startScreencast` → JPEG → `<canvas>`. Input forwarding (mouse, wheel, keyboard) routed back over CDP. Helper HWND hidden via `WS_EX_LAYERED` + alpha=0. cmux has Chromium but in a separate window; nothing else in the list does in-pane.
+Headers like `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors` kill the cheap iframe path. wmux auto-detects header-blocked navigation and re-opens the page in an out-of-process CEF helper, embedded in the pane via CDP `Page.startScreencast` → JPEG → `<canvas>`. Input forwarding (mouse, wheel, keyboard) routed back over CDP. Helper HWND hidden via `WS_EX_LAYERED` + alpha=0. cmux has a scriptable Chromium but in a separate window; mux has browser tabs in live sessions; Warp/Zed/herdr/t3code don't ship in-pane browser.
 
-### Per-pane inline ask any agent CLI (PR #52)
+### Per-pane one-shot ask against any installed agent CLI
 
-The PR-review panel can spawn any installed agent CLI in one-shot mode (`claude -p`, `codex exec`, `gemini -p`, `opencode run`, `aider --message`), pipe the diff context, and render the response inline. The user's own auth applies — no per-provider API-key plumbing in wmux. Warp's inline-ask is tied to their own agent.
+The PR-review panel can spawn any installed agent CLI in one-shot mode (`claude -p`, `codex exec`, `gemini -p`, `opencode run`, `aider --message`), pipe the diff context, and render the response inline. The user's own auth applies — no per-provider API-key plumbing in wmux. Warp's inline-ask is tied to its own agent surface. t3code is the closest analogue — a CLI harness with BYOK — but isn't a terminal multiplexer.
 
 ### Windows-first, fully local
 
-Still the widest moat. cmux is macOS-only by architecture. herdr requires POSIX. Warp's full feature set requires login and cloud (AI, Drive, sessions). wmux is the only agent-first terminal multiplexer built from the ground up for Windows, with explicit ConPTY, PowerShell, WSL, and WebView2 integration, and no cloud dependency.
+Still a moat, but narrower than the prior version of this doc implied. Zed Windows went stable Oct 15 2025. Warp Windows shipped Feb 2025 (GA). t3code is Electron, runs on Windows. cmux and herdr remain POSIX/macOS-only; mux is macOS+Linux only. wmux is still the only agent-first terminal multiplexer built **from the ground up for Windows** with explicit ConPTY/PowerShell/WSL/WebView2 integration — but Windows availability alone is no longer the headline.
 
 ## Where wmux lags
 
+### First-party git worktree isolation
+
+The biggest correction vs. the prior version of this doc. Every other tool in the matrix except cmux ships first-party worktree isolation:
+
+- **Warp** auto-detects worktrees, runs per-worktree code review and codebase indexing, can spawn worktrees from the `+` menu.
+- **Zed** can start each agent thread in a new worktree with detached HEAD.
+- **mux** makes worktree-per-workspace one of three runtime modes; worktrees share `.git` with the main repo.
+- **herdr** shipped worktree CLI + socket API for agents to drive worktree workflows.
+- **t3code** ships worktree task isolation.
+
+wmux's framing has been: delegate to Claude Code's native `isolation:"worktree"`. That covers the within-Claude-subagent case but **not** the cross-pane case — running two top-level Claude (or Codex, or Gemini) panes against the same repo still requires the user to manage worktrees by hand. Earlier versions of this doc called this an "intentional non-feature." Given how universally it has been adopted, that framing is no longer defensible — it's a real gap.
+
 ### Terminal renderer speed
 
-Warp on its native renderer, cmux on libghostty/wgpu, and Zed on Rust/Metal are faster than xterm.js over WebView2. The Ghostty/wgpu renderer replacement is on the roadmap but not started.
+Warp ships a Rust GPU renderer; cmux on libghostty; Zed on Rust + Metal/D3D11. wmux is xterm.js over WebView2. Now that Warp is open source (AGPL core), there's no longer a "proprietary thing we can't match" excuse — but the integration work to swap renderers is still substantial. Ghostty/wgpu replacement remains on the roadmap, not started.
+
+### Universal agent-lifecycle adapter
+
+wmux has Claude Code lifecycle hooks (`PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `UserPromptSubmit`) and uses them to drive the "live" badge in the sidebar. Other agents fall back to the shell-prompt heuristic. Meanwhile:
+
+- **herdr** has a socket API that normalizes semantic state (blocked / working / done) across ~14 agent integrations.
+- **cmux** ships resume hooks for Claude Code, Codex, OpenCode, and Grok.
+- **Zed** gets it for free from ACP-aware agents.
+
+wmux's hook integration is deeper for Claude Code specifically, but narrower in breadth than herdr's. A normalized adapter layer across multiple harnesses would close this.
 
 ### Editor integration
 
-Zed's Agent Client Protocol lets Claude Code attach into the editor with file tree, git, and diff context as first-class structured surfaces. wmux is a terminal — the PR-review pane is the closest thing to a code-aware surface, and it is read-only diff inspection, not editing. Users who want an agent + editor combo in one window pick Zed.
+Zed's Agent Client Protocol lets ~6 agents (Claude Code, Codex CLI, Gemini CLI, GitHub Copilot CLI, OpenCode, Cursor) attach into the editor with file tree, git, and diff context as first-class structured surfaces. ACP clients have spread beyond Zed (JetBrains AI Assistant, Neovim). wmux is a terminal — the PR-review pane is the closest thing to a code-aware surface, and it is read-only diff inspection. Users who want an agent + editor combo in one window pick Zed.
 
 ### Cross-platform reach
 
-t3code, mux, and Warp work on all three OSes. wmux is Windows-only — a deliberate architecture choice that limits mixed-OS teams. macOS users default to cmux or Warp; Linux users default to Warp or herdr.
+t3code, mux, Warp, and Zed all run on multiple OSes. wmux is Windows-only — a deliberate architecture choice that limits mixed-OS teams. macOS users default to cmux, Warp, or Zed; Linux users default to Warp, Zed, or herdr.
 
 ### Polish budget vs. Warp
 
-Warp has a paid team and years of UX investment. Object Inspector (structured parsing of command output), command palette, autosuggest, voice control, and the overall block-based UX are areas where wmux's xterm-over-WebView2 surface still feels like a terminal-multiplexer-with-extras rather than a reimagined terminal.
+Warp has a paid team, years of UX investment, and now open-source visibility. Object Inspector (structured parsing of command output), command palette, autosuggest, voice control, and the overall block-based UX outpace what an xterm-over-WebView2 surface can reach without significant work. Warp's Oz cloud-orchestration platform also defines an upper bar on "scale" that wmux is not chasing — and probably shouldn't, given the local-first positioning.
 
 ## Tool-by-tool notes
 
-### Warp
+### Warp ([warpdotdev/warp](https://github.com/warpdotdev/warp))
 
-The 800-pound gorilla of agent terminals. Strongest on terminal UX (blocks, autosuggest, command palette, Object Inspector), now GA on Linux and Windows. Agent Mode runs longer multi-step tasks; Warp Drive syncs workflows/notebooks/teams across devices; Shared Sessions enable multi-device collab — but everything beyond local typing requires login and is cloud-mediated. Closed source, freemium with a Pro subscription. **Where wmux beats Warp**: open source, no login, no cloud, MCP server, Code Mode, tmux shim, Claude Code hook integration, in-pane browser surface. **Where Warp beats wmux**: terminal renderer, polish, Object Inspector, cross-platform breadth, install base.
+The 800-pound gorilla, and as of April 30 2026 also open source (AGPLv3 core + MIT UI crates, OpenAI as founding sponsor). All three platforms GA. **Universal Agent Support** runs Claude Code, Codex, and Gemini CLI side-by-side in tabs. **Oz** (Feb 2026) is a cloud-orchestration platform that runs autonomous agents in parallel, schedulable, event-triggered — usable standalone outside the terminal. Shared Sessions are genuinely live (multi-cursor, multi-viewer, optional edit access) but **cloud-mediated only** — no self-host, no Tailscale, no LAN. **MCP client only**, not server — external agents can't drive Warp. BYOK pricing in 2026: free tier 150 credits/mo, Build $20/mo, Business $50/user/mo. Where wmux beats Warp: MCP server, Code Mode, tmux shim, local-first multi-device collab, in-pane browser. Where Warp beats wmux: renderer, polish, Oz, cross-platform install base.
 
-### cmux
+### cmux ([manaflow-ai/cmux](https://github.com/manaflow-ai/cmux))
 
-The closest open-source analogue on macOS. libghostty renderer, AGPL, strong session resume, embedded Chromium for browser tasks. macOS-only by design — uses libghostty which doesn't port. Weak on Windows, WSL, remote tmux, MCP, and multi-device share. Maintainer has not personally verified recent cmux changes; entries here reflect last-checked state.
+macOS-only, GPL-3.0-or-later (not AGPL — correcting earlier versions of this doc), libghostty renderer, ~19k stars. Differentiators: vertical-tab workspace sidebar with PR linkage, agent-specific resume hooks for Claude Code / Codex / OpenCode / Grok (broader than wmux's Claude-only hook integration), `cmux claude-teams`, in-app scriptable browser ported from vercel-labs/agent-browser, browser-data import from 20+ browsers, persistent scrollback. **Worktree NOT first-class** — issue #156 is open. **No first-party MCP server**; a community `cmux-mcp` exposes `write_to_terminal` / `read_terminal_output` / `send_control_character`. SSH workspace attachment shipped; Cloud VMs + iOS app advertised but not GA.
 
-### zed
+### Zed ([zed-industries/zed](https://github.com/zed-industries/zed))
 
-A code editor first, terminal multiplexer second. Agent Client Protocol (ACP) lets multiple agents attach to the editor with file tree, git, and diff context as structured surfaces. Per-agent git worktree isolation is shipped. The tradeoff is that it is an editor — users who live in a different editor get little from Zed. Windows still in preview.
+A code editor first; agent panel second. Windows went stable Oct 15 2025. **Zed 1.0** shipped April 29 2026 with **Parallel Agents** as the headline feature — concurrent agent + terminal threads in one window, per-thread agent selection, per-thread worktree (detached HEAD). The **Agent Client Protocol (ACP)** is an open standard with a registry; registered agents include Claude Code, Codex CLI, Gemini CLI, Copilot CLI, OpenCode, and Cursor. ACP clients beyond Zed include JetBrains AI Assistant and Neovim. **DeltaDB** (announced at 1.0) is a CRDT sync engine for real-time character-level shared state between humans and agents — different angle on "collab" than wmux's pane share. Terminal panel has tabs and splits but **not** tmux-style layouts (issue [#16174](https://github.com/zed-industries/zed/issues/16174) open). License: GPL editor, AGPL server, Apache GPUI.
 
-### herdr
+### herdr ([ogulcancelik/herdr](https://github.com/ogulcancelik/herdr))
 
-The most terminal-native option: runs inside an existing terminal rather than replacing it, so fonts, SSH setup, and keybindings carry over automatically. Detach/reattach semantics are strong. POSIX-only (no Windows), no browser surfaces, no MCP, no hook integration. Maintainer has not personally verified recent herdr changes.
+The most terminal-native option: runs **inside** an existing terminal rather than replacing it, so fonts, SSH setup, and keybindings carry over. AGPL-3.0, Rust, ~2.4k stars, very actively developed (v0.6.2 May 2026). Native integrations for ~14 agent harnesses (Claude Code, Codex, opencode, Copilot CLI, Kiro, hermes, pi, omp, …) with a socket API that forwards semantic state (blocked / working / done). Detach/reattach, SSH thin-client mode, git worktree workflows shipped including CLI + socket API. POSIX-only, no Windows.
 
-### mux (coder)
+### mux (coder) ([coder/mux](https://github.com/coder/mux))
 
-Strongest on worktree-per-agent isolation and the Plan/Exec parallel-agent loop. Cross-platform (Mac/Windows) via Electron, so no renderer-performance advantage over wmux. No tmux shim, no MCP server, no OSC notification ring, no multi-device share. Maintainer has not personally verified recent mux changes.
+By Coder (coder.com). macOS + Linux only (no Windows — correcting earlier versions of this doc). AGPL-3.0. Three runtime modes: `local`, `worktree`, `ssh`. Worktrees auto-created per workspace under `~/.mux/src/<project>/<workspace>` sharing `.git` with the main repo. **Plan / Exec / Review** tri-mode separates architect / implementer / read-only auditor. Recent 2026 work: `/goal` auto-prompting, `/btw` side-Q&A, DeepSeek V4 + monorepo sub-projects, browser tabs for live sessions, "Best of N" parallel launches. Strongest of the matrix on disciplined parallel-agent workflows.
 
-### t3code
+### t3code ([pingdotgg/t3code](https://github.com/pingdotgg/t3code))
 
-A GUI management layer on top of existing CLI agents, not a new runtime. Cross-platform, model-agnostic, has its own inline ask via one-shot CLIs (similar in spirit to wmux PR #52). Best suited for users who want a visual diff/chat interface without leaving their existing shell environment. No terminal multiplexing, no session restore, no automation API.
+GUI harness on top of existing CLI agents (Codex, Claude Code, OpenCode) — BYOK. MIT, Electron, all three platforms. Created Feb 2026, still pre-1.0 (v0.0.24 at snapshot). Multi-agent parallelism, git-worktree task isolation, turn-by-turn diff viewer, embedded terminal, one-click Commit/Push/Open-PR. Best fit for users who want a visual diff/chat front-end without leaving their shell environment. No terminal multiplexing, no session restore, no automation API. Theo Browne (Ping) is the public face; design thesis is "wrap the official vendor CLIs, don't reinvent the agent."
 
 ## Strategic takeaway
 
-wmux's defensible position is: **the only open-source, local-first, agent-first terminal multiplexer for Windows, with the deepest agent-orchestration surface (MCP + Code Mode + tmux shim + Claude hooks + per-CLI one-shot ask) of any tool here, plus Tailscale-aware multi-device collab that even Warp can't match on local-first terms.**
+wmux's defensible position, narrowed against the current field:
 
-The roadmap items most worth prioritizing to close remaining gaps:
+1. **The only MCP server in the terminal-multiplexer category.** Every other tool here is an MCP client at best. Combined with Code Mode (`wmux_eval`), wmux is the only tool that lets an external agent drive a script across the whole UI surface in one round-trip.
+2. **The only local-first, real-time, multi-device pane/workspace share.** Warp's Shared Sessions are live but cloud-locked. Zed's DeltaDB is real-time but optimized for code state, not pane share. wmux's Tailscale-aware share is the only "ship your terminal to your phone over your own network, no broker" option in the list.
+3. **The only Windows-first agent terminal.** Zed and Warp are on Windows but architected elsewhere first. The depth of wmux's Windows integration (ConPTY, WSL routing, WebView2, per-shell-flavor detection) is still unmatched.
+4. **The only `tmux.exe` shim** for agent harnesses that drive tmux commands on Windows.
 
-1. **Ghostty/wgpu renderer** — closes the perception gap vs. Warp/cmux/Zed and is the only "wmux feels old" complaint not already addressed.
-2. **PR review heatmap** + **Workspace templates** — small lifts that turn current surfaces into more obvious wins.
-3. **Multi-CLI hook adapter** — extends the "live" agent-state badge beyond Claude Code (Codex, Gemini have no equivalent today; an adapter that normalizes lifecycle events from any harness would generalize the moat).
+Real gaps to close, in priority order:
 
-Two items that earlier versions of this doc flagged as "wmux lags" and are now intentionally not on the roadmap:
+1. **First-party git worktree isolation per pane.** The previous version of this doc called this an intentional non-feature; that's no longer credible given universal adoption across Warp / Zed / mux / herdr / t3code. Cross-pane parallel-agent use is a real workflow and wmux makes the user do it manually.
+2. **GPU-accelerated terminal renderer.** Warp going open-source removes the prior "proprietary" framing — Warp/cmux/Zed all ship native renderers and the perception gap widens every release. Ghostty/wgpu replacement is still the candidate.
+3. **Universal agent-lifecycle adapter.** wmux has deep Claude Code hook integration; herdr has shallower but broader normalization across ~14 harnesses; cmux has agent-specific resume hooks for four agents. A normalized lifecycle layer would extend the "live state" badge beyond Claude Code without abandoning the depth we have.
+4. **Polish-tier UX investments** (command palette, structured output inspector, autosuggest). Lower priority — these are obvious "we're not Warp" gaps, not features that win specific users.
 
-- **Git worktree creation/management.** Claude Code's `isolation: "worktree"` covers the within-session case (the high-frequency one). cmux and mux ship worktree-per-agent for parallel top-level agents; wmux delegates to Claude Code rather than duplicating ecosystem solutions. Reconsider only if specific demand surfaces.
-- **Per-pane environment isolation.** Every scenario is solved by existing tooling (direnv, `AWS_PROFILE=foo` invocations, virtualenvs). Adding another env layer duplicates ecosystem solutions for a feature looking for a problem.
-
-Everything else (browser integration, MCP surface, collab, Claude Code integration, automation API, tmux shim) is already competitive or ahead of field.
+Everything else in the matrix (in-pane browser, MCP surface depth, OSC notifications, multi-shell support, workbook/charts, automation API breadth) is already competitive or ahead of field.

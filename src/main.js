@@ -1467,7 +1467,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-hooks" data-action="hooks" title="Install Claude Code hooks for live agent state">HK</button>' : ''}
     <button class="pane-tb-btn pane-tb-agent" data-action="agent" title="Set preferred AI agent for this pane">AI</button>
     <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
-    <button class="pane-tb-btn pane-tb-share" data-action="share" title="Share this pane (read-only)">SH</button>
+    <button class="pane-tb-btn pane-tb-share" data-action="share" title="Share this pane">SH</button>
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
   toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); showSplitTypePicker(sessionId, 'h', r.left, r.bottom + 4); });
@@ -1476,7 +1476,15 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.querySelector('[data-action="markdown"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithMarkdown(sessionId, 'h'); });
   toolbarEl.querySelector('[data-action="artifact"]').addEventListener('click', (e) => { e.stopPropagation(); previewArtifactFromPane(sessionId); });
   toolbarEl.querySelector('[data-action="workbook"]').addEventListener('click', (e) => { e.stopPropagation(); panelsRuntime?.openWorkbookDemo?.().catch((err) => showError(`Could not open workbook: ${err}`)); });
-  toolbarEl.querySelector('[data-action="share"]').addEventListener('click',   (e) => { e.stopPropagation(); collabRuntime?.startShareForPane(sessionId); });
+  toolbarEl.querySelector('[data-action="share"]').addEventListener('click',   (e) => {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    showContextMenu([
+      { type: 'label', text: 'Share this pane' },
+      { label: 'Read-only', action: () => collabRuntime?.startShareForPane(sessionId, 'read') },
+      { label: 'Read-write (viewers can type)', danger: true, action: () => collabRuntime?.startShareForPane(sessionId, 'read_write') },
+    ], r.left, r.bottom + 4);
+  });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   if (isBlocksCapable) {
     const blocksBtn = toolbarEl.querySelector('[data-action="blocks"]');

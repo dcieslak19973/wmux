@@ -264,7 +264,7 @@ export function createCollabRuntime({
     document.getElementById('collab-share-dialog')?.remove();
   }
 
-  async function startShareForPane(paneId) {
+  async function startShareForPane(paneId, permission = 'read') {
     closeShareDialog();
     // Refresh interface + Tailscale state every share so the dialog shows
     // current URLs (laptop may have moved networks, daemon may have logged
@@ -275,6 +275,7 @@ export function createCollabRuntime({
         targetPaneId: paneId,
         ttlSeconds: DEFAULT_TTL_SECONDS,
         requireMutualConfirm: getRequireApproval(),
+        permission,
       });
       cachedPort = mint.server_port;
       ttlByCode.set(mint.code, DEFAULT_TTL_SECONDS);

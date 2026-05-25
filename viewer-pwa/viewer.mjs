@@ -16,6 +16,8 @@ function setStatus(text, cls) {
 // Bump the default font on touch-pointer devices so xterm.js renders at
 // a thumb-friendly size on phones without forcing the page-zoom.
 const isCoarsePointer = window.matchMedia?.('(pointer: coarse)').matches;
+// disableStdin starts true (read-only by default); the Capabilities frame
+// from the server upgrades it to false when the share is Read-Write.
 const term = new window.Terminal({
   fontSize: isCoarsePointer ? 15 : 13,
   fontFamily: 'ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace',
@@ -67,9 +69,35 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
 
 let ws = null;
 let helloDone = false;
+let permission = 'read';
+let inputDisposer = null; // term.onData disposer for the active session
 let attempt = 0;
 let userClosed = false;
 let reconnectTimer = null;
+
+function detachInput() {
+  if (inputDisposer) {
+    try { inputDisposer.dispose(); } catch {}
+    inputDisposer = null;
+  }
+  term.options.disableStdin = true;
+}
+
+function attachInput() {
+  if (inputDisposer) return;
+  term.options.disableStdin = false;
+  // term.onData fires with the raw string the user typed. Send it as
+  // bytes (UTF-8) over the WS for the host PTY.
+  inputDisposer = term.onData((data) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const bytes = Array.from(new TextEncoder().encode(data));
+    ws.send(JSON.stringify({
+      kind: 'input_chunk',
+      from: PARTICIPANT_ID,
+      bytes,
+    }));
+  });
+}
 
 function connect({ isReconnect } = { isReconnect: false }) {
   if (isReconnect) {
@@ -77,6 +105,7 @@ function connect({ isReconnect } = { isReconnect: false }) {
     term.reset();
   }
   helloDone = false;
+  detachInput();
   setStatus(isReconnect ? 'reconnecting…' : 'connecting…');
   ws = new WebSocket(WS_URL);
 
@@ -101,6 +130,17 @@ function connect({ isReconnect } = { isReconnect: false }) {
     if (msg.kind === 'hello') {
       helloDone = true;
       setStatus(`connected (proto v${msg.protocol_version})`, 'ok');
+      return;
+    }
+    if (msg.kind === 'capabilities') {
+      permission = msg.permission ?? 'read';
+      if (permission === 'read_write') {
+        attachInput();
+        setStatus('connected (read-write)', 'ok');
+      } else {
+        detachInput();
+        setStatus('connected (read-only)', 'ok');
+      }
       return;
     }
     if (msg.kind === 'output_chunk') {

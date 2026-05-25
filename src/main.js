@@ -492,6 +492,19 @@ function showContextMenu(items, x, y) {
     menu.appendChild(btn);
   }
   document.body.appendChild(menu);
+  // Clamp to the viewport so menus opened from a right-edge button
+  // (e.g. SH on a pane-toolbar on the right half of the screen) don't
+  // overflow and clip their widest item.
+  const rect = menu.getBoundingClientRect();
+  const pad = 8;
+  if (rect.right > window.innerWidth - pad) {
+    const adjusted = Math.max(pad, window.innerWidth - rect.width - pad);
+    menu.style.left = `${adjusted}px`;
+  }
+  if (rect.bottom > window.innerHeight - pad) {
+    const adjusted = Math.max(pad, window.innerHeight - rect.height - pad);
+    menu.style.top = `${adjusted}px`;
+  }
   const onOutside = (event) => {
     if (!menu.contains(event.target)) closeContextMenu();
   };

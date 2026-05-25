@@ -1,0 +1,42 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #1e1e1e;
+  color: #ddd;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: #2a2a2a;
+  border-bottom: 1px solid #333;
+  font-size: 12px;
+  user-select: none;
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.status {
+  color: #888;
+}
+
+.status.ok { color: #6ec06e; }
+.status.err { color: #d96a6a; }
+
+main#term {
+  height: calc(100% - 32px);
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+main#term .xterm {
+  height: 100%;
+}

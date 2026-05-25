@@ -1,0 +1,11 @@
+{
+  "name": "wmux share",
+  "short_name": "wmux",
+  "description": "Live terminal viewer for a shared wmux pane.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#1e1e1e",
+  "theme_color": "#1e1e1e",
+  "orientation": "any",
+  "icons": []
+}

@@ -161,13 +161,17 @@ const SETTINGS_DEFAULTS = {
 
 const SAVED_SSH_TARGETS_KEY = 'wmux-saved-ssh-targets';
 
+// Agent invocation templates, per shell flavour.
+//   bash  → bash + zsh (both accept $'…' ANSI-C quoting)
+//   ps    → PowerShell + pwsh (backtick is the escape char)
+//   fish  → fish (no $'…'; uses double-quoted strings with \n + \\ escapes)
 const FIX_AGENTS = [
-  { key: 'claude',   label: 'Claude',   color: '#d97706', bash: (b) => `claude $'${b}'`,           ps: (b) => `claude "${b}"` },
-  { key: 'codex',    label: 'Codex',    color: '#10b981', bash: (b) => `codex $'${b}'`,            ps: (b) => `codex "${b}"` },
-  { key: 'gemini',   label: 'Gemini',   color: '#4285f4', bash: (b) => `gemini $'${b}'`,           ps: (b) => `gemini "${b}"` },
-  { key: 'opencode', label: 'OpenCode', color: '#a78bfa', bash: (b) => `opencode $'${b}'`,         ps: (b) => `opencode "${b}"` },
-  { key: 'aider',    label: 'Aider',    color: '#ec4899', bash: (b) => `aider --message $'${b}'`,  ps: (b) => `aider --message "${b}"` },
-  { key: 'amp',      label: 'Amp',      color: '#f59e0b', bash: (b) => `amp $'${b}'`,              ps: (b) => `amp "${b}"` },
+  { key: 'claude',   label: 'Claude',   color: '#d97706', bash: (b) => `claude $'${b}'`,           ps: (b) => `claude "${b}"`,           fish: (b) => `claude "${b}"` },
+  { key: 'codex',    label: 'Codex',    color: '#10b981', bash: (b) => `codex $'${b}'`,            ps: (b) => `codex "${b}"`,            fish: (b) => `codex "${b}"` },
+  { key: 'gemini',   label: 'Gemini',   color: '#4285f4', bash: (b) => `gemini $'${b}'`,           ps: (b) => `gemini "${b}"`,           fish: (b) => `gemini "${b}"` },
+  { key: 'opencode', label: 'OpenCode', color: '#a78bfa', bash: (b) => `opencode $'${b}'`,         ps: (b) => `opencode "${b}"`,         fish: (b) => `opencode "${b}"` },
+  { key: 'aider',    label: 'Aider',    color: '#ec4899', bash: (b) => `aider --message $'${b}'`,  ps: (b) => `aider --message "${b}"`,  fish: (b) => `aider --message "${b}"` },
+  { key: 'amp',      label: 'Amp',      color: '#f59e0b', bash: (b) => `amp $'${b}'`,              ps: (b) => `amp "${b}"`,              fish: (b) => `amp "${b}"` },
 ];
 
 function loadSettings() {
@@ -1320,11 +1324,23 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   function buildFixCmd(agent, body, shell) {
     if (shell === 'bash') {
       // $'...' ANSI-C quoting: handles \n, \', \\ inside single quotes.
+      // Works for bash and zsh — both accept this syntax.
       const escaped = body
         .replace(/\\/g, '\\\\')
         .replace(/'/g, "\\'")
         .replace(/\n/g, '\\n');
       return agent.bash(escaped);
+    } else if (shell === 'fish') {
+      // Fish doesn't support $'…'. Double-quoted strings handle most
+      // chars literally; we need to escape backslash, double quote,
+      // dollar sign, and newlines. Fish interprets \n inside double
+      // quotes as a newline, so escape that pattern too.
+      const escaped = body
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\$/g, '\\$')
+        .replace(/\n/g, '\\n');
+      return (agent.fish ?? agent.bash)(escaped);
     } else {
       // PowerShell double-quoted string: backtick is the escape character.
       const escaped = body

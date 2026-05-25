@@ -2523,11 +2523,77 @@ const SHELL_INTEGRATION_PS1: &str = include_str!("shell-integration.ps1");
 const SHELL_INTEGRATION_MARKER: &str = "# wmux shell integration";
 
 const SHELL_INTEGRATION_SH: &str = include_str!("shell-integration.sh");
+const SHELL_INTEGRATION_ZSH: &str = include_str!("shell-integration.zsh");
+const SHELL_INTEGRATION_FISH: &str = include_str!("shell-integration.fish");
+
+// Per-shell markers (first-line comment to find the block) and unique
+// markers (a line guaranteed to appear in the current version, used to
+// detect stale installs so the ⚡ button reappears for upgrades).
 const SHELL_INTEGRATION_BASH_MARKER: &str = "# wmux shell integration for bash";
-// A unique line from the current script version; used to detect stale installs.
-// Must be absent from older/broken versions so the ⚡ button reappears for upgrades.
 const SHELL_INTEGRATION_BASH_UNIQUE: &str =
     "# B marker: end of prompt text, beginning of user input";
+const SHELL_INTEGRATION_ZSH_MARKER: &str = "# wmux shell integration for zsh";
+const SHELL_INTEGRATION_ZSH_UNIQUE: &str =
+    "# B marker: end of prompt text, beginning of user input (zsh)";
+const SHELL_INTEGRATION_FISH_MARKER: &str = "# wmux shell integration for fish";
+const SHELL_INTEGRATION_FISH_UNIQUE: &str =
+    "# B marker: end of prompt text, beginning of user input (fish)";
+
+/// Login shell detected on a WSL / SSH target. Drives which integration
+/// script + rc-file path the install command uses. We treat anything we
+/// don't recognise as bash so the upgrade keeps working when wmux meets
+/// a niche shell.
+#[derive(Debug, Clone, Copy)]
+enum RemoteShellKind {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl RemoteShellKind {
+    fn from_login_path(path: &str) -> Self {
+        let basename = path.trim().rsplit('/').next().unwrap_or("").to_string();
+        match basename.as_str() {
+            "zsh" => RemoteShellKind::Zsh,
+            "fish" => RemoteShellKind::Fish,
+            _ => RemoteShellKind::Bash,
+        }
+    }
+
+    fn script(&self) -> &'static str {
+        match self {
+            RemoteShellKind::Bash => SHELL_INTEGRATION_SH,
+            RemoteShellKind::Zsh => SHELL_INTEGRATION_ZSH,
+            RemoteShellKind::Fish => SHELL_INTEGRATION_FISH,
+        }
+    }
+
+    fn marker(&self) -> &'static str {
+        match self {
+            RemoteShellKind::Bash => SHELL_INTEGRATION_BASH_MARKER,
+            RemoteShellKind::Zsh => SHELL_INTEGRATION_ZSH_MARKER,
+            RemoteShellKind::Fish => SHELL_INTEGRATION_FISH_MARKER,
+        }
+    }
+
+    fn unique_marker(&self) -> &'static str {
+        match self {
+            RemoteShellKind::Bash => SHELL_INTEGRATION_BASH_UNIQUE,
+            RemoteShellKind::Zsh => SHELL_INTEGRATION_ZSH_UNIQUE,
+            RemoteShellKind::Fish => SHELL_INTEGRATION_FISH_UNIQUE,
+        }
+    }
+
+    /// Python expression that evaluates to the rc-file path for this
+    /// shell. Embedded inline in the install command's Python snippet.
+    fn rc_path_expr(&self) -> &'static str {
+        match self {
+            RemoteShellKind::Bash => "os.path.expanduser('~/.bashrc')",
+            RemoteShellKind::Zsh => "os.path.expanduser('~/.zshrc')",
+            RemoteShellKind::Fish => "os.path.expanduser('~/.config/fish/config.fish')",
+        }
+    }
+}
 
 /// Write the wmux shell integration snippet into the user's PowerShell
 /// CurrentUserCurrentHost profile. Replaces any existing (possibly stale)
@@ -2598,13 +2664,40 @@ pub async fn check_shell_integration() -> Result<bool, String> {
     Ok(content.contains(SHELL_INTEGRATION_PS1.trim_end()))
 }
 
-/// Return whether the current wmux bash integration is present in ~/.bashrc inside WSL.
-/// Checks for a unique line from the current script so stale installs still show the ⚡ button.
+/// Detect the user's login shell inside WSL by reading /etc/passwd.
+/// Falls back to bash if anything fails so subsequent install commands
+/// still produce a meaningful result.
+fn detect_wsl_login_shell(distro: Option<&str>) -> RemoteShellKind {
+    let mut cmd = Command::new("wsl.exe");
+    if let Some(d) = distro {
+        cmd.args(["--distribution", d]);
+    }
+    let probe = "getent passwd \"$USER\" | cut -d: -f7";
+    let output = cmd.args(["--", "bash", "-c", probe]).output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            RemoteShellKind::from_login_path(&path)
+        }
+        _ => RemoteShellKind::Bash,
+    }
+}
+
+/// Return whether the current wmux integration is present in the
+/// user's rc file inside WSL. Detects which shell the user runs, then
+/// greps the corresponding rc file for the per-shell unique marker.
 #[tauri::command]
 pub async fn check_shell_integration_wsl(distro: Option<String>) -> Result<bool, String> {
+    let kind = detect_wsl_login_shell(distro.as_deref());
+    let rc = match kind {
+        RemoteShellKind::Bash => "~/.bashrc",
+        RemoteShellKind::Zsh => "~/.zshrc",
+        RemoteShellKind::Fish => "~/.config/fish/config.fish",
+    };
     let check_cmd = format!(
-        "grep -qF '{}' ~/.bashrc 2>/dev/null && echo yes || echo no",
-        SHELL_INTEGRATION_BASH_UNIQUE
+        "grep -qF '{}' {} 2>/dev/null && echo yes || echo no",
+        kind.unique_marker(),
+        rc
     );
     let mut cmd = Command::new("wsl.exe");
     if let Some(d) = &distro {
@@ -2617,31 +2710,13 @@ pub async fn check_shell_integration_wsl(distro: Option<String>) -> Result<bool,
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
 }
 
-/// Install (or replace) the wmux bash integration snippet in ~/.bashrc inside WSL.
-/// Always strips any existing wmux block first so stale installs are updated.
+/// Install (or replace) the wmux shell integration snippet in the
+/// user's rc file inside WSL. Detects the user's login shell first so
+/// zsh / fish users get the right script in the right place.
 #[tauri::command]
 pub async fn install_shell_integration_wsl(distro: Option<String>) -> Result<String, String> {
-    // Normalise to LF so bash on Linux doesn't see stray \r characters.
-    let script = SHELL_INTEGRATION_SH.replace("\r\n", "\n").replace('\r', "\n");
-    // Hex-encode the script so the Python argument contains no $ or quotes —
-    // wsl.exe passes arguments through a shell that double-quote-expands everything,
-    // so any $VAR or $? in a heredoc body gets clobbered. Hex is [0-9a-f] only.
-    let script_hex = hex_encode(script.as_bytes());
-
-    // Single Python invocation: strip old block + append new one.
-    let install_cmd = format!(
-        "python3 -c \"import os,binascii; \
-         p=os.path.expanduser('~/.bashrc'); \
-         c=open(p).read() if os.path.exists(p) else ''; \
-         m='{}\\n'; \
-         i=c.find(m); \
-         s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); \
-         c2=c[:s].rstrip('\\n'); \
-         script=binascii.unhexlify('{}').decode('utf-8'); \
-         open(p,'w').write((c2+'\\n' if c2 else '')+'\\n'+script+'\\n')\"",
-        SHELL_INTEGRATION_BASH_MARKER,
-        script_hex
-    );
+    let kind = detect_wsl_login_shell(distro.as_deref());
+    let install_cmd = build_install_python_cmd(kind);
 
     let mut cmd = Command::new("wsl.exe");
     if let Some(d) = &distro {
@@ -2654,13 +2729,64 @@ pub async fn install_shell_integration_wsl(distro: Option<String>) -> Result<Str
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("bash error: {stderr}"));
+        return Err(format!("install error: {stderr}"));
     }
 
-    Ok("installed".to_string())
+    Ok(format!("installed for {:?}", kind))
 }
 
-/// Return whether the current wmux bash integration is present on a remote SSH host.
+/// Build a single Python one-liner that strips any existing wmux block
+/// from the per-shell rc file and appends the current version. Ensures
+/// the parent dir exists (needed for fish's `~/.config/fish/`).
+fn build_install_python_cmd(kind: RemoteShellKind) -> String {
+    let script = kind
+        .script()
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    // Hex-encode so the Python argument contains no $ or quotes — wsl.exe
+    // and ssh both pass arguments through a shell that double-quote-expands
+    // everything, so any $VAR or $? in the body would otherwise get
+    // clobbered. Hex is [0-9a-f] only.
+    let script_hex = hex_encode(script.as_bytes());
+    format!(
+        "python3 -c \"import os,binascii; \
+         p={path_expr}; \
+         os.makedirs(os.path.dirname(p), exist_ok=True); \
+         c=open(p).read() if os.path.exists(p) else ''; \
+         m='{marker}\\n'; \
+         i=c.find(m); \
+         s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); \
+         c2=c[:s].rstrip('\\n'); \
+         script=binascii.unhexlify('{script_hex}').decode('utf-8'); \
+         open(p,'w').write((c2+'\\n' if c2 else '')+'\\n'+script+'\\n')\"",
+        path_expr = kind.rc_path_expr(),
+        marker = kind.marker(),
+        script_hex = script_hex,
+    )
+}
+
+/// Probe the remote SSH host for the user's login shell so check/install
+/// dispatch to the right per-shell script + rc file. Falls back to bash.
+fn detect_ssh_login_shell(
+    host: &str,
+    user: Option<&str>,
+    port: Option<u16>,
+    identity_file: Option<&str>,
+) -> RemoteShellKind {
+    match run_remote_ssh_script(
+        host,
+        user,
+        port,
+        identity_file,
+        "getent passwd \"$USER\" | cut -d: -f7",
+    ) {
+        Ok(out) => RemoteShellKind::from_login_path(out.trim()),
+        Err(_) => RemoteShellKind::Bash,
+    }
+}
+
+/// Return whether the current wmux integration is present in the
+/// detected login shell's rc file on a remote SSH host.
 #[tauri::command]
 pub async fn check_shell_integration_ssh(
     host: String,
@@ -2668,9 +2794,28 @@ pub async fn check_shell_integration_ssh(
     port: Option<u16>,
     identity_file: Option<String>,
 ) -> Result<bool, String> {
+    let host_for_probe = host.clone();
+    let user_for_probe = user.clone();
+    let identity_for_probe = identity_file.clone();
+    let kind = tokio::task::spawn_blocking(move || {
+        detect_ssh_login_shell(
+            &host_for_probe,
+            user_for_probe.as_deref(),
+            port,
+            identity_for_probe.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let rc = match kind {
+        RemoteShellKind::Bash => "~/.bashrc",
+        RemoteShellKind::Zsh => "~/.zshrc",
+        RemoteShellKind::Fish => "~/.config/fish/config.fish",
+    };
     let check_cmd = format!(
-        "grep -qF '{}' ~/.bashrc 2>/dev/null && echo yes || echo no",
-        SHELL_INTEGRATION_BASH_UNIQUE
+        "grep -qF '{}' {} 2>/dev/null && echo yes || echo no",
+        kind.unique_marker(),
+        rc
     );
     let result = tokio::task::spawn_blocking(move || {
         run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &check_cmd)
@@ -2680,7 +2825,8 @@ pub async fn check_shell_integration_ssh(
     Ok(result.trim() == "yes")
 }
 
-/// Install (or replace) the wmux bash integration snippet in ~/.bashrc on a remote SSH host.
+/// Install (or replace) the wmux shell integration snippet in the
+/// user's login-shell rc file on a remote SSH host.
 #[tauri::command]
 pub async fn install_shell_integration_ssh(
     host: String,
@@ -2688,29 +2834,27 @@ pub async fn install_shell_integration_ssh(
     port: Option<u16>,
     identity_file: Option<String>,
 ) -> Result<String, String> {
-    let script = SHELL_INTEGRATION_SH.replace("\r\n", "\n").replace('\r', "\n");
-    let script_hex = hex_encode(script.as_bytes());
-
-    let install_cmd = format!(
-        "python3 -c \"import os,binascii; \
-         p=os.path.expanduser('~/.bashrc'); \
-         c=open(p).read() if os.path.exists(p) else ''; \
-         m='{}\\n'; \
-         i=c.find(m); \
-         s=max(c.rfind('\\n',0,i)+1,0) if i>=0 else len(c); \
-         c2=c[:s].rstrip('\\n'); \
-         script=binascii.unhexlify('{}').decode('utf-8'); \
-         open(p,'w').write((c2+'\\n' if c2 else '')+'\\n'+script+'\\n')\"",
-        SHELL_INTEGRATION_BASH_MARKER,
-        script_hex
-    );
+    let host_for_probe = host.clone();
+    let user_for_probe = user.clone();
+    let identity_for_probe = identity_file.clone();
+    let kind = tokio::task::spawn_blocking(move || {
+        detect_ssh_login_shell(
+            &host_for_probe,
+            user_for_probe.as_deref(),
+            port,
+            identity_for_probe.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let install_cmd = build_install_python_cmd(kind);
 
     let result = tokio::task::spawn_blocking(move || {
         run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &install_cmd)
     })
     .await
     .map_err(|e| e.to_string())??;
-    Ok(result)
+    Ok(format!("installed for {:?}: {result}", kind))
 }
 
 // ---------------------------------------------------------------------------

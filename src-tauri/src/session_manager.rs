@@ -201,18 +201,26 @@ impl ShellTarget {
                     args.push("-d".to_string());
                     args.push(quote_windows_cmd_arg(d));
                 }
-                // Use `script` to allocate a fresh Linux PTY for bash. Without
-                // this, bash writes readline echo and the PS1 prompt to
+                // Use `script` to allocate a fresh Linux PTY. Without
+                // this, the shell writes readline echo and the prompt to
                 // /dev/tty, which wsl.exe routes through the Windows console
                 // API rather than through ConPTY — so they appear in the dev
-                // terminal instead of wmux.  `script` relays all PTY output
+                // terminal instead of wmux. `script` relays all PTY output
                 // through its own stdout, which wsl.exe does route through
                 // ConPTY, so prompt and echo reach wmux correctly.
+                //
+                // The `-c` arg invokes /bin/sh which then `exec`s whatever
+                // the user's login shell is per /etc/passwd. This way zsh
+                // / fish / etc. users get their own shell, not bash. The
+                // outer quotes are absorbed by `quote_windows_cmd_arg` so
+                // wsl.exe sees a single argument.
                 args.push("--".to_string());
                 args.push("script".to_string());
                 args.push("-q".to_string());
                 args.push("-c".to_string());
-                args.push("bash".to_string());
+                args.push(quote_windows_cmd_arg(
+                    r#"exec "$(getent passwd "$USER" | cut -d: -f7)""#,
+                ));
                 args.push("/dev/null".to_string());
                 Ok(if args.is_empty() {
                     wsl
@@ -314,13 +322,25 @@ pub(crate) fn build_ssh_cmdline(
     // When wmux extras are present, inject identity vars via `env VAR=VALUE …` as
     // the remote command rather than SetEnv/-o, which requires AcceptEnv in the
     // server's sshd_config and is silently dropped when absent.
+    //
+    // When no explicit remote command was supplied, exec the user's login
+    // shell as recorded in /etc/passwd rather than hardcoding bash. This
+    // lets zsh / fish / etc. users keep their own shell. `env` is a
+    // binary, not a shell builtin, so this works the same regardless of
+    // what shell SSH initially spawned to run our command.
     let effective_remote_cmd: Option<String> = if let Some(e) = extras {
         cmd.push_str(&format!(" -R {}:127.0.0.1:{}", e.tunnel_port, crate::http_server::PORT));
         let env_prefix = format!(
             "WMUX=1 WMUX_PANE_ID={} WMUX_API_PORT={} WMUX_API_BASE=http://localhost:{}",
             e.pane_id, e.tunnel_port, e.tunnel_port
         );
-        Some(format!("env {} {}", env_prefix, remote_command.unwrap_or("bash")))
+        let default_shell_invocation =
+            r#"sh -c 'exec "$(getent passwd "$USER" | cut -d: -f7)"'"#;
+        Some(format!(
+            "env {} {}",
+            env_prefix,
+            remote_command.unwrap_or(default_shell_invocation),
+        ))
     } else {
         None
     };

@@ -68,7 +68,61 @@ if (!code || !secret) {
     setStatus(`${manifest.panes.length} pane${manifest.panes.length === 1 ? '' : 's'} shared`, 'ok');
     renderCards(manifest);
   }
+
+  // Subscribe to live layout updates — when the host splits / closes /
+  // resizes panes, the server broadcasts the new layout JSON here, and
+  // we re-fetch the manifest (for any newly-minted pane shares) and
+  // re-render.
+  subscribeToLayoutUpdates();
 })();
+
+function subscribeToLayoutUpdates() {
+  const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUrl = `${wsProto}://${window.location.host}/ws/w/${encodeURIComponent(code)}`;
+  let attempt = 0;
+  let closed = false;
+
+  function connect() {
+    const ws = new WebSocket(wsUrl);
+    ws.addEventListener('open', () => {
+      attempt = 0;
+      ws.send(JSON.stringify({ kind: 'auth', secret }));
+    });
+    ws.addEventListener('message', async (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      if (msg.kind !== 'layout') return;
+      // Layout changed on the host. Re-fetch manifest (in case new pane
+      // shares were minted for newly-split panes) and re-render.
+      try {
+        const resp = await fetch('manifest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ secret }),
+        });
+        if (!resp.ok) return;
+        const fresh = await resp.json();
+        if (fresh.layout) {
+          setStatus(`${fresh.panes.length} pane${fresh.panes.length === 1 ? '' : 's'} — layout updated`, 'ok');
+          renderSplitLayout(fresh);
+        } else {
+          renderCards(fresh);
+        }
+      } catch (err) {
+        console.warn('[workspace] manifest refresh failed:', err);
+      }
+    });
+    ws.addEventListener('close', () => {
+      if (closed) return;
+      const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt, 5));
+      attempt += 1;
+      setTimeout(connect, delay);
+    });
+    ws.addEventListener('error', () => {});
+  }
+  window.addEventListener('beforeunload', () => { closed = true; });
+  connect();
+}
 
 // ── Card-grid fallback (previous behaviour) ─────────────────────────────
 

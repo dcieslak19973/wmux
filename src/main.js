@@ -3580,6 +3580,7 @@ function scheduleLayoutSave(delay = 300) {
 function markLayoutDirty({ immediate = false } = {}) {
   lastSavedLayoutJson = null;
   agentSidebarRuntime?.refresh();
+  collabRuntime?.onHostLayoutChanged?.();
   if (immediate) return persistLayoutNow({ reason: 'immediate' });
   scheduleLayoutSave();
   return Promise.resolve(false);

@@ -256,6 +256,11 @@ pub struct WorkspaceShare {
     /// calls `provide_workspace_layout` — until then the viewer falls
     /// back to its card-grid rendering.
     pub layout: Option<serde_json::Value>,
+    /// Broadcast channel of layout updates; viewers subscribe via
+    /// `/ws/w/:code` and re-render the split tree on each update so
+    /// the host can split/close panes mid-share without the viewer
+    /// being stuck on the share-time snapshot.
+    pub layout_tx: broadcast::Sender<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -390,6 +395,7 @@ impl ShareSessionStore {
     ) -> String {
         let secret = random_secret();
         let secret_hash = sha256(secret.as_bytes());
+        let (layout_tx, _rx) = broadcast::channel::<serde_json::Value>(16);
         let ws = WorkspaceShare {
             code: code.clone(),
             label,
@@ -398,6 +404,7 @@ impl ShareSessionStore {
             expires_at: Instant::now() + ttl,
             panes,
             layout: None,
+            layout_tx,
         };
         let mut inner = self.inner.write().await;
         inner.workspaces.insert(code.clone(), ws);
@@ -419,8 +426,10 @@ impl ShareSessionStore {
         inner.workspaces.values().map(WorkspaceShareInfo::from).collect()
     }
 
-    /// Stash a layout tree for an already-minted workspace share. Returns
-    /// false if the workspace doesn't exist.
+    /// Stash a layout tree for an already-minted workspace share AND
+    /// broadcast it to any subscribed viewer WS connections so they
+    /// re-render the split tree live. Returns false if the workspace
+    /// doesn't exist.
     pub async fn set_workspace_layout(
         &self,
         code: &SessionCode,
@@ -428,7 +437,25 @@ impl ShareSessionStore {
     ) -> bool {
         let mut inner = self.inner.write().await;
         if let Some(ws) = inner.workspaces.get_mut(code) {
-            ws.layout = Some(layout);
+            ws.layout = Some(layout.clone());
+            let _ = ws.layout_tx.send(layout);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Append additional pane share entries to an existing workspace
+    /// bundle — called when the host splits a pane mid-share and the
+    /// new pane needs its own share to appear in the viewer.
+    pub async fn add_panes_to_workspace(
+        &self,
+        code: &SessionCode,
+        entries: Vec<WorkspacePaneEntry>,
+    ) -> bool {
+        let mut inner = self.inner.write().await;
+        if let Some(ws) = inner.workspaces.get_mut(code) {
+            ws.panes.extend(entries);
             true
         } else {
             false
@@ -979,6 +1006,81 @@ struct ManifestResponse {
     layout: Option<serde_json::Value>,
 }
 
+async fn workspace_ws_handler(
+    Path(code): Path<String>,
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let code = SessionCode(code);
+    ws.on_upgrade(move |socket| handle_workspace_socket(socket, state.store, code))
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WorkspaceFrame {
+    Layout { layout: serde_json::Value },
+}
+
+async fn handle_workspace_socket(
+    mut socket: WebSocket,
+    store: ShareSessionStore,
+    code: SessionCode,
+) {
+    // Auth: first frame must be SessionMessage::Auth carrying the workspace
+    // secret (same protocol shape as the pane WS, different secret store).
+    let Some(Ok(first)) = socket.recv().await else { return };
+    let Message::Text(first_text) = first else { return };
+    let Ok(SessionMessage::Auth { secret }) = serde_json::from_str(&first_text) else {
+        return;
+    };
+    let Some(ws_share) = store.get_workspace(&code).await else { return };
+    if ws_share.expires_at <= Instant::now() {
+        return;
+    }
+    if !constant_time_eq(&sha256(secret.as_bytes()), &ws_share.secret_hash) {
+        return;
+    }
+
+    let mut rx = ws_share.layout_tx.subscribe();
+
+    // Send the current layout immediately so a viewer connecting after
+    // it was set doesn't have to wait for the next change.
+    if let Some(layout) = ws_share.layout.clone() {
+        let frame = WorkspaceFrame::Layout { layout };
+        if socket
+            .send(Message::Text(serde_json::to_string(&frame).unwrap()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+
+    // Pump layout broadcasts.
+    loop {
+        tokio::select! {
+            upd = rx.recv() => {
+                let Ok(layout) = upd else { break };
+                let frame = WorkspaceFrame::Layout { layout };
+                if socket
+                    .send(Message::Text(serde_json::to_string(&frame).unwrap()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => continue,
+                }
+            }
+        }
+    }
+}
+
 async fn workspace_manifest(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -1030,6 +1132,7 @@ pub fn router(
         .route("/w/:code", get(workspace_index))
         .route("/w/:code/:name", get(workspace_asset))
         .route("/w/:code/manifest", axum::routing::post(workspace_manifest))
+        .route("/ws/w/:code", get(workspace_ws_handler))
         .with_state(AppState { store, emitter, input_handler })
 }
 

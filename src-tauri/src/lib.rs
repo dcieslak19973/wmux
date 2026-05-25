@@ -114,6 +114,7 @@ pub fn run() {
             commands::check_claude_hooks_wsl,
             commands::share_pane,
             commands::share_workspace,
+            commands::add_pane_to_workspace_share,
             commands::provide_workspace_layout,
             commands::revoke_share,
             commands::revoke_workspace_share,

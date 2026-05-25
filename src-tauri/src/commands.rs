@@ -3110,6 +3110,63 @@ pub async fn revoke_workspace_share(
 /// already-minted workspace share. The frontend calls this right after
 /// `share_workspace` returns so the viewer can render real splits
 /// instead of falling back to the card-grid layout.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspacePaneShareResult {
+    pub code: String,
+    pub secret: String,
+}
+
+/// Mint a fresh pane share and append it to an existing workspace
+/// bundle. Called by the host frontend when a split adds a new pane
+/// to a workspace that's currently shared.
+#[tauri::command]
+pub async fn add_pane_to_workspace_share(
+    workspace_code: String,
+    target_pane_id: String,
+    label: String,
+    permission: Option<SharePermission>,
+    ttl_seconds: u64,
+    require_mutual_confirm: Option<bool>,
+    store: State<'_, ShareSessionStore>,
+) -> Result<WorkspacePaneShareResult, String> {
+    let ws_code = SessionCode(workspace_code.clone());
+    // Validate the workspace share still exists before minting (so we
+    // don't leak orphan pane shares for a revoked / expired workspace).
+    if store.inner().get_workspace(&ws_code).await.is_none() {
+        return Err(format!("workspace share {workspace_code} not found"));
+    }
+
+    let pane_code_str = short_session_code();
+    let pane_code = SessionCode(pane_code_str.clone());
+    let minted = store
+        .inner()
+        .create(
+            pane_code.clone(),
+            target_pane_id.clone(),
+            permission.unwrap_or(SharePermission::Read),
+            std::time::Duration::from_secs(ttl_seconds.max(60)),
+            require_mutual_confirm.unwrap_or(false),
+        )
+        .await;
+
+    let entry = WorkspacePaneEntry {
+        code: pane_code,
+        secret: minted.secret.clone(),
+        label,
+        target_pane_id,
+    };
+    if !store.inner().add_panes_to_workspace(&ws_code, vec![entry]).await {
+        // Race: workspace got revoked between the check and now. Roll back
+        // the orphan pane share so we don't leak.
+        store.inner().revoke(&SessionCode(pane_code_str.clone())).await;
+        return Err(format!("workspace share {workspace_code} disappeared during mint"));
+    }
+    Ok(WorkspacePaneShareResult {
+        code: pane_code_str,
+        secret: minted.secret,
+    })
+}
+
 #[tauri::command]
 pub async fn provide_workspace_layout(
     code: String,

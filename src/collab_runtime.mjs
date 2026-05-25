@@ -28,6 +28,10 @@ export function createCollabRuntime({
   const ttlByCode = new Map();
   // paneId → Set<shareCode>
   const sharesByPane = new Map();
+  // Live workspace shares we own as host, keyed by wmux's workspaceId so
+  // we can re-publish layout when panes split / close.
+  // value: { code, paneIdToCode: Map<paneId, code>, permission, requireMutualConfirm }
+  const activeWorkspaceSharesByHostWs = new Map();
   let cachedAddresses = [];
   let cachedTailscale = null; // { state, dns_name, tailscale_ips, error }
   let cachedPort = null;
@@ -323,6 +327,96 @@ export function createCollabRuntime({
     return null;
   }
 
+  // Re-enumerate the workspace's terminal panes, mint new pane shares
+  // for any that aren't already in the workspace bundle, rebuild the
+  // layout JSON, and ship it to the backend (which broadcasts to any
+  // subscribed viewer WebSockets so they re-render live).
+  async function publishLayoutForWorkspace(wsId) {
+    if (!wsId) return;
+    const wsShare = activeWorkspaceSharesByHostWs.get(wsId);
+    if (!wsShare) return;
+
+    // Find every shareable pane currently in this workspace's active tab.
+    if (!tabs) return;
+    let activeTab = null;
+    for (const tab of tabs.values()) {
+      if (tab.workspaceId !== wsId) continue;
+      if (tab.contentEl?.classList?.contains('visible')) { activeTab = tab; break; }
+      if (!activeTab) activeTab = tab; // first-found fallback
+    }
+    if (!activeTab) return;
+    const rootEl = activeTab.contentEl?.querySelector?.('.pane-leaf, .pane-split');
+    if (!rootEl) return;
+
+    // For each pane that isn't yet shared, mint a pane share and add it
+    // to the workspace bundle. Skip non-terminal panes.
+    const newPaneIds = [];
+    const visited = new Set();
+    function walk(el) {
+      if (!el || visited.has(el)) return;
+      visited.add(el);
+      if (el.classList?.contains('pane-leaf')) {
+        const sid = el.dataset.sessionId;
+        if (sid && panes.get(sid)?.sessionId && !wsShare.paneIdToCode.has(sid)) {
+          newPaneIds.push(sid);
+        }
+        return;
+      }
+      if (el.classList?.contains('pane-split')) {
+        for (const child of el.children) walk(child);
+        return;
+      }
+      if (el.firstElementChild) walk(el.firstElementChild);
+    }
+    walk(rootEl);
+
+    for (const sid of newPaneIds) {
+      try {
+        const pane = panes.get(sid);
+        const tabTitle = activeTab.title || 'Tab';
+        const detail = pane?.cwd || pane?.title || '';
+        const label = detail ? `${tabTitle} · ${detail}` : tabTitle;
+        const res = await invoke('add_pane_to_workspace_share', {
+          workspaceCode: wsShare.code,
+          targetPaneId: sid,
+          label,
+          permission: wsShare.permission,
+          ttlSeconds: DEFAULT_TTL_SECONDS,
+          requireMutualConfirm: getRequireApproval(),
+        });
+        wsShare.paneIdToCode.set(sid, res.code);
+        // Push a fresh snapshot for the new pane.
+        const snap = captureSnapshot(sid);
+        if (snap) {
+          invoke('provide_share_snapshot', { code: res.code, snapshot: snap }).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('[collab] mint pane share for split failed:', err);
+      }
+    }
+
+    const layout = buildViewerLayout(rootEl, wsShare.paneIdToCode);
+    if (layout) {
+      invoke('provide_workspace_layout', { code: wsShare.code, layout }).catch(() => {});
+    }
+  }
+
+  // Hook called by main.js whenever the layout dirties — splits, closes,
+  // resizes. Cheap: no-op when no active workspace share for the affected
+  // workspace.
+  function onHostLayoutChanged() {
+    const wsId = getActiveWorkspaceId?.();
+    if (!wsId) return;
+    if (!activeWorkspaceSharesByHostWs.has(wsId)) return;
+    // Debounce so a flurry of splits / divider drags only produces one
+    // publish per ~150 ms.
+    if (onHostLayoutChanged._timer) clearTimeout(onHostLayoutChanged._timer);
+    onHostLayoutChanged._timer = setTimeout(() => {
+      onHostLayoutChanged._timer = null;
+      publishLayoutForWorkspace(wsId).catch((err) => console.warn('[collab] publish failed:', err));
+    }, 150);
+  }
+
   function findActiveTab() {
     if (!tabs || !getActiveWorkspaceId) return null;
     const wsId = getActiveWorkspaceId();
@@ -376,14 +470,21 @@ export function createCollabRuntime({
         if (codesByOrder[i]) paneIdToCode.set(paneSpecs[i].pane_id, codesByOrder[i]);
       }
 
+      // Remember this active workspace share so onLayoutChanged can
+      // re-publish the layout (and mint new pane shares as splits add
+      // panes mid-share).
+      const wsId = getActiveWorkspaceId?.();
+      if (wsId) {
+        activeWorkspaceSharesByHostWs.set(wsId, {
+          code: mint.code,
+          paneIdToCode,
+          permission,
+        });
+      }
+
       // Capture the active tab's split layout and ship it to the backend
       // so the workspace viewer can render real splits instead of cards.
-      const activeTab = findActiveTab();
-      const rootEl = activeTab?.contentEl?.querySelector?.('.pane-leaf, .pane-split');
-      const layout = rootEl ? buildViewerLayout(rootEl, paneIdToCode) : null;
-      if (layout) {
-        invoke('provide_workspace_layout', { code: mint.code, layout }).catch(() => {});
-      }
+      await publishLayoutForWorkspace(wsId);
 
       await refresh();
       showWorkspaceShareDialog(mint, paneSpecs.length);
@@ -816,5 +917,6 @@ export function createCollabRuntime({
     stopRefreshing,
     getRequireApproval,
     setRequireApproval,
+    onHostLayoutChanged,
   };
 }

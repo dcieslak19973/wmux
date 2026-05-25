@@ -119,6 +119,7 @@ export function createPrReviewRuntime({
       <div class="pr-review-bar">
         <span class="pr-review-title">PR</span>
         <input class="pr-review-cwd-input" placeholder="Repo path…" spellcheck="false" />
+        <button class="pr-review-btn" data-action="worktrees" title="Switch worktree">&#x2387;</button>
         <span class="pr-review-bar-sep">vs</span>
         <input class="pr-review-base-input" placeholder="auto" spellcheck="false" />
         <button class="pr-review-btn" data-action="refresh" title="Refresh diff">&#x21bb;</button>
@@ -324,6 +325,46 @@ export function createPrReviewRuntime({
       await loadSummary();
       if (state.selectedPath) await loadFile(state.selectedPath);
     });
+
+    const worktreesBtn = prEl.querySelector('[data-action="worktrees"]');
+    if (worktreesBtn && showContextMenu) {
+      worktreesBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const r = worktreesBtn.getBoundingClientRect();
+        const probeCwd = cwdInput.value.trim() || state.cwd;
+        let entries = [];
+        let errMsg = null;
+        try {
+          entries = await invoke('list_git_worktrees', { cwd: probeCwd });
+        } catch (err) {
+          errMsg = String(err);
+        }
+        const items = [];
+        if (errMsg) {
+          items.push({ type: 'label', text: errMsg.length > 60 ? errMsg.slice(0, 57) + '…' : errMsg });
+        } else if (!entries.length) {
+          items.push({ type: 'label', text: 'No worktrees found' });
+        } else {
+          items.push({ type: 'label', text: 'Worktrees' });
+          for (const wt of entries) {
+            const branchLabel = wt.is_bare ? '(bare)' : wt.is_detached ? '(detached)' : (wt.branch || (wt.head ? wt.head.slice(0, 7) : '?'));
+            const dot = wt.is_current ? '• ' : '  ';
+            const tail = wt.path.split(/[\\/]/).pop();
+            items.push({
+              label: `${dot}${branchLabel}  —  ${tail}`,
+              disabled: wt.is_bare,
+              action: () => {
+                cwdInput.value = wt.path;
+                baseInput.value = '';
+                loadSummary();
+              },
+            });
+          }
+        }
+        showContextMenu(items, r.left, r.bottom + 4);
+      });
+    }
+
     prEl.querySelector('[data-action="zoom"]').addEventListener('click', () => toggleSurfaceZoom(prEl));
     prEl.querySelector('[data-action="close"]').addEventListener('click', () => closePrReviewSurface(label));
 

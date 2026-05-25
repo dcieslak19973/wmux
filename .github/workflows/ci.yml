@@ -36,13 +36,13 @@ jobs:
         run: New-Item -ItemType Directory -Force dist | Out-Null; Set-Content dist/index.html "placeholder"
 
       - name: cargo check
-        run: cargo check -p wmux
+        run: cargo check -p wmux -p collab-proto -p collab-server
 
       - name: cargo clippy
-        run: cargo clippy -p wmux -- -D warnings
+        run: cargo clippy -p wmux -p collab-proto -p collab-server -- -D warnings
 
       - name: cargo test (unit tests)
-        run: cargo test -p wmux
+        run: cargo test -p wmux -p collab-proto -p collab-server
 
   frontend:
     name: Frontend build

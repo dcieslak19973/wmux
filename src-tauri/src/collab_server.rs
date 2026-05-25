@@ -845,7 +845,7 @@ mod tests {
         serde_json::from_str(&text).unwrap()
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auth_then_hello_then_output_chunk() {
         let (secret, session, _store, addr) = mint_and_serve("pane-1").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
@@ -893,7 +893,7 @@ mod tests {
         assert_eq!(chunks[0], b"this is too big");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn replay_buffer_replays_to_reconnecting_viewer() {
         let store = ShareSessionStore::new();
         let MintedShare { secret, session } = store
@@ -935,7 +935,7 @@ mod tests {
         assert_eq!(bytes(m3), b"live!");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn snapshot_sent_as_first_chunk_when_present() {
         let (secret, _session, store, addr) = mint_and_serve("pane-snap").await;
         let saved = store.set_snapshot(&SessionCode("smoke-abc".to_string()), b"PRELOADED".to_vec()).await;
@@ -951,7 +951,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn presence_increments_and_decrements() {
         let (secret, session, _store, addr) = mint_and_serve("pane-p").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(session.presence_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn for_each_share_on_pane_iterates_only_matching() {
         let store = ShareSessionStore::new();
         let m1 = store
@@ -986,7 +986,7 @@ mod tests {
         let _ = m1; // suppress unused warning
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn audit_log_records_lifecycle() {
         let (secret, _session, store, addr) = mint_and_serve("pane-audit").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
@@ -1001,7 +1001,7 @@ mod tests {
         assert!(kinds.iter().any(|k| k == "Disconnected"), "missing Disconnected: {kinds:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auth_with_bad_secret_records_audit_and_closes() {
         let (_secret, _session, store, addr) = mint_and_serve("pane-bad").await;
         let url = format!("ws://{addr}/ws/smoke-abc");
@@ -1018,7 +1018,7 @@ mod tests {
         assert!(kinds.iter().any(|k| k == "AuthFailed"), "missing AuthFailed: {kinds:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn expiry_sweeper_drops_stale_entries() {
         let store = ShareSessionStore::new();
         let _m = store
@@ -1032,7 +1032,7 @@ mod tests {
         assert!(kinds.iter().any(|k| k == "Expired"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutual_confirm_blocks_until_approved() {
         let (secret, _session, store, addr) = mint_and_serve_opts("pane-mc", true).await;
         // Spawn the connect on a task so we can poke the store while it's waiting.
@@ -1068,7 +1068,7 @@ mod tests {
         assert!(matches!(next_message(&mut ws2).await, SessionMessage::Hello { .. }));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutual_confirm_denied_closes_socket() {
         let (secret, _session, store, addr) = mint_and_serve_opts("pane-deny", true).await;
         let connect_task = tokio::spawn(async move {
@@ -1091,7 +1091,7 @@ mod tests {
         assert!(kinds.iter().any(|k| k == "ApprovalDenied"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewer_index_404s_for_unknown_code() {
         let store = ShareSessionStore::new();
         let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None).await.unwrap();
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(resp.status(), 404);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewer_index_serves_html_for_known_code() {
         let (_secret, _session, _store, addr) = mint_and_serve("pane-html").await;
         let resp = reqwest::get(format!("http://{addr}/s/smoke-abc")).await.unwrap();
@@ -1111,7 +1111,7 @@ mod tests {
         assert!(body.to_lowercase().contains("wmux"), "expected 'wmux' in viewer HTML, got: {body:.120}…");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewer_asset_serves_javascript() {
         let (_secret, _session, _store, addr) = mint_and_serve("pane-js").await;
         let resp = reqwest::get(format!("http://{addr}/s/smoke-abc/viewer.mjs")).await.unwrap();

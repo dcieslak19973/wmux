@@ -2427,6 +2427,7 @@ body.has-tabs #empty-state { display: none; }
 #btn-agent-sidebar,
 #btn-activity-log,
 #btn-session-vault,
+#btn-collab,
 #btn-settings {
   background: none;
   border: none;
@@ -2440,7 +2441,8 @@ body.has-tabs #empty-state { display: none; }
 }
 #btn-agent-sidebar,
 #btn-activity-log,
-#btn-session-vault {
+#btn-session-vault,
+#btn-collab {
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -2448,6 +2450,7 @@ body.has-tabs #empty-state { display: none; }
 #btn-agent-sidebar:hover,
 #btn-activity-log:hover,
 #btn-session-vault:hover,
+#btn-collab:hover,
 #btn-settings:hover { color: var(--accent); background: var(--bg-tab-hover); }
 
 @media (max-width: 980px) {

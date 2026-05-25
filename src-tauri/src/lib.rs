@@ -119,6 +119,7 @@ pub fn run() {
             commands::list_audit_entries,
             commands::get_collab_server_port,
             commands::list_local_addresses,
+            commands::detect_tailscale_status,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

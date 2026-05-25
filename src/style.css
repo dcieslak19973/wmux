@@ -2427,6 +2427,7 @@ body.has-tabs #empty-state { display: none; }
 #btn-agent-sidebar,
 #btn-activity-log,
 #btn-session-vault,
+#btn-collab,
 #btn-settings {
   background: none;
   border: none;
@@ -2440,7 +2441,8 @@ body.has-tabs #empty-state { display: none; }
 }
 #btn-agent-sidebar,
 #btn-activity-log,
-#btn-session-vault {
+#btn-session-vault,
+#btn-collab {
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -2448,6 +2450,7 @@ body.has-tabs #empty-state { display: none; }
 #btn-agent-sidebar:hover,
 #btn-activity-log:hover,
 #btn-session-vault:hover,
+#btn-collab:hover,
 #btn-settings:hover { color: var(--accent); background: var(--bg-tab-hover); }
 
 @media (max-width: 980px) {
@@ -3353,6 +3356,54 @@ body.has-tabs #empty-state { display: none; }
   border: 1px solid var(--border, #333);
   border-radius: 4px;
   padding: 4px 6px;
+}
+
+.collab-share-url-pill {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.08);
+  color: var(--text-muted, #9aa);
+  border: 1px solid rgba(255,255,255,0.1);
+  user-select: none;
+}
+.collab-share-url-pill-tailnet-dns,
+.collab-share-url-pill-tailnet-ip {
+  background: rgba(74,222,128,0.15);
+  border-color: rgba(74,222,128,0.35);
+  color: #b6f3c8;
+}
+.collab-share-url-pill-lan {
+  background: rgba(56,189,248,0.15);
+  border-color: rgba(56,189,248,0.35);
+  color: #c0e8ff;
+}
+.collab-share-url-pill-loopback {
+  background: rgba(245,158,11,0.12);
+  border-color: rgba(245,158,11,0.32);
+  color: #f0c989;
+}
+
+.collab-share-tailscale-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 6px 2px 0;
+}
+.collab-share-tailscale-hint a {
+  color: #b6f3c8;
+  text-decoration: underline;
+}
+.collab-share-tailscale-ok { color: #6ec06e; }
+.collab-share-tailscale-warn { color: #d4a76a; }
+.collab-share-tailscale-hint code {
+  background: rgba(255,255,255,0.06);
+  padding: 0 4px;
+  border-radius: 2px;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  font-size: 11px;
 }
 
 .collab-share-url {

@@ -2996,6 +2996,111 @@ pub async fn list_local_addresses() -> Result<Vec<String>, String> {
     Ok(addrs)
 }
 
+/// State of the Tailscale daemon on this machine, as far as we can tell.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailscaleState {
+    Running,
+    NeedsLogin,
+    Stopped,
+    NotInstalled,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TailscaleStatus {
+    pub state: TailscaleState,
+    /// Canonical MagicDNS name without the trailing dot, e.g.
+    /// `mymachine.tailnet-xyz.ts.net`. None unless the daemon is Running.
+    pub dns_name: Option<String>,
+    /// Tailnet IPs (typically one IPv4 + one IPv6).
+    pub tailscale_ips: Vec<String>,
+    /// Human-readable hint for the share dialog when state ∈
+    /// {NotInstalled, Error}.
+    pub error: Option<String>,
+}
+
+/// Detect whether Tailscale is installed and what state it's in. We shell
+/// out to `tailscale status --json` because the local API surface differs
+/// across platforms (HTTP on Linux/macOS, named pipe on Windows) and the
+/// CLI hides that. Phase 2 design — see ADR 0001 + docs/multiplayer-design.md.
+#[tauri::command]
+pub async fn detect_tailscale_status() -> Result<TailscaleStatus, String> {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt as _;
+
+    let mut cmd = std::process::Command::new("tailscale");
+    cmd.args(["status", "--json"]);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            return Ok(TailscaleStatus {
+                state: TailscaleState::NotInstalled,
+                dns_name: None,
+                tailscale_ips: Vec::new(),
+                error: Some(format!("tailscale CLI not found: {e}")),
+            });
+        }
+    };
+
+    if !output.status.success() {
+        return Ok(TailscaleStatus {
+            state: TailscaleState::Error,
+            dns_name: None,
+            tailscale_ips: Vec::new(),
+            error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        });
+    }
+
+    let parsed: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(TailscaleStatus {
+                state: TailscaleState::Error,
+                dns_name: None,
+                tailscale_ips: Vec::new(),
+                error: Some(format!("parse failed: {e}")),
+            });
+        }
+    };
+
+    let backend_state = parsed
+        .get("BackendState")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let state = match backend_state {
+        "Running" => TailscaleState::Running,
+        "NeedsLogin" | "Starting" => TailscaleState::NeedsLogin,
+        _ => TailscaleState::Stopped,
+    };
+
+    let self_obj = parsed.get("Self");
+    let dns_name = self_obj
+        .and_then(|s| s.get("DNSName"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_end_matches('.').to_string())
+        .filter(|s| !s.is_empty());
+    let tailscale_ips = self_obj
+        .and_then(|s| s.get("TailscaleIPs"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(TailscaleStatus {
+        state,
+        dns_name,
+        tailscale_ips,
+        error: None,
+    })
+}
+
 /// Tiny URL-safe code generator (~40 bits). Sufficient: this is the path
 /// component; the bearer secret in the URL fragment carries the entropy.
 fn short_session_code() -> String {

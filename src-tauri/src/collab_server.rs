@@ -46,7 +46,14 @@ use axum::Router;
 pub type CollabEventEmitter = std::sync::Arc<
     dyn Fn(&str, serde_json::Value) + Send + Sync + 'static,
 >;
-use collab_proto::{ParticipantId, SessionCode, SessionMessage, PROTOCOL_VERSION};
+
+/// Callback that delivers viewer keystrokes to the host PTY identified
+/// by `pane_id`. Sync — the lib.rs side spawns a tokio task internally.
+/// Same Tauri-decoupling rationale as [`CollabEventEmitter`].
+pub type CollabInputHandler = std::sync::Arc<
+    dyn Fn(&str, &[u8]) + Send + Sync + 'static,
+>;
+use collab_proto::{ParticipantId, SessionCode, SessionMessage, SharePermission, PROTOCOL_VERSION};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, Mutex, RwLock};
@@ -55,16 +62,6 @@ const OUTPUT_BROADCAST_CAPACITY: usize = 256;
 const AUDIT_RING_CAPACITY: usize = 1024;
 const REPLAY_BUFFER_MAX_BYTES: usize = 4 * 1024 * 1024; // ~4 MB
 const REPLAY_BUFFER_MAX_AGE: Duration = Duration::from_secs(5 * 60); // 5 minutes
-
-/// What a viewer is allowed to do on a share. Read-only in Phase 1; the
-/// read-write variant exists so the wire format and the Tauri command
-/// surface don't change again in Phase 3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SharePermission {
-    Read,
-    ReadWrite,
-}
 
 /// Bounded ring of recent PTY chunks. Replayed verbatim to any connecting
 /// or reconnecting viewer. Bounded by total byte count and per-entry age
@@ -194,6 +191,11 @@ pub enum AuditEventKind {
     ApprovalGranted,
     ApprovalDenied,
     ApprovalTimedOut,
+    /// A viewer sent an InputChunk on a Read-Write share. Body carries
+    /// only the byte count, not the content.
+    InputReceived,
+    /// InputChunk received on a Read-only share — dropped.
+    InputDropped,
 }
 
 /// Lightweight serialisable projection of a [`ShareSession`] for the Tauri
@@ -429,6 +431,9 @@ struct AppState {
     /// `None` in tests; when present, the WS handler invokes it to
     /// emit `collab-approval-needed` events to the host frontend.
     emitter: Option<CollabEventEmitter>,
+    /// `None` in tests; when present, viewer InputChunks on a
+    /// Read-Write share route through this into the host PTY.
+    input_handler: Option<CollabInputHandler>,
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────
@@ -451,7 +456,15 @@ async fn ws_handler(
         .unwrap_or("")
         .to_string();
     ws.on_upgrade(move |socket| {
-        handle_socket(socket, state.store, state.emitter, code, peer_addr, ua)
+        handle_socket(
+            socket,
+            state.store,
+            state.emitter,
+            state.input_handler,
+            code,
+            peer_addr,
+            ua,
+        )
     })
 }
 
@@ -495,6 +508,7 @@ async fn handle_socket(
     mut socket: WebSocket,
     store: ShareSessionStore,
     emitter: Option<CollabEventEmitter>,
+    input_handler: Option<CollabInputHandler>,
     code: SessionCode,
     peer_addr: SocketAddr,
     ua: String,
@@ -585,6 +599,20 @@ async fn handle_socket(
         return;
     }
 
+    // Capabilities tells the viewer what it can do — Phase 3 ships
+    // share-level Read or Read-Write permission. Future extensions live
+    // here (e.g. server limits, supported feature flags).
+    let capabilities = SessionMessage::Capabilities {
+        permission: session.permission,
+    };
+    if socket
+        .send(Message::Text(serde_json::to_string(&capabilities).unwrap()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
     // Send the cached snapshot, if any, as the first OutputChunk so the
     // viewer renders the current buffer rather than waiting for new bytes.
     if let Some(bytes) = session.snapshot.lock().await.clone() {
@@ -641,6 +669,23 @@ async fn handle_socket(
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(_)) => break,
+                    Some(Ok(Message::Text(text))) => {
+                        // Only InputChunks meaningfully come from a viewer
+                        // post-handshake. Anything else is ignored.
+                        let Ok(SessionMessage::InputChunk { from: _, bytes }) =
+                            serde_json::from_str::<SessionMessage>(&text)
+                        else {
+                            continue;
+                        };
+                        if session.permission == SharePermission::ReadWrite {
+                            if let Some(handler) = &input_handler {
+                                handler(&session.target_pane_id, &bytes);
+                            }
+                            push_audit(&store, &code.0, Some(participant.0.clone()), AuditEventKind::InputReceived).await;
+                        } else {
+                            push_audit(&store, &code.0, Some(participant.0.clone()), AuditEventKind::InputDropped).await;
+                        }
+                    }
                     _ => continue,
                 }
             }
@@ -715,23 +760,29 @@ fn static_response(body: &'static [u8], content_type: &str) -> Response {
         .unwrap()
 }
 
-pub fn router(store: ShareSessionStore, emitter: Option<CollabEventEmitter>) -> Router {
+pub fn router(
+    store: ShareSessionStore,
+    emitter: Option<CollabEventEmitter>,
+    input_handler: Option<CollabInputHandler>,
+) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ws/:code", get(ws_handler))
         .route("/s/:code", get(viewer_index))
         .route("/s/:code/:name", get(viewer_asset))
-        .with_state(AppState { store, emitter })
+        .with_state(AppState { store, emitter, input_handler })
 }
 
 pub async fn serve(
     addr: SocketAddr,
     store: ShareSessionStore,
     emitter: Option<CollabEventEmitter>,
+    input_handler: Option<CollabInputHandler>,
 ) -> std::io::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
-    let app = router(store, emitter).into_make_service_with_connect_info::<SocketAddr>();
+    let app = router(store, emitter, input_handler)
+        .into_make_service_with_connect_info::<SocketAddr>();
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -807,17 +858,26 @@ mod tests {
         pane_id: &str,
         mutual_confirm: bool,
     ) -> (String, ShareSession, ShareSessionStore, SocketAddr) {
+        mint_and_serve_full(pane_id, SharePermission::Read, mutual_confirm, None).await
+    }
+
+    async fn mint_and_serve_full(
+        pane_id: &str,
+        permission: SharePermission,
+        mutual_confirm: bool,
+        input_handler: Option<CollabInputHandler>,
+    ) -> (String, ShareSession, ShareSessionStore, SocketAddr) {
         let store = ShareSessionStore::new();
         let MintedShare { secret, session } = store
             .create(
                 SessionCode("smoke-abc".to_string()),
                 pane_id.to_string(),
-                SharePermission::Read,
+                permission,
                 Duration::from_secs(30),
                 mutual_confirm,
             )
             .await;
-        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store.clone(), None)
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store.clone(), None, input_handler)
             .await
             .expect("server binds");
         (secret, session, store, addr)
@@ -836,6 +896,13 @@ mod tests {
         ws
     }
 
+    /// Server sends Hello then Capabilities right after a successful Auth.
+    /// Most tests don't care about either — drain them with this helper.
+    async fn drain_handshake(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) {
+        assert!(matches!(next_message(ws).await, SessionMessage::Hello { .. }));
+        assert!(matches!(next_message(ws).await, SessionMessage::Capabilities { .. }));
+    }
+
     async fn next_message(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> SessionMessage {
         let msg = ws.next().await.unwrap().unwrap();
         let text = match msg {
@@ -849,9 +916,7 @@ mod tests {
     async fn auth_then_hello_then_output_chunk() {
         let (secret, session, _store, addr) = mint_and_serve("pane-1").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
-
-        // Server hello.
-        assert!(matches!(next_message(&mut ws).await, SessionMessage::Hello { .. }));
+        drain_handshake(&mut ws).await;
 
         // Host publishes a chunk.
         session.output_tx.send(b"hello viewer".to_vec()).unwrap();
@@ -913,11 +978,9 @@ mod tests {
             buf.push(b"early-2 ".to_vec());
         }
 
-        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None).await.unwrap();
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None, None).await.unwrap();
         let mut ws = connect_and_auth(addr, "rep", &secret).await;
-
-        // Server hello.
-        assert!(matches!(next_message(&mut ws).await, SessionMessage::Hello { .. }));
+        drain_handshake(&mut ws).await;
 
         // Then the two replay entries, in order.
         let m1 = next_message(&mut ws).await;
@@ -942,8 +1005,7 @@ mod tests {
         assert!(saved);
 
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
-        // Server hello first.
-        assert!(matches!(next_message(&mut ws).await, SessionMessage::Hello { .. }));
+        drain_handshake(&mut ws).await;
         // Then the snapshot.
         match next_message(&mut ws).await {
             SessionMessage::OutputChunk { bytes } => assert_eq!(bytes, b"PRELOADED"),
@@ -955,8 +1017,7 @@ mod tests {
     async fn presence_increments_and_decrements() {
         let (secret, session, _store, addr) = mint_and_serve("pane-p").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
-        // Drain the hello to ensure the server processed the connect.
-        assert!(matches!(next_message(&mut ws).await, SessionMessage::Hello { .. }));
+        drain_handshake(&mut ws).await;
 
         // Give the server a beat to bump the counter.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -990,7 +1051,7 @@ mod tests {
     async fn audit_log_records_lifecycle() {
         let (secret, _session, store, addr) = mint_and_serve("pane-audit").await;
         let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
-        let _ = next_message(&mut ws).await; // server hello
+        drain_handshake(&mut ws).await;
         drop(ws);
         tokio::time::sleep(Duration::from_millis(80)).await;
 
@@ -1065,7 +1126,7 @@ mod tests {
         // Reconnect from the same fingerprint should not require a fresh
         // approval (fingerprint cached in seen_fingerprints).
         let mut ws2 = connect_and_auth(addr, "smoke-abc", &secret).await;
-        assert!(matches!(next_message(&mut ws2).await, SessionMessage::Hello { .. }));
+        drain_handshake(&mut ws2).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1092,9 +1153,95 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capabilities_announces_share_permission() {
+        let (secret, _session, _store, addr) = mint_and_serve_full(
+            "pane-cap",
+            SharePermission::ReadWrite,
+            false,
+            None,
+        )
+        .await;
+        let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
+        assert!(matches!(next_message(&mut ws).await, SessionMessage::Hello { .. }));
+        match next_message(&mut ws).await {
+            SessionMessage::Capabilities { permission } => {
+                assert_eq!(permission, SharePermission::ReadWrite);
+            }
+            other => panic!("expected Capabilities, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn input_chunk_routes_to_handler_on_read_write_share() {
+        let received: Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let handler: CollabInputHandler = Arc::new(move |pane: &str, bytes: &[u8]| {
+            received_clone.lock().unwrap().push((pane.to_string(), bytes.to_vec()));
+        });
+        let (secret, _session, store, addr) = mint_and_serve_full(
+            "pane-rw",
+            SharePermission::ReadWrite,
+            false,
+            Some(handler),
+        )
+        .await;
+        let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
+        drain_handshake(&mut ws).await;
+
+        let input = SessionMessage::InputChunk {
+            from: ParticipantId("alice".to_string()),
+            bytes: b"ls\r".to_vec(),
+        };
+        ws.send(TMessage::Text(serde_json::to_string(&input).unwrap())).await.unwrap();
+
+        // Give the server a moment to route the chunk.
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if !received.lock().unwrap().is_empty() { break; }
+        }
+        let captured = received.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, "pane-rw");
+        assert_eq!(captured[0].1, b"ls\r");
+
+        let kinds: Vec<_> = store.audit_entries().await.iter().map(|e| format!("{:?}", e.event)).collect();
+        assert!(kinds.iter().any(|k| k == "InputReceived"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn input_chunk_dropped_on_read_only_share() {
+        let received: Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let handler: CollabInputHandler = Arc::new(move |pane: &str, bytes: &[u8]| {
+            received_clone.lock().unwrap().push((pane.to_string(), bytes.to_vec()));
+        });
+        let (secret, _session, store, addr) = mint_and_serve_full(
+            "pane-ro",
+            SharePermission::Read,
+            false,
+            Some(handler),
+        )
+        .await;
+        let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
+        drain_handshake(&mut ws).await;
+
+        let input = SessionMessage::InputChunk {
+            from: ParticipantId("alice".to_string()),
+            bytes: b"rm -rf /".to_vec(),
+        };
+        ws.send(TMessage::Text(serde_json::to_string(&input).unwrap())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(received.lock().unwrap().is_empty(), "RO share must not forward inputs");
+        let kinds: Vec<_> = store.audit_entries().await.iter().map(|e| format!("{:?}", e.event)).collect();
+        assert!(kinds.iter().any(|k| k == "InputDropped"));
+        assert!(!kinds.iter().any(|k| k == "InputReceived"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewer_index_404s_for_unknown_code() {
         let store = ShareSessionStore::new();
-        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None).await.unwrap();
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None, None).await.unwrap();
         let resp = reqwest::get(format!("http://{addr}/s/missing")).await.unwrap();
         assert_eq!(resp.status(), 404);
     }

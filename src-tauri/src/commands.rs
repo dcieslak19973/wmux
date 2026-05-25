@@ -2856,9 +2856,9 @@ print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get
 // `start_session_stream` (search for `for_each_share_on_pane`).
 
 use crate::collab_server::{
-    AuditEntry, ShareInfo, SharePermission, ShareSessionStore,
+    AuditEntry, ShareInfo, ShareSessionStore,
 };
-use collab_proto::SessionCode;
+use collab_proto::{SessionCode, SharePermission};
 
 /// Tracks whether the collab HTTP/WS server has been bound, and on what
 /// port. Managed as Tauri state; populated on first `share_pane` call.
@@ -2890,13 +2890,16 @@ pub struct ShareMintResult {
 /// server if it isn't already running. Returns the share code + secret so
 /// the frontend can assemble the share URL.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri-managed State adds extras; not interesting to extract.
 pub async fn share_pane(
     app: AppHandle,
     target_pane_id: String,
     ttl_seconds: u64,
     require_mutual_confirm: Option<bool>,
+    permission: Option<SharePermission>,
     store: State<'_, ShareSessionStore>,
     handle: State<'_, CollabServerHandle>,
+    manager: State<'_, SessionManager>,
 ) -> Result<ShareMintResult, String> {
     let port = match handle.port() {
         Some(p) => p,
@@ -2907,10 +2910,24 @@ pub async fn share_pane(
                     let _ = emitter_app.emit(event, payload);
                 },
             );
+            // Input handler: viewer keystrokes on RW shares funnel through
+            // SessionManager::write to the same PTY local input uses.
+            let sm = manager.inner().clone();
+            let input_handler: crate::collab_server::CollabInputHandler = std::sync::Arc::new(
+                move |pane_id: &str, bytes: &[u8]| {
+                    let sm = sm.clone();
+                    let pane_id = pane_id.to_string();
+                    let bytes = bytes.to_vec();
+                    tauri::async_runtime::spawn(async move {
+                        sm.write_to(&pane_id, &bytes).await;
+                    });
+                },
+            );
             let (addr, _h) = crate::collab_server::serve(
                 ([0, 0, 0, 0], 0).into(),
                 store.inner().clone(),
                 Some(emitter),
+                Some(input_handler),
             )
             .await
             .map_err(|e| format!("collab server bind failed: {e}"))?;
@@ -2926,7 +2943,7 @@ pub async fn share_pane(
         .create(
             code,
             target_pane_id,
-            SharePermission::Read,
+            permission.unwrap_or(SharePermission::Read),
             std::time::Duration::from_secs(ttl_seconds.max(60)),
             require_mutual_confirm.unwrap_or(false),
         )

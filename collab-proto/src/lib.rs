@@ -24,6 +24,16 @@ pub struct ParticipantId(pub String);
 #[serde(transparent)]
 pub struct SessionCode(pub String);
 
+/// What a viewer is allowed to do on a share. Wire-shared between host and
+/// viewer (the viewer needs to know at handshake time whether to enable
+/// keystroke capture).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharePermission {
+    Read,
+    ReadWrite,
+}
+
 /// Frames carried over the WebSocket. Tagged on `kind` so new variants from
 /// a newer peer fail cleanly (deserialization errors) rather than silently
 /// dropping fields.
@@ -42,6 +52,12 @@ pub enum SessionMessage {
     Hello {
         protocol_version: u32,
         participant: ParticipantId,
+    },
+    /// Server → viewer right after Hello: announces what the viewer can
+    /// do. Phase 3 adds `permission`; future extensions live here too so
+    /// the wire format stays open.
+    Capabilities {
+        permission: SharePermission,
     },
     /// Raw terminal output from host → viewers.
     OutputChunk {

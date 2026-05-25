@@ -88,6 +88,16 @@ pub struct PrDiffSummary {
     pub total_deletions: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GitWorktreeEntry {
+    pub path: String,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub is_current: bool,
+    pub is_bare: bool,
+    pub is_detached: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionVaultEntrySummary {
     pub id: String,
@@ -1304,12 +1314,26 @@ pub async fn get_git_context(cwd: String) -> Result<Option<GitContextResult>, St
     }))
 }
 
+/// Convert a WSL `/mnt/<letter>/...` path to a Windows path. Pass-through
+/// for anything that doesn't match. Windows native `git` cannot read WSL
+/// paths, so we normalize at the boundary.
+fn normalize_cwd_for_git(cwd: &str) -> String {
+    let bytes = cwd.as_bytes();
+    if bytes.len() >= 7 && &bytes[..5] == b"/mnt/" && bytes[6] == b'/' && bytes[5].is_ascii_alphabetic() {
+        let drive = (bytes[5] as char).to_ascii_uppercase();
+        let rest = &cwd[6..].replace('/', "\\");
+        return format!("{drive}:{rest}");
+    }
+    cwd.to_string()
+}
+
 fn git_stdout(cwd: &str, args: &[&str]) -> Result<Option<String>, String> {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt as _;
 
+    let cwd = normalize_cwd_for_git(cwd);
     let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C").arg(cwd).args(args);
+    cmd.arg("-C").arg(&cwd).args(args);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
@@ -1407,6 +1431,87 @@ pub async fn get_pr_file_diff(cwd: String, base: String, path: String) -> Result
     };
     git_stdout(&cwd, &["diff", &base, "--", &path])
         .map(|opt| opt.unwrap_or_default())
+}
+
+/// List git worktrees for the repo containing `cwd`. The entry whose path
+/// matches the resolved `cwd`'s repo top-level (or `cwd` itself) is marked
+/// `is_current`.
+#[tauri::command]
+pub async fn list_git_worktrees(cwd: String) -> Result<Vec<GitWorktreeEntry>, String> {
+    let cwd = if cwd.is_empty() {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        cwd
+    };
+
+    let cwd = normalize_cwd_for_git(&cwd);
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt as _;
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(&cwd).args(["worktree", "list", "--porcelain"]);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("git invocation failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let code = output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
+        return Err(format!("git exited {code} in {cwd}: {stderr}"));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+    if raw.trim().is_empty() {
+        return Err(format!("git returned no output in {cwd}"));
+    }
+
+    let current_top = git_stdout(&cwd, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .flatten();
+
+    let mut entries: Vec<GitWorktreeEntry> = Vec::new();
+    let mut cur: Option<GitWorktreeEntry> = None;
+    for line in raw.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(prev) = cur.take() {
+                entries.push(prev);
+            }
+            cur = Some(GitWorktreeEntry {
+                path: path.to_string(),
+                branch: None,
+                head: None,
+                is_current: false,
+                is_bare: false,
+                is_detached: false,
+            });
+        } else if let Some(entry) = cur.as_mut() {
+            if let Some(head) = line.strip_prefix("HEAD ") {
+                entry.head = Some(head.to_string());
+            } else if let Some(branch) = line.strip_prefix("branch ") {
+                let trimmed = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+                entry.branch = Some(trimmed.to_string());
+            } else if line == "bare" {
+                entry.is_bare = true;
+            } else if line == "detached" {
+                entry.is_detached = true;
+            }
+        }
+    }
+    if let Some(prev) = cur.take() {
+        entries.push(prev);
+    }
+
+    if let Some(top) = current_top.as_deref() {
+        let top_norm = top.replace('\\', "/");
+        for entry in entries.iter_mut() {
+            if entry.path.replace('\\', "/") == top_norm {
+                entry.is_current = true;
+            }
+        }
+    }
+
+    Ok(entries)
 }
 
 /// Ask Claude about a diff context from the PR review panel.
@@ -2264,10 +2369,25 @@ fn base64_encode(data: &[u8]) -> String {
 mod tests {
     use super::{
         build_remote_process_age_script, build_remote_tmux_management_script,
-        build_remote_tmux_state_from_outputs, parse_remote_git_probe_output,
-        parse_remote_process_age_output,
+        build_remote_tmux_state_from_outputs, normalize_cwd_for_git,
+        parse_remote_git_probe_output, parse_remote_process_age_output,
         parse_remote_tmux_probe_output,
     };
+
+    #[test]
+    fn normalize_cwd_converts_wsl_paths() {
+        assert_eq!(normalize_cwd_for_git("/mnt/d/git/wmux/wmux"), "D:\\git\\wmux\\wmux");
+        assert_eq!(normalize_cwd_for_git("/mnt/c/Users/foo"), "C:\\Users\\foo");
+    }
+
+    #[test]
+    fn normalize_cwd_passes_through_non_wsl_paths() {
+        assert_eq!(normalize_cwd_for_git("D:\\git\\wmux"), "D:\\git\\wmux");
+        assert_eq!(normalize_cwd_for_git(""), "");
+        assert_eq!(normalize_cwd_for_git("/home/dev"), "/home/dev");
+        assert_eq!(normalize_cwd_for_git("/mnt/foo"), "/mnt/foo");
+        assert_eq!(normalize_cwd_for_git("/mnt/d"), "/mnt/d");
+    }
 
     #[test]
     fn parses_remote_tmux_probe_output_with_fallback_session() {

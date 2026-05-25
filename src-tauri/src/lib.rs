@@ -101,6 +101,7 @@ pub fn run() {
             commands::get_blocks,
             commands::get_pr_diff_summary,
             commands::get_pr_file_diff,
+            commands::list_git_worktrees,
             commands::ask_claude_about_diff,
             commands::install_claude_hooks,
             commands::check_claude_hooks,

@@ -1496,6 +1496,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       { type: 'label', text: 'Share this pane' },
       { label: 'Read-only', action: () => collabRuntime?.startShareForPane(sessionId, 'read') },
       { label: 'Read-write (viewers can type)', danger: true, action: () => collabRuntime?.startShareForPane(sessionId, 'read_write') },
+      { type: 'separator' },
+      { type: 'label', text: 'Share whole workspace' },
+      { label: 'Read-only', action: () => collabRuntime?.startShareForWorkspace('read') },
+      { label: 'Read-write (viewers can type)', danger: true, action: () => collabRuntime?.startShareForWorkspace('read_write') },
     ], r.left, r.bottom + 4);
   });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
@@ -3580,6 +3584,7 @@ function scheduleLayoutSave(delay = 300) {
 function markLayoutDirty({ immediate = false } = {}) {
   lastSavedLayoutJson = null;
   agentSidebarRuntime?.refresh();
+  collabRuntime?.onHostLayoutChanged?.();
   if (immediate) return persistLayoutNow({ reason: 'immediate' });
   scheduleLayoutSave();
   return Promise.resolve(false);

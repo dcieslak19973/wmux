@@ -124,3 +124,97 @@ main#workspace-root {
   text-align: center;
   padding: 32px;
 }
+
+/* ── Workspace split-tree mode ─────────────────────────────────────── */
+.brand-sep { color: #666; margin: 0 4px; }
+.workspace-title-bar { color: #ddd; font-weight: 500; }
+
+main#workspace-root.workspace-split-mode {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-split-root {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+}
+
+.workspace-split {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.workspace-split-h { flex-direction: row; }
+.workspace-split-v { flex-direction: column; }
+
+.workspace-split-side {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-split-divider-h {
+  flex: 0 0 4px;
+  background: #333;
+  cursor: col-resize;
+}
+.workspace-split-divider-v {
+  flex: 0 0 4px;
+  background: #333;
+  cursor: row-resize;
+}
+
+.workspace-leaf {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #2a2a2a;
+  background: #181818;
+}
+
+.workspace-leaf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 8px;
+  background: #232323;
+  border-bottom: 1px solid #2a2a2a;
+  font-size: 11px;
+  color: #aaa;
+  user-select: none;
+  flex: 0 0 auto;
+}
+
+.workspace-leaf-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 70%;
+}
+
+.workspace-leaf-status { color: #888; font-size: 10px; }
+.workspace-leaf-status.ok { color: #6ec06e; }
+.workspace-leaf-status.err { color: #d96a6a; }
+
+.workspace-leaf-term {
+  flex: 1 1 0;
+  min-height: 0;
+  padding: 4px;
+  box-sizing: border-box;
+}
+.workspace-leaf-term .xterm {
+  height: 100%;
+}
+
+.workspace-leaf-missing {
+  align-items: center;
+  justify-content: center;
+  color: #d96a6a;
+  font-size: 12px;
+}

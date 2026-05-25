@@ -1560,60 +1560,81 @@ pub async fn list_git_worktrees(cwd: String) -> Result<Vec<GitWorktreeEntry>, St
     Ok(entries)
 }
 
-/// Ask Claude about a diff context from the PR review panel.
+/// One-shot ask against an agent CLI for the PR review panel.
+///
+/// Spawns the chosen CLI directly (no shell — no quoting headaches) with the
+/// caller-supplied argv plus the framed prompt as the final argument; returns
+/// captured stdout. The agent's own auth/config applies.
 #[tauri::command]
-pub async fn ask_claude_about_diff(
+pub async fn ask_agent_oneshot(
+    cmd: String,
+    args: Vec<String>,
     question: String,
     diff_context: String,
     file_path: String,
+    cwd: Option<String>,
 ) -> Result<String, String> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY environment variable is not set".to_string())?;
+    if cmd.is_empty() {
+        return Err("Agent command is empty".into());
+    }
 
-    let context = if diff_context.len() > 8000 {
-        format!("{}\n… (truncated)", &diff_context[..8000])
+    // Windows CreateProcessW caps command line at 32,767 chars. Leave headroom
+    // for the framing template, file path, question, and the agent's own argv.
+    let context = if diff_context.len() > 24_000 {
+        format!("{}\n… (truncated)", &diff_context[..24_000])
     } else {
         diff_context
     };
 
-    let user_content = if file_path.is_empty() {
-        format!("Diff:\n```diff\n{context}\n```\n\nQuestion: {question}")
+    let prompt = if file_path.is_empty() {
+        format!(
+            "You are a code reviewer. The user will show you a git diff and ask a question about it. Be concise and precise.\n\nDiff:\n```diff\n{context}\n```\n\nQuestion: {question}"
+        )
     } else {
-        format!("File: {file_path}\n\nDiff:\n```diff\n{context}\n```\n\nQuestion: {question}")
+        format!(
+            "You are a code reviewer. The user will show you a git diff and ask a question about it. Be concise and precise.\n\nFile: {file_path}\n\nDiff:\n```diff\n{context}\n```\n\nQuestion: {question}"
+        )
     };
 
-    let body = serde_json::json!({
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 1024,
-        "system": "You are a code reviewer. The user will show you a git diff and ask questions about it. Be concise and precise.",
-        "messages": [{"role": "user", "content": user_content}]
-    });
+    let mut command = tokio::process::Command::new(&cmd);
+    command.args(&args).arg(&prompt);
+    if let Some(dir) = cwd.as_deref().filter(|s| !s.is_empty()) {
+        command.current_dir(dir);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    let status = resp.status();
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    if !status.is_success() {
-        let msg = json["error"]["message"].as_str().unwrap_or("Unknown API error");
-        return Err(format!("API error {status}: {msg}"));
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    json["content"][0]["text"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| format!("Unexpected response format: {json}"))
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        command.output(),
+    )
+    .await
+    .map_err(|_| "Agent CLI timed out after 180s".to_string())?
+    .map_err(|e| format!("Failed to spawn '{cmd}': {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
+        return Err(format!("Agent exited with status {code}: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if stdout.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            return Err(format!("Agent produced no output. stderr: {}", stderr.trim()));
+        }
+        return Err("Agent produced no output.".into());
+    }
+    Ok(stdout)
 }
 
 fn resolve_git_path(cwd: &Path, raw: &str) -> PathBuf {

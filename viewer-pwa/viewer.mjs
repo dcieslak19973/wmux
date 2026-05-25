@@ -41,50 +41,85 @@ if (!code || !secret) {
 }
 
 const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-const ws = new WebSocket(`${wsProto}://${window.location.host}/ws/${encodeURIComponent(code)}`);
+const WS_URL = `${wsProto}://${window.location.host}/ws/${encodeURIComponent(code)}`;
+const PARTICIPANT_ID = `viewer-${Math.random().toString(36).slice(2, 8)}`;
+const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+
+let ws = null;
 let helloDone = false;
+let attempt = 0;
+let userClosed = false;
+let reconnectTimer = null;
 
-ws.addEventListener('open', () => {
-  setStatus('authenticating…');
-  ws.send(JSON.stringify({ kind: 'auth', secret }));
-  ws.send(JSON.stringify({
-    kind: 'hello',
-    protocol_version: PROTOCOL_VERSION,
-    participant: `viewer-${Math.random().toString(36).slice(2, 8)}`,
-  }));
-});
-
-ws.addEventListener('message', (evt) => {
-  let msg;
-  try {
-    msg = JSON.parse(evt.data);
-  } catch {
-    return;
+function connect({ isReconnect } = { isReconnect: false }) {
+  if (isReconnect) {
+    // Avoid duplicate paint of the snapshot+replay the host re-sends.
+    term.reset();
   }
-  if (msg.kind === 'hello') {
-    helloDone = true;
-    setStatus(`connected (proto v${msg.protocol_version})`, 'ok');
-    return;
-  }
-  if (msg.kind === 'output_chunk') {
-    if (!helloDone) return;
-    // bytes is JSON-encoded Vec<u8> from the host — an array of numbers.
-    const bytes = Array.isArray(msg.bytes) ? msg.bytes : [];
-    // Convert to Uint8Array → Latin-1 string (xterm.js handles UTF-8 via write()).
-    const buf = new Uint8Array(bytes);
-    // xterm.js accepts Uint8Array directly in write().
-    term.write(buf);
-  }
-  // input_chunk / layout_delta: host doesn't send these to the viewer.
+  helloDone = false;
+  setStatus(isReconnect ? 'reconnecting…' : 'connecting…');
+  ws = new WebSocket(WS_URL);
+
+  ws.addEventListener('open', () => {
+    attempt = 0;
+    setStatus('authenticating…');
+    ws.send(JSON.stringify({ kind: 'auth', secret }));
+    ws.send(JSON.stringify({
+      kind: 'hello',
+      protocol_version: PROTOCOL_VERSION,
+      participant: PARTICIPANT_ID,
+    }));
+  });
+
+  ws.addEventListener('message', (evt) => {
+    let msg;
+    try {
+      msg = JSON.parse(evt.data);
+    } catch {
+      return;
+    }
+    if (msg.kind === 'hello') {
+      helloDone = true;
+      setStatus(`connected (proto v${msg.protocol_version})`, 'ok');
+      return;
+    }
+    if (msg.kind === 'output_chunk') {
+      if (!helloDone) return;
+      const bytes = Array.isArray(msg.bytes) ? msg.bytes : [];
+      term.write(new Uint8Array(bytes));
+    }
+  });
+
+  ws.addEventListener('close', (evt) => {
+    if (userClosed) {
+      setStatus('closed', 'err');
+      return;
+    }
+    scheduleReconnect(evt.code);
+  });
+
+  ws.addEventListener('error', () => {
+    if (!userClosed) setStatus('connection error — retrying', 'err');
+  });
+}
+
+function scheduleReconnect(code) {
+  if (reconnectTimer) return;
+  const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+  attempt += 1;
+  setStatus(`disconnected${code ? ` (${code})` : ''} — reconnecting in ${Math.round(delay / 1000)}s`, 'err');
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect({ isReconnect: true });
+  }, delay);
+}
+
+window.addEventListener('beforeunload', () => {
+  userClosed = true;
+  ws?.close();
 });
 
-ws.addEventListener('close', (evt) => {
-  setStatus(`disconnected${evt.code ? ` (${evt.code})` : ''}`, 'err');
-});
-
-ws.addEventListener('error', () => {
-  setStatus('connection error', 'err');
-});
+connect();
 
 // Register the service worker so the page is installable as a PWA. Service
 // worker registration is best-effort — if it fails (e.g. served over plain

@@ -83,12 +83,15 @@ function subscribeToLayoutUpdates() {
   let closed = false;
 
   function connect() {
+    console.log('[workspace] connecting layout WS to', wsUrl);
     const ws = new WebSocket(wsUrl);
     ws.addEventListener('open', () => {
+      console.log('[workspace] layout WS open; sending auth');
       attempt = 0;
       ws.send(JSON.stringify({ kind: 'auth', secret }));
     });
     ws.addEventListener('message', async (evt) => {
+      console.log('[workspace] layout WS msg:', evt.data);
       let msg;
       try { msg = JSON.parse(evt.data); } catch { return; }
       if (msg.kind !== 'layout') return;
@@ -112,13 +115,16 @@ function subscribeToLayoutUpdates() {
         console.warn('[workspace] manifest refresh failed:', err);
       }
     });
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (evt) => {
+      console.log('[workspace] layout WS closed:', evt.code, evt.reason);
       if (closed) return;
       const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt, 5));
       attempt += 1;
       setTimeout(connect, delay);
     });
-    ws.addEventListener('error', () => {});
+    ws.addEventListener('error', (err) => {
+      console.warn('[workspace] layout WS error:', err);
+    });
   }
   window.addEventListener('beforeunload', () => { closed = true; });
   connect();

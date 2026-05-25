@@ -332,21 +332,37 @@ export function createCollabRuntime({
   // layout JSON, and ship it to the backend (which broadcasts to any
   // subscribed viewer WebSockets so they re-render live).
   async function publishLayoutForWorkspace(wsId) {
-    if (!wsId) return;
+    if (!wsId) {
+      console.warn('[collab] publishLayoutForWorkspace called without wsId');
+      return;
+    }
     const wsShare = activeWorkspaceSharesByHostWs.get(wsId);
-    if (!wsShare) return;
+    if (!wsShare) {
+      console.warn('[collab] no workspace share registered for', wsId);
+      return;
+    }
 
     // Find every shareable pane currently in this workspace's active tab.
-    if (!tabs) return;
+    if (!tabs) {
+      console.warn('[collab] tabs not available');
+      return;
+    }
     let activeTab = null;
     for (const tab of tabs.values()) {
       if (tab.workspaceId !== wsId) continue;
       if (tab.contentEl?.classList?.contains('visible')) { activeTab = tab; break; }
       if (!activeTab) activeTab = tab; // first-found fallback
     }
-    if (!activeTab) return;
+    if (!activeTab) {
+      console.warn('[collab] no active tab found for', wsId);
+      return;
+    }
     const rootEl = activeTab.contentEl?.querySelector?.('.pane-leaf, .pane-split');
-    if (!rootEl) return;
+    if (!rootEl) {
+      console.warn('[collab] no pane root element found in tab', activeTab.id);
+      return;
+    }
+    console.log('[collab] publishing layout for', wsShare.code, 'root tag:', rootEl.className);
 
     // For each pane that isn't yet shared, mint a pane share and add it
     // to the workspace bundle. Skip non-terminal panes.
@@ -396,8 +412,16 @@ export function createCollabRuntime({
     }
 
     const layout = buildViewerLayout(rootEl, wsShare.paneIdToCode);
+    console.log('[collab] built layout:', JSON.stringify(layout), 'pane map size:', wsShare.paneIdToCode.size, 'new panes minted this round:', newPaneIds.length);
     if (layout) {
-      invoke('provide_workspace_layout', { code: wsShare.code, layout }).catch(() => {});
+      try {
+        const ok = await invoke('provide_workspace_layout', { code: wsShare.code, layout });
+        console.log('[collab] provide_workspace_layout result:', ok);
+      } catch (err) {
+        console.warn('[collab] provide_workspace_layout failed:', err);
+      }
+    } else {
+      console.warn('[collab] buildViewerLayout returned null');
     }
   }
 
@@ -406,8 +430,15 @@ export function createCollabRuntime({
   // workspace.
   function onHostLayoutChanged() {
     const wsId = getActiveWorkspaceId?.();
-    if (!wsId) return;
-    if (!activeWorkspaceSharesByHostWs.has(wsId)) return;
+    if (!wsId) {
+      console.log('[collab] layout changed but no active workspace id');
+      return;
+    }
+    if (!activeWorkspaceSharesByHostWs.has(wsId)) {
+      console.log('[collab] layout changed; no active workspace share for', wsId);
+      return;
+    }
+    console.log('[collab] layout changed, scheduling publish for', wsId);
     // Debounce so a flurry of splits / divider drags only produces one
     // publish per ~150 ms.
     if (onHostLayoutChanged._timer) clearTimeout(onHostLayoutChanged._timer);

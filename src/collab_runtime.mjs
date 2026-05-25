@@ -277,7 +277,6 @@ export function createCollabRuntime({
     for (const [tabId, tab] of tabs) {
       if (tab.workspaceId !== wsId) continue;
       const tabTitle = tab.title || `Tab ${tabId.slice(0, 4)}`;
-      // tab.paneIds is the order; fall back to scanning panes if needed.
       const paneIds = tab.paneIds || [];
       for (const paneId of paneIds) {
         const pane = panes.get(paneId);
@@ -288,6 +287,55 @@ export function createCollabRuntime({
       }
     }
     return out;
+  }
+
+  // Walk a tab's contentEl building a viewer-shaped layout:
+  //   { kind: 'leaf', code: 'abc' }                       — terminal pane
+  //   { kind: 'split', dir: 'h'|'v', ratio: 0.5, a, b }   — split node
+  // `paneIdToCode` is a Map from host session id → minted pane share code.
+  // Returns null for an entirely-ephemeral subtree (none of its leaves are
+  // shareable terminal panes), in which case callers collapse it out.
+  function buildViewerLayout(el, paneIdToCode) {
+    if (!el) return null;
+    if (el.classList?.contains('pane-leaf')) {
+      const code = paneIdToCode.get(el.dataset.sessionId);
+      return code ? { kind: 'leaf', code } : null;
+    }
+    if (el.classList?.contains('pane-split')) {
+      const dir = el.classList.contains('pane-split-h') ? 'h' : 'v';
+      const kids = [...el.children].filter((c) => !c.classList.contains('pane-divider'));
+      const [aSide, bSide] = kids;
+      // pane-split nests like: <split><leaf or split/><wrapper><leaf or split/></wrapper></split>
+      const a = buildViewerLayout(aSide, paneIdToCode);
+      const b = buildViewerLayout(bSide?.firstElementChild ?? bSide, paneIdToCode);
+      if (!a && !b) return null;
+      if (!b) return a;
+      if (!a) return b;
+      const flexA = parseFloat(aSide.style.flex) || 1;
+      const flexB = parseFloat(bSide.style.flex) || 1;
+      const ratio = flexA / (flexA + flexB);
+      return { kind: 'split', dir, ratio, a, b };
+    }
+    // Recurse into wrapper divs (the right-side wrapper of pane-split).
+    if (el.firstElementChild) {
+      return buildViewerLayout(el.firstElementChild, paneIdToCode);
+    }
+    return null;
+  }
+
+  function findActiveTab() {
+    if (!tabs || !getActiveWorkspaceId) return null;
+    const wsId = getActiveWorkspaceId();
+    // Active tab = the one whose contentEl is currently visible.
+    for (const tab of tabs.values()) {
+      if (tab.workspaceId !== wsId) continue;
+      if (tab.contentEl?.classList?.contains('visible')) return tab;
+    }
+    // Fallback: first tab in this workspace.
+    for (const tab of tabs.values()) {
+      if (tab.workspaceId === wsId) return tab;
+    }
+    return null;
   }
 
   async function startShareForWorkspace(permission = 'read') {
@@ -319,11 +367,22 @@ export function createCollabRuntime({
         // we sent — which it does (backend mints in iteration order).
       }
       const codesByOrder = mint.info.pane_codes;
+      const paneIdToCode = new Map();
       for (let i = 0; i < paneSpecs.length; i++) {
         const snap = captureSnapshot(paneSpecs[i].pane_id);
         if (snap && codesByOrder[i]) {
           invoke('provide_share_snapshot', { code: codesByOrder[i], snapshot: snap }).catch(() => {});
         }
+        if (codesByOrder[i]) paneIdToCode.set(paneSpecs[i].pane_id, codesByOrder[i]);
+      }
+
+      // Capture the active tab's split layout and ship it to the backend
+      // so the workspace viewer can render real splits instead of cards.
+      const activeTab = findActiveTab();
+      const rootEl = activeTab?.contentEl?.querySelector?.('.pane-leaf, .pane-split');
+      const layout = rootEl ? buildViewerLayout(rootEl, paneIdToCode) : null;
+      if (layout) {
+        invoke('provide_workspace_layout', { code: mint.code, layout }).catch(() => {});
       }
 
       await refresh();

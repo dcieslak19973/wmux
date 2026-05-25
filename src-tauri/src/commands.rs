@@ -3106,6 +3106,22 @@ pub async fn revoke_workspace_share(
     Ok(store.inner().revoke_workspace(&SessionCode(code)).await)
 }
 
+/// Attach a split-tree layout (with pane share codes at leaves) to an
+/// already-minted workspace share. The frontend calls this right after
+/// `share_workspace` returns so the viewer can render real splits
+/// instead of falling back to the card-grid layout.
+#[tauri::command]
+pub async fn provide_workspace_layout(
+    code: String,
+    layout: serde_json::Value,
+    store: State<'_, ShareSessionStore>,
+) -> Result<bool, String> {
+    Ok(store
+        .inner()
+        .set_workspace_layout(&SessionCode(code), layout)
+        .await)
+}
+
 #[tauri::command]
 pub async fn list_active_workspace_shares(
     store: State<'_, ShareSessionStore>,

@@ -250,6 +250,12 @@ pub struct WorkspaceShare {
     /// kept in-memory only and never logged. The manifest endpoint
     /// returns these verbatim to authorised viewers.
     pub panes: Vec<WorkspacePaneEntry>,
+    /// Opaque split-tree shape from the host frontend. Leaves carry
+    /// pane share codes (already substituted by the frontend); the
+    /// backend doesn't parse the structure. None until the frontend
+    /// calls `provide_workspace_layout` — until then the viewer falls
+    /// back to its card-grid rendering.
+    pub layout: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -391,6 +397,7 @@ impl ShareSessionStore {
             created_at: Instant::now(),
             expires_at: Instant::now() + ttl,
             panes,
+            layout: None,
         };
         let mut inner = self.inner.write().await;
         inner.workspaces.insert(code.clone(), ws);
@@ -410,6 +417,22 @@ impl ShareSessionStore {
     pub async fn list_workspaces(&self) -> Vec<WorkspaceShareInfo> {
         let inner = self.inner.read().await;
         inner.workspaces.values().map(WorkspaceShareInfo::from).collect()
+    }
+
+    /// Stash a layout tree for an already-minted workspace share. Returns
+    /// false if the workspace doesn't exist.
+    pub async fn set_workspace_layout(
+        &self,
+        code: &SessionCode,
+        layout: serde_json::Value,
+    ) -> bool {
+        let mut inner = self.inner.write().await;
+        if let Some(ws) = inner.workspaces.get_mut(code) {
+            ws.layout = Some(layout);
+            true
+        } else {
+            false
+        }
     }
 
     pub async fn revoke_workspace(&self, code: &SessionCode) -> bool {
@@ -926,6 +949,9 @@ async fn workspace_asset(Path((_code, name)): Path<(String, String)>) -> Respons
     let (body, ctype): (&[u8], &str) = match name.as_str() {
         "workspace.mjs" => (WORKSPACE_MJS.as_bytes(), "text/javascript; charset=utf-8"),
         "viewer.css" => (VIEWER_CSS.as_bytes(), "text/css; charset=utf-8"),
+        "xterm.css" => (VIEWER_XTERM_CSS.as_bytes(), "text/css; charset=utf-8"),
+        "xterm.js" => (VIEWER_XTERM_JS.as_bytes(), "text/javascript; charset=utf-8"),
+        "addon-fit.js" => (VIEWER_ADDON_FIT_JS.as_bytes(), "text/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
     static_response(body, ctype)
@@ -947,6 +973,10 @@ struct ManifestPane {
 struct ManifestResponse {
     label: String,
     panes: Vec<ManifestPane>,
+    /// Opaque split-tree from the host. Null until the host provides a
+    /// layout via `provide_workspace_layout`; viewer falls back to the
+    /// card-grid renderer when null.
+    layout: Option<serde_json::Value>,
 }
 
 async fn workspace_manifest(
@@ -974,6 +1004,7 @@ async fn workspace_manifest(
                 label: p.label.clone(),
             })
             .collect(),
+        layout: ws.layout.clone(),
     };
     axum::Json(resp).into_response()
 }
@@ -1514,6 +1545,26 @@ mod tests {
         assert_eq!(panes[0]["secret"], m1.secret);
         assert_eq!(panes[1]["code"], "p2");
         assert_eq!(panes[1]["secret"], m2.secret);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_manifest_includes_layout_when_provided() {
+        let store = ShareSessionStore::new();
+        store.create(SessionCode("pa".into()), "a".into(), SharePermission::Read, Duration::from_secs(30), false).await;
+        let entries = vec![WorkspacePaneEntry { code: SessionCode("pa".into()), secret: "s1".into(), label: "a".into(), target_pane_id: "a".into() }];
+        let ws_secret = store.create_workspace(SessionCode("wsL".into()), "L".into(), entries, Duration::from_secs(60)).await;
+        let layout = serde_json::json!({"kind": "leaf", "code": "pa"});
+        assert!(store.set_workspace_layout(&SessionCode("wsL".into()), layout.clone()).await);
+
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None, None).await.unwrap();
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/w/wsL/manifest"))
+            .json(&serde_json::json!({ "secret": ws_secret }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["layout"]["kind"], "leaf");
+        assert_eq!(body["layout"]["code"], "pa");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -6,17 +6,19 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>wmux workspace</title>
+  <link rel="stylesheet" href="xterm.css" />
   <link rel="stylesheet" href="viewer.css" />
+  <script src="xterm.js"></script>
+  <script src="addon-fit.js"></script>
 </head>
 <body>
   <header class="topbar">
     <span class="brand">wmux</span>
+    <span class="brand-sep">·</span>
+    <span class="workspace-title-bar" id="workspace-title"></span>
     <span class="status" id="status">loading…</span>
   </header>
-  <main id="workspace-root">
-    <div id="workspace-title"></div>
-    <div id="pane-cards"></div>
-  </main>
+  <main id="workspace-root"></main>
   <script type="module" src="workspace.mjs"></script>
 </body>
 </html>

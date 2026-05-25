@@ -31,15 +31,85 @@ html, body {
 .status.ok { color: #6ec06e; }
 .status.err { color: #d96a6a; }
 
-main#term {
+#viewer-body {
+  display: flex;
   height: calc(100% - 32px);
+  min-height: 0;
+}
+
+main#term {
+  flex: 1 1 0;
+  min-width: 0;
   padding: 8px;
   padding-top: max(8px, env(safe-area-inset-top));
   padding-bottom: max(8px, env(safe-area-inset-bottom));
   padding-left: max(8px, env(safe-area-inset-left));
-  padding-right: max(8px, env(safe-area-inset-right));
   box-sizing: border-box;
 }
+
+/* ── Agent timeline panel ──────────────────────────────────────────── */
+.agent-timeline {
+  flex: 0 0 260px;
+  display: flex;
+  flex-direction: column;
+  background: #181818;
+  border-left: 1px solid #2a2a2a;
+  min-width: 0;
+  font-size: 11px;
+}
+body.timeline-hidden .agent-timeline { display: none; }
+
+.agent-timeline-header {
+  padding: 6px 10px;
+  background: #232323;
+  border-bottom: 1px solid #2a2a2a;
+  font-weight: 600;
+  color: #ccc;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+}
+
+.agent-timeline-list {
+  flex: 1 1 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.agent-timeline-row {
+  display: flex;
+  gap: 6px;
+  padding: 3px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  word-break: break-word;
+}
+.agent-timeline-row:last-child { border-bottom: none; }
+
+.agent-timeline-time {
+  flex: 0 0 56px;
+  color: #888;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+.agent-timeline-body { flex: 1 1 auto; color: #ddd; }
+
+.agent-timeline-block_start .agent-timeline-body { color: #c0e8ff; }
+.agent-timeline-block_command .agent-timeline-body {
+  color: #b6f3c8;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+.agent-timeline-block_end .agent-timeline-body { color: #aaa; }
+.agent-timeline-agent_hook .agent-timeline-body { color: #f0c989; }
+
+.timeline-toggle {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid #333;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 1px 8px;
+  border-radius: 3px;
+}
+.timeline-toggle:hover { background: rgba(255,255,255,0.05); color: #ddd; }
 
 main#term .xterm {
   height: 100%;
@@ -129,10 +199,27 @@ main#workspace-root {
 .brand-sep { color: #666; margin: 0 4px; }
 .workspace-title-bar { color: #ddd; font-weight: 500; }
 
+#workspace-layout-host {
+  display: flex;
+  height: calc(100% - 32px);
+  min-height: 0;
+}
+main#workspace-root {
+  flex: 1 1 0;
+  min-width: 0;
+}
 main#workspace-root.workspace-split-mode {
   padding: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* Pane-code chip inside workspace timeline rows so users can tell
+ * which leaf each event came from. */
+.agent-timeline-pane {
+  flex: 0 0 48px;
+  color: #888;
+  font-size: 10px;
 }
 
 .workspace-split-root {

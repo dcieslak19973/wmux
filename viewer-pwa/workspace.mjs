@@ -155,7 +155,22 @@ function renderCards(manifest) {
 
 // ── Live split-tree renderer ────────────────────────────────────────────
 
+// Track every per-leaf WebSocket so we can close them cleanly before
+// re-rendering on a layout update — otherwise each re-render leaks N
+// zombie connections, and the host's presence counter creeps upward.
+const activeLeafSessions = new Set();
+
+function disposeAllLeafSessions() {
+  for (const dispose of activeLeafSessions) {
+    try { dispose(); } catch {}
+  }
+  activeLeafSessions.clear();
+}
+
 function renderSplitLayout(manifest) {
+  // First, tear down anything from a prior render so its WS connections
+  // close and the host's presence counter drops back.
+  disposeAllLeafSessions();
   rootEl.classList.add('workspace-split-mode');
   rootEl.innerHTML = '';
 
@@ -440,6 +455,9 @@ function startPaneSession({ paneCode, paneSecret, container, setStatus, onFitNee
         const bytes = Array.isArray(msg.bytes) ? msg.bytes : [];
         term.write(new Uint8Array(bytes));
       }
+      if (msg.kind === 'agent_event') {
+        appendWorkspaceAgentEvent(paneCode, msg.payload);
+      }
     });
 
     ws.addEventListener('close', (evt) => {
@@ -464,4 +482,84 @@ function startPaneSession({ paneCode, paneSecret, container, setStatus, onFitNee
 
   window.addEventListener('beforeunload', () => { userClosed = true; ws?.close(); });
   connect();
+
+  // Dispose hook so a layout-driven re-render closes the WS instead of
+  // leaving it dangling on the server side.
+  const dispose = () => {
+    userClosed = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    try { ws?.close(); } catch {}
+    try { term.dispose?.(); } catch {}
+    activeLeafSessions.delete(dispose);
+  };
+  activeLeafSessions.add(dispose);
+}
+
+// ── Workspace timeline ─────────────────────────────────────────────────
+
+const TIMELINE_MAX_ENTRIES = 200;
+const TIMELINE_PREF = 'wmux.workspace.showTimeline';
+const timelineListEl = document.getElementById('agent-timeline-list');
+const timelineToggleEl = document.getElementById('timeline-toggle');
+
+function fmtTime(ms) {
+  if (typeof ms !== 'number') return '';
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+function shortPaneLabel(paneCode) {
+  // The manifest fetch happens once per render; just show the first 4
+  // chars of the pane code as a stable identifier.
+  return String(paneCode).slice(0, 4);
+}
+
+function appendWorkspaceAgentEvent(paneCode, payload) {
+  if (!timelineListEl || !payload || typeof payload !== 'object') return;
+  const row = document.createElement('div');
+  row.className = `agent-timeline-row agent-timeline-${payload.kind || 'unknown'}`;
+  const time = fmtTime(payload.ts);
+  let body = '';
+  if (payload.kind === 'block_start') body = '▶ command started';
+  else if (payload.kind === 'block_command') body = `▶ ${escHtml(payload.command ?? '').slice(0, 240)}`;
+  else if (payload.kind === 'block_end') {
+    const code = payload.exit_code;
+    body = (code == null || code === 0) ? '✓ exit 0' : `✗ exit ${code}`;
+  } else if (payload.kind === 'agent_hook') {
+    const tool = payload.tool ? ` · ${escHtml(payload.tool)}` : '';
+    const msg = payload.message ? ` — ${escHtml(payload.message).slice(0, 200)}` : '';
+    body = `${escHtml(payload.hook_event ?? 'hook')}${tool}${msg}`;
+  } else {
+    body = escHtml(JSON.stringify(payload)).slice(0, 240);
+  }
+  row.innerHTML = `
+    <span class="agent-timeline-time">${escHtml(time)}</span>
+    <span class="agent-timeline-pane mono">${escHtml(shortPaneLabel(paneCode))}</span>
+    <span class="agent-timeline-body">${body}</span>
+  `;
+  timelineListEl.appendChild(row);
+  while (timelineListEl.childElementCount > TIMELINE_MAX_ENTRIES) {
+    timelineListEl.firstElementChild?.remove();
+  }
+  const nearBottom = timelineListEl.scrollHeight - timelineListEl.scrollTop - timelineListEl.clientHeight < 40;
+  if (nearBottom) timelineListEl.scrollTop = timelineListEl.scrollHeight;
+}
+
+function loadTimelinePref() {
+  try { return localStorage.getItem(TIMELINE_PREF) !== '0'; } catch { return true; }
+}
+function saveTimelinePref(visible) {
+  try { localStorage.setItem(TIMELINE_PREF, visible ? '1' : '0'); } catch {}
+}
+function applyTimelineVisibility(visible) {
+  document.body.classList.toggle('timeline-hidden', !visible);
+}
+if (timelineToggleEl) {
+  let visible = loadTimelinePref();
+  applyTimelineVisibility(visible);
+  timelineToggleEl.addEventListener('click', () => {
+    visible = !visible;
+    saveTimelinePref(visible);
+    applyTimelineVisibility(visible);
+  });
 }

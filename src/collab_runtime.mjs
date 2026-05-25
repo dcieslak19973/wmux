@@ -922,6 +922,24 @@ export function createCollabRuntime({
         showApprovalDialog(req);
       }
     }).catch(() => {});
+
+    // Phase 5: when a Claude Code hook event fires, fan it out to any
+    // shares targeting that pane so the viewer's agent timeline updates
+    // live. OSC 133 block events ride a separate path (the backend
+    // pushes those directly from start_session_stream).
+    listen('agent-hook-event', (event) => {
+      const p = event?.payload;
+      if (!p?.pane_id) return;
+      const ts = typeof p.event_ms === 'number' ? p.event_ms : Date.now();
+      const payload = {
+        kind: 'agent_hook',
+        hook_event: p.hook_event ?? null,
+        tool: p.tool ?? null,
+        message: p.message ?? null,
+        ts,
+      };
+      invoke('broadcast_agent_event', { paneId: p.pane_id, payload }).catch(() => {});
+    }).catch(() => {});
   }
 
   // Fire an initial refresh on instantiation so badges work even when the

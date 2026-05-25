@@ -841,16 +841,45 @@ pub async fn start_session_stream(
                             OscEvent::BlockCommandStart => {
                                 block_store.lock().await.on_command_start();
                                 let _ = app.emit(&block_start_ev, BlockStartPayload {});
+                                collab_store
+                                    .push_agent_event(
+                                        &id_clone,
+                                        serde_json::json!({
+                                            "kind": "block_start",
+                                            "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+                                        }),
+                                    )
+                                    .await;
                             }
                             OscEvent::BlockCommandFinished { exit_code } => {
                                 let _ = app.emit(&block_end_ev, BlockEndPayload { exit_code });
                                 if let Some(block) = block_store.lock().await.on_command_finished(exit_code) {
                                     let _ = app.emit(&block_done_ev, block);
                                 }
+                                collab_store
+                                    .push_agent_event(
+                                        &id_clone,
+                                        serde_json::json!({
+                                            "kind": "block_end",
+                                            "exit_code": exit_code,
+                                            "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+                                        }),
+                                    )
+                                    .await;
                             }
                             OscEvent::BlockCommandLine(command) => {
                                 block_store.lock().await.on_command_line(&command);
-                                let _ = app.emit(&block_cmd_ev, BlockCommandLinePayload { command });
+                                let _ = app.emit(&block_cmd_ev, BlockCommandLinePayload { command: command.clone() });
+                                collab_store
+                                    .push_agent_event(
+                                        &id_clone,
+                                        serde_json::json!({
+                                            "kind": "block_command",
+                                            "command": command,
+                                            "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+                                        }),
+                                    )
+                                    .await;
                             }
                         }
                     }
@@ -3165,6 +3194,22 @@ pub async fn add_pane_to_workspace_share(
         code: pane_code_str,
         secret: minted.secret,
     })
+}
+
+/// Fan out a structured agent event (typically a Claude Code hook
+/// callback the frontend received as a Tauri event) to every share
+/// targeting `pane_id`. Best-effort: silently no-ops when no shares
+/// match. OSC 133 block events go directly from `start_session_stream`
+/// via the same fanout — this command is for events that originate
+/// outside the PTY byte stream.
+#[tauri::command]
+pub async fn broadcast_agent_event(
+    pane_id: String,
+    payload: serde_json::Value,
+    store: State<'_, ShareSessionStore>,
+) -> Result<(), String> {
+    store.inner().push_agent_event(&pane_id, payload).await;
+    Ok(())
 }
 
 #[tauri::command]

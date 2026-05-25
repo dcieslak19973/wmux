@@ -74,6 +74,15 @@ pub enum SessionMessage {
     LayoutDelta {
         payload: serde_json::Value,
     },
+    /// Structured agent state event (Phase 5). Wraps an OSC 133 block
+    /// boundary, a Claude Code hook callback, or any other structured
+    /// signal the host wants to surface alongside terminal bytes. The
+    /// payload's shape is defined by convention between host and viewer,
+    /// not by the proto, so additional event kinds don't need a proto
+    /// version bump.
+    AgentEvent {
+        payload: serde_json::Value,
+    },
 }
 
 #[cfg(test)]

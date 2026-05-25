@@ -116,6 +116,7 @@ pub fn run() {
             commands::share_workspace,
             commands::add_pane_to_workspace_share,
             commands::provide_workspace_layout,
+            commands::broadcast_agent_event,
             commands::revoke_share,
             commands::revoke_workspace_share,
             commands::list_active_shares,

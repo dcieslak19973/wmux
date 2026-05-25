@@ -16,8 +16,15 @@
   <header class="topbar">
     <span class="brand">wmux</span>
     <span class="status" id="status">connecting…</span>
+    <button class="timeline-toggle" id="timeline-toggle" title="Toggle agent timeline">≡</button>
   </header>
-  <main id="term"></main>
+  <div id="viewer-body">
+    <main id="term"></main>
+    <aside id="agent-timeline" class="agent-timeline">
+      <div class="agent-timeline-header">Agent timeline</div>
+      <div class="agent-timeline-list" id="agent-timeline-list"></div>
+    </aside>
+  </div>
   <script type="module" src="viewer.mjs"></script>
 </body>
 </html>

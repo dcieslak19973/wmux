@@ -17,8 +17,15 @@
     <span class="brand-sep">·</span>
     <span class="workspace-title-bar" id="workspace-title"></span>
     <span class="status" id="status">loading…</span>
+    <button class="timeline-toggle" id="timeline-toggle" title="Toggle agent timeline">≡</button>
   </header>
-  <main id="workspace-root"></main>
+  <div id="workspace-layout-host">
+    <main id="workspace-root"></main>
+    <aside id="agent-timeline" class="agent-timeline">
+      <div class="agent-timeline-header">Agent timeline</div>
+      <div class="agent-timeline-list" id="agent-timeline-list"></div>
+    </aside>
+  </div>
   <script type="module" src="workspace.mjs"></script>
 </body>
 </html>

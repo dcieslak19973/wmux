@@ -157,7 +157,6 @@ function renderCards(manifest) {
 
 function renderSplitLayout(manifest) {
   rootEl.classList.add('workspace-split-mode');
-  // Re-anchor: title bar stays in the topbar; main becomes the tree.
   rootEl.innerHTML = '';
 
   const paneInfo = new Map();
@@ -165,12 +164,75 @@ function renderSplitLayout(manifest) {
     paneInfo.set(pane.code, pane);
   }
 
-  const treeRoot = renderNode(manifest.layout, paneInfo);
-  treeRoot.classList.add('workspace-split-root');
-  rootEl.appendChild(treeRoot);
-  // Defer fits so xterm sees real dimensions.
-  requestAnimationFrame(() => fitAllInTree(treeRoot));
-  window.addEventListener('resize', () => fitAllInTree(treeRoot));
+  // Normalise to the multi-tab shape so the renderer is single-path.
+  // Pre-Phase-4-polish shares stored a bare split-tree at layout; wrap.
+  const wsLayout = (manifest.layout && manifest.layout.kind === 'workspace')
+    ? manifest.layout
+    : { kind: 'workspace', tabs: [{ id: '__legacy', title: 'Workspace', layout: manifest.layout }], active_tab_id: '__legacy' };
+
+  if (!wsLayout.tabs?.length) {
+    const empty = document.createElement('div');
+    empty.className = 'workspace-empty';
+    empty.textContent = 'No shareable panes in this workspace.';
+    rootEl.appendChild(empty);
+    return;
+  }
+
+  // Tab strip — only render if there's more than one tab.
+  let activeId = wsLayout.active_tab_id ?? wsLayout.tabs[0].id;
+  if (!wsLayout.tabs.find((t) => t.id === activeId)) activeId = wsLayout.tabs[0].id;
+
+  if (wsLayout.tabs.length > 1) {
+    const strip = document.createElement('div');
+    strip.className = 'workspace-tab-strip';
+    for (const tab of wsLayout.tabs) {
+      const chip = document.createElement('button');
+      chip.className = 'workspace-tab-chip' + (tab.id === activeId ? ' is-active' : '');
+      chip.textContent = tab.title;
+      chip.dataset.tabId = tab.id;
+      chip.addEventListener('click', () => switchTab(tab.id));
+      strip.appendChild(chip);
+    }
+    rootEl.appendChild(strip);
+  }
+
+  // Body: render every tab once, hide all but the active one. Keeps
+  // xterm instances alive so output keeps streaming in the background.
+  const body = document.createElement('div');
+  body.className = 'workspace-tab-body';
+  rootEl.appendChild(body);
+
+  for (const tab of wsLayout.tabs) {
+    const tabPanel = document.createElement('div');
+    tabPanel.className = 'workspace-tab-panel' + (tab.id === activeId ? ' is-active' : '');
+    tabPanel.dataset.tabId = tab.id;
+    const treeRoot = renderNode(tab.layout, paneInfo);
+    treeRoot.classList.add('workspace-split-root');
+    tabPanel.appendChild(treeRoot);
+    body.appendChild(tabPanel);
+  }
+
+  function switchTab(id) {
+    for (const chip of rootEl.querySelectorAll('.workspace-tab-chip')) {
+      chip.classList.toggle('is-active', chip.dataset.tabId === id);
+    }
+    for (const panel of body.querySelectorAll('.workspace-tab-panel')) {
+      panel.classList.toggle('is-active', panel.dataset.tabId === id);
+    }
+    // Re-fit the newly-active tab's xterms; they may have been laid out
+    // at zero height while hidden.
+    const active = body.querySelector('.workspace-tab-panel.is-active');
+    if (active) requestAnimationFrame(() => fitAllInTree(active));
+  }
+
+  requestAnimationFrame(() => {
+    const active = body.querySelector('.workspace-tab-panel.is-active');
+    if (active) fitAllInTree(active);
+  });
+  window.addEventListener('resize', () => {
+    const active = body.querySelector('.workspace-tab-panel.is-active');
+    if (active) fitAllInTree(active);
+  });
 }
 
 function renderNode(node, paneInfo) {
@@ -212,7 +274,40 @@ function renderSplit(node, paneInfo) {
   bWrap.appendChild(renderNode(node.b, paneInfo));
   splitEl.appendChild(bWrap);
 
+  wireDividerDrag(splitEl, divider, aWrap, bWrap, node.dir);
   return splitEl;
+}
+
+// Drag a divider to rebalance the flex on the two sides. Local-only —
+// doesn't push back to the host; viewer can choose to view a different
+// ratio than the host has. Re-fits xterms as the drag progresses so
+// they reflow to the new pane widths/heights.
+function wireDividerDrag(splitEl, dividerEl, aWrap, bWrap, dir) {
+  dividerEl.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const rect = splitEl.getBoundingClientRect();
+    const total = dir === 'h' ? rect.width : rect.height;
+    if (total <= 0) return;
+    document.body.style.cursor = dir === 'h' ? 'col-resize' : 'row-resize';
+
+    const onMove = (mv) => {
+      const at = dir === 'h' ? mv.clientX - rect.left : mv.clientY - rect.top;
+      const ratio = Math.max(0.05, Math.min(0.95, at / total));
+      aWrap.style.flex = `${ratio} 1 0`;
+      bWrap.style.flex = `${1 - ratio} 1 0`;
+      // Refit xterms inside both sides as their dimensions change.
+      for (const leaf of splitEl.querySelectorAll('.workspace-leaf')) {
+        try { leaf._fit?.(); } catch {}
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
 }
 
 function renderLeaf(paneCode, pane) {

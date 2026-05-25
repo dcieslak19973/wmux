@@ -161,11 +161,59 @@ main#workspace-root.workspace-split-mode {
   flex: 0 0 4px;
   background: #333;
   cursor: col-resize;
+  transition: background 0.12s;
 }
+.workspace-split-divider-h:hover { background: #4a90e2; }
 .workspace-split-divider-v {
   flex: 0 0 4px;
   background: #333;
   cursor: row-resize;
+  transition: background 0.12s;
+}
+.workspace-split-divider-v:hover { background: #4a90e2; }
+
+/* ── Workspace tab strip (multi-tab shares) ─────────────────────────── */
+.workspace-tab-strip {
+  display: flex;
+  flex: 0 0 auto;
+  background: #232323;
+  border-bottom: 1px solid #2a2a2a;
+  overflow-x: auto;
+  user-select: none;
+}
+.workspace-tab-chip {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  border-right: 1px solid #2a2a2a;
+  color: #aaa;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.workspace-tab-chip:hover { background: rgba(255,255,255,0.06); color: #ddd; }
+.workspace-tab-chip.is-active {
+  color: #ddd;
+  background: #181818;
+  border-bottom: 2px solid #4a90e2;
+}
+
+.workspace-tab-body {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  position: relative;
+}
+.workspace-tab-panel {
+  display: none;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+.workspace-tab-panel.is-active {
+  display: flex;
 }
 
 .workspace-leaf {

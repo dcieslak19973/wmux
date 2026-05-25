@@ -8,7 +8,7 @@ Maintainer-facing comparison of wmux against the closest tools in the agent-term
 
 | Tool | Category | Platform | License |
 |---|---|---|---|
-| **wmux** | Agent-aware terminal multiplexer | Windows-native (WSL/SSH-aware) | MIT |
+| **wmux** | Agent-aware terminal multiplexer | Windows-native (WSL/SSH-aware) | AGPL-3.0 |
 | **Warp** | Agent-first terminal | macOS, Linux, Windows | Closed; freemium + subscription |
 | **cmux** | macOS agent terminal (libghostty) | macOS only | AGPL |
 | **zed** | GPU-accelerated code editor + agent panel | macOS, Linux (Windows: preview) | GPL |
@@ -42,7 +42,7 @@ Maintainer-facing comparison of wmux against the closest tools in the agent-term
 | OSC notification ring (9/99/777) | ✅ | partial | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Workbook/charts via MCP | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | PR review pane | ✅ inline Ask AI via any agent CLI | ❌ | ❌ | ✅ in-editor diff | ❌ | ❌ | ✅ |
-| Open source | ✅ MIT | ❌ proprietary | ✅ AGPL | ✅ GPL | ✅ | ✅ | ✅ |
+| Open source | ✅ AGPL-3.0 | ❌ proprietary | ✅ AGPL | ✅ GPL | ✅ | ✅ | ✅ |
 | Cloud / login required for full feature set | ❌ local-first | ✅ for AI/Drive/sessions | ❌ | ❌ | ❌ | ❌ | optional |
 
 ## Where wmux is ahead

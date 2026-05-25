@@ -5,6 +5,7 @@
 
 mod browser_helpers;
 mod code_mode;
+mod collab_server;
 mod control_bridge;
 mod commands;
 mod conpty;

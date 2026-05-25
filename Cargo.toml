@@ -1,5 +1,5 @@
 [workspace]
-members = ["src-tauri", "browser-helper"]
+members = ["src-tauri", "browser-helper", "collab-proto"]
 resolver = "2"
 
 [profile.dev]

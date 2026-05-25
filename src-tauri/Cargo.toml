@@ -41,6 +41,12 @@ base64 = "0.22"
 # Rust, no native libs to bundle. Slower than v8 but adequate for short
 # orchestration scripts; revisit deno_core later if we outgrow it.
 boa_engine = "0.20"
+# axum drives the in-app collab HTTP/WS server (see collab_server.rs and
+# docs/multiplayer-design.md). Kept separate from the hand-rolled
+# http_server.rs that serves the agent API.
+axum = { version = "0.7", features = ["ws"] }
+collab-proto = { path = "../collab-proto" }
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

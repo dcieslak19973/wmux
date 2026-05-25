@@ -1471,10 +1471,8 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.innerHTML = `
     <button class="pane-tb-btn" data-action="split-h" title="Split right (Ctrl+Shift+\\)">&#x2502;</button>
     <button class="pane-tb-btn" data-action="split-v" title="Split down (Ctrl+Shift+-)">&#x2500;</button>
-    <button class="pane-tb-btn" data-action="browser" title="Open browser pane">&#x25a6;</button>
-    <button class="pane-tb-btn" data-action="markdown" title="Open markdown pane">MD</button>
+    <button class="pane-tb-btn" data-action="new-surface" title="Open new surface (browser / markdown / workbook)">&#xff0b;</button>
     <button class="pane-tb-btn" data-action="artifact" title="Preview HTML artifact from output">HTML</button>
-    <button class="pane-tb-btn" data-action="workbook" title="Open interactive workbook app">WKB</button>
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-blocks" data-action="blocks" title="Set up shell integration">&#x26a1;</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-mcp" data-action="mcp" title="Paste Claude Code setup command for wmux MCP">MCP</button>' : ''}
     ${isBlocksCapable ? '<button class="pane-tb-btn pane-tb-hooks" data-action="hooks" title="Install Claude Code hooks for live agent state">HK</button>' : ''}
@@ -1485,10 +1483,17 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   `;
   toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); showSplitTypePicker(sessionId, 'h', r.left, r.bottom + 4); });
   toolbarEl.querySelector('[data-action="split-v"]').addEventListener('click', (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); showSplitTypePicker(sessionId, 'v', r.left, r.bottom + 4); });
-  toolbarEl.querySelector('[data-action="browser"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithBrowser(sessionId, 'h'); });
-  toolbarEl.querySelector('[data-action="markdown"]').addEventListener('click', (e) => { e.stopPropagation(); splitPaneWithMarkdown(sessionId, 'h'); });
+  toolbarEl.querySelector('[data-action="new-surface"]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    showContextMenu([
+      { type: 'label', text: 'Open new surface' },
+      { label: 'Browser', action: () => splitPaneWithBrowser(sessionId, 'h') },
+      { label: 'Markdown', action: () => splitPaneWithMarkdown(sessionId, 'h') },
+      { label: 'Workbook', action: () => panelsRuntime?.openWorkbookDemo?.().catch((err) => showError(`Could not open workbook: ${err}`)) },
+    ], r.left, r.bottom + 4);
+  });
   toolbarEl.querySelector('[data-action="artifact"]').addEventListener('click', (e) => { e.stopPropagation(); previewArtifactFromPane(sessionId); });
-  toolbarEl.querySelector('[data-action="workbook"]').addEventListener('click', (e) => { e.stopPropagation(); panelsRuntime?.openWorkbookDemo?.().catch((err) => showError(`Could not open workbook: ${err}`)); });
   toolbarEl.querySelector('[data-action="share"]').addEventListener('click',   (e) => {
     e.stopPropagation();
     const r = e.currentTarget.getBoundingClientRect();

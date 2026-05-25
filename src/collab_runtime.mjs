@@ -15,6 +15,9 @@ export function createCollabRuntime({
   invoke,
   listen,
   panes,
+  tabs,
+  workspaces,
+  getActiveWorkspaceId,
   escHtml,
   showError,
   showToast,
@@ -264,6 +267,168 @@ export function createCollabRuntime({
     document.getElementById('collab-share-dialog')?.remove();
   }
 
+  function enumerateShareablePanes() {
+    // Walk every pane in the active workspace's tabs; keep terminal panes
+    // (those with a sessionId). Returns [{ pane_id, label }, ...].
+    if (!tabs || !workspaces || !getActiveWorkspaceId) return [];
+    const wsId = getActiveWorkspaceId();
+    if (!wsId) return [];
+    const out = [];
+    for (const [tabId, tab] of tabs) {
+      if (tab.workspaceId !== wsId) continue;
+      const tabTitle = tab.title || `Tab ${tabId.slice(0, 4)}`;
+      // tab.paneIds is the order; fall back to scanning panes if needed.
+      const paneIds = tab.paneIds || [];
+      for (const paneId of paneIds) {
+        const pane = panes.get(paneId);
+        if (!pane?.sessionId) continue;
+        const detail = pane.cwd || pane.title || '';
+        const label = detail ? `${tabTitle} · ${detail}` : tabTitle;
+        out.push({ pane_id: pane.sessionId, label });
+      }
+    }
+    return out;
+  }
+
+  async function startShareForWorkspace(permission = 'read') {
+    closeShareDialog();
+    await Promise.all([loadAddresses(), loadTailscaleStatus()]);
+    const wsId = getActiveWorkspaceId?.();
+    const ws = wsId ? workspaces?.get(wsId) : null;
+    const paneSpecs = enumerateShareablePanes();
+    if (paneSpecs.length === 0) {
+      showError?.('No shareable panes in this workspace.');
+      return;
+    }
+    try {
+      const mint = await invoke('share_workspace', {
+        workspaceLabel: ws?.name || 'Workspace',
+        panes: paneSpecs,
+        ttlSeconds: DEFAULT_TTL_SECONDS,
+        requireMutualConfirm: getRequireApproval(),
+        permission,
+      });
+      cachedPort = mint.server_port;
+
+      // Push snapshots for each pane so a join-later viewer sees current
+      // state, not the screen at share-creation time.
+      for (const spec of paneSpecs) {
+        const snap = captureSnapshot(spec.pane_id);
+        // The Tauri command response carries pane_codes in info but not
+        // a (pane_id → code) map. We rely on the order matching the panes
+        // we sent — which it does (backend mints in iteration order).
+      }
+      const codesByOrder = mint.info.pane_codes;
+      for (let i = 0; i < paneSpecs.length; i++) {
+        const snap = captureSnapshot(paneSpecs[i].pane_id);
+        if (snap && codesByOrder[i]) {
+          invoke('provide_share_snapshot', { code: codesByOrder[i], snapshot: snap }).catch(() => {});
+        }
+      }
+
+      await refresh();
+      showWorkspaceShareDialog(mint, paneSpecs.length);
+      ensureRefreshing();
+    } catch (err) {
+      showError?.(`Workspace share failed: ${err}`);
+    }
+  }
+
+  function showWorkspaceShareDialog(mint, paneCount) {
+    closeShareDialog();
+    const urls = urlsForShareWorkspace(mint);
+    const dialog = document.createElement('div');
+    dialog.id = 'collab-share-dialog';
+    dialog.className = 'collab-share-dialog';
+    dialog.innerHTML = `
+      <div class="collab-share-dialog-header">
+        <span>Share workspace</span>
+        <button class="collab-share-dialog-close" title="Close">&#x2715;</button>
+      </div>
+      <div class="collab-share-dialog-body">
+        <div class="collab-share-row">
+          <span class="collab-share-label">Workspace</span>
+          <span class="collab-share-value">${escHtml(mint.info.label)}</span>
+        </div>
+        <div class="collab-share-row">
+          <span class="collab-share-label">Panes</span>
+          <span class="collab-share-value">${paneCount} shared</span>
+        </div>
+        <div class="collab-share-row">
+          <span class="collab-share-label">Code</span>
+          <span class="collab-share-value mono">${escHtml(mint.code)}</span>
+        </div>
+        <div class="collab-share-row collab-share-row-stack">
+          <span class="collab-share-label">URLs (pick one your viewer can reach)</span>
+          <div class="collab-share-urls"></div>
+          <div class="collab-share-tailscale-hint"></div>
+        </div>
+        <div class="collab-share-help">
+          The URL opens a workspace landing page that lists each shared pane. Anyone with this URL can view (and, if you chose read-write, type into) every pane in the workspace until you revoke it.
+        </div>
+        <div class="collab-share-actions">
+          <button class="collab-share-btn" data-action="revoke">Revoke</button>
+          <button class="collab-share-btn collab-share-btn-primary" data-action="done">Done</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(dialog);
+    const urlsContainer = dialog.querySelector('.collab-share-urls');
+    if (urls.length === 0) {
+      urlsContainer.innerHTML = '<div class="collab-share-empty">No reachable IP detected.</div>';
+    } else {
+      for (const entry of urls) {
+        const row = document.createElement('div');
+        row.className = `collab-share-url-row collab-share-url-row-${entry.kind}`;
+        row.innerHTML = `
+          <span class="collab-share-url-pill collab-share-url-pill-${entry.kind}">${escHtml(URL_KIND_LABELS[entry.kind] ?? entry.kind)}</span>
+          <code class="collab-share-url">${escHtml(entry.url)}</code>
+          <button class="collab-share-copy" title="Copy URL">Copy</button>
+        `;
+        row.querySelector('.collab-share-copy').addEventListener('click', () => {
+          navigator.clipboard?.writeText(entry.url).then(() => {
+            showToast?.('URL copied to clipboard', 'success');
+          }).catch(() => {
+            showError?.('Copy failed');
+          });
+        });
+        urlsContainer.appendChild(row);
+      }
+    }
+    const hintEl = dialog.querySelector('.collab-share-tailscale-hint');
+    if (hintEl) hintEl.innerHTML = tailscaleHintHtml();
+    dialog.querySelector('.collab-share-dialog-close').addEventListener('click', closeShareDialog);
+    dialog.querySelector('[data-action="done"]').addEventListener('click', closeShareDialog);
+    dialog.querySelector('[data-action="revoke"]').addEventListener('click', async () => {
+      try {
+        await invoke('revoke_workspace_share', { code: mint.code });
+        showToast?.('Workspace share revoked', 'info');
+        refresh();
+        closeShareDialog();
+      } catch (err) {
+        showError?.(`Revoke failed: ${err}`);
+      }
+    });
+  }
+
+  function urlsForShareWorkspace(mint) {
+    const port = mint.server_port;
+    if (!port) return [];
+    const frag = `#t=${encodeURIComponent(mint.secret)}`;
+    const out = [];
+    const make = (kind, host) => ({ kind, host, url: `http://${host}:${port}${mint.path}${frag}` });
+    if (cachedTailscale?.state === 'running') {
+      if (cachedTailscale.dns_name) out.push(make('tailnet-dns', cachedTailscale.dns_name));
+      for (const ip of cachedTailscale.tailscale_ips || []) {
+        if (ip.includes(':')) continue;
+        out.push(make('tailnet-ip', ip));
+      }
+    }
+    for (const addr of cachedAddresses) out.push(make('lan', addr));
+    if (out.length === 0) out.push(make('loopback', 'localhost'));
+    return out;
+  }
+
   async function startShareForPane(paneId, permission = 'read') {
     closeShareDialog();
     // Refresh interface + Tailscale state every share so the dialog shows
@@ -305,6 +470,7 @@ export function createCollabRuntime({
       <div class="collab-panel-header">
         <span class="collab-panel-title">Collab</span>
         <div class="collab-panel-header-actions">
+          <button class="collab-panel-share-workspace" title="Share current workspace">Share workspace</button>
           <button class="collab-panel-refresh" title="Refresh">&#x21bb;</button>
           <button class="collab-panel-close" title="Close">&#x2715;</button>
         </div>
@@ -329,6 +495,61 @@ export function createCollabRuntime({
 
     panelEl.querySelector('.collab-panel-close').addEventListener('click', hidePanel);
     panelEl.querySelector('.collab-panel-refresh').addEventListener('click', refresh);
+    const shareWsBtn = panelEl.querySelector('.collab-panel-share-workspace');
+    if (shareWsBtn) {
+      shareWsBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        // Permission picker — same shape as the SH pane button.
+        const r = shareWsBtn.getBoundingClientRect();
+        const items = [
+          { type: 'label', text: 'Share current workspace' },
+          { label: 'Read-only', action: () => startShareForWorkspace('read') },
+          { label: 'Read-write (viewers can type)', danger: true, action: () => startShareForWorkspace('read_write') },
+        ];
+        // Reuse the global showContextMenu via dispatching a custom event
+        // would couple us to main.js. Simpler: render a tiny inline menu.
+        const menu = document.createElement('div');
+        menu.className = 'context-menu';
+        menu.style.left = `${Math.max(8, r.right - 220)}px`;
+        menu.style.top = `${r.bottom + 4}px`;
+        for (const item of items) {
+          if (item.type === 'label') {
+            const lbl = document.createElement('div');
+            lbl.className = 'context-menu-label';
+            lbl.textContent = item.text;
+            menu.appendChild(lbl);
+            continue;
+          }
+          const btn = document.createElement('button');
+          btn.className = `context-menu-item${item.danger ? ' danger' : ''}`;
+          btn.textContent = item.label;
+          btn.addEventListener('click', () => {
+            menu.remove();
+            item.action?.();
+          });
+          menu.appendChild(btn);
+        }
+        document.body.appendChild(menu);
+        // Clamp to viewport (same as showContextMenu in main.js).
+        const rect = menu.getBoundingClientRect();
+        const pad = 8;
+        if (rect.right > window.innerWidth - pad) {
+          menu.style.left = `${Math.max(pad, window.innerWidth - rect.width - pad)}px`;
+        }
+        if (rect.bottom > window.innerHeight - pad) {
+          menu.style.top = `${Math.max(pad, window.innerHeight - rect.height - pad)}px`;
+        }
+        setTimeout(() => {
+          const onOutside = (ev) => {
+            if (!menu.contains(ev.target)) {
+              menu.remove();
+              document.removeEventListener('mousedown', onOutside);
+            }
+          };
+          document.addEventListener('mousedown', onOutside);
+        }, 0);
+      });
+    }
     const approvalChk = panelEl.querySelector('.collab-panel-require-approval');
     approvalChk.checked = getRequireApproval();
     approvalChk.addEventListener('change', () => setRequireApproval(approvalChk.checked));
@@ -529,6 +750,7 @@ export function createCollabRuntime({
 
   return {
     startShareForPane,
+    startShareForWorkspace,
     togglePanel,
     refresh,
     presenceForPane,

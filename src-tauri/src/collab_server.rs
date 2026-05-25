@@ -236,6 +236,57 @@ impl ShareInfo {
     }
 }
 
+/// Bundles N pane shares under a single shareable URL. The workspace
+/// itself doesn't carry PTY bytes — viewers fetch a manifest of pane
+/// shares and then connect to whichever ones they want individually.
+#[derive(Clone)]
+pub struct WorkspaceShare {
+    pub code: SessionCode,
+    pub label: String,
+    pub secret_hash: [u8; 32],
+    pub created_at: Instant,
+    pub expires_at: Instant,
+    /// (pane_share_code, pane_secret, pane_label) tuples — secrets are
+    /// kept in-memory only and never logged. The manifest endpoint
+    /// returns these verbatim to authorised viewers.
+    pub panes: Vec<WorkspacePaneEntry>,
+}
+
+#[derive(Clone)]
+pub struct WorkspacePaneEntry {
+    pub code: SessionCode,
+    pub secret: String,
+    pub label: String,
+    pub target_pane_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceShareInfo {
+    pub code: String,
+    pub label: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub path: String,
+    pub pane_codes: Vec<String>,
+}
+
+impl WorkspaceShareInfo {
+    fn from(ws: &WorkspaceShare) -> Self {
+        let now_inst = Instant::now();
+        let now_ms = system_now_ms();
+        let created_at_ms = now_ms.saturating_sub(now_inst.duration_since(ws.created_at).as_millis() as u64);
+        let remaining_ms = ws.expires_at.saturating_duration_since(now_inst).as_millis() as u64;
+        Self {
+            code: ws.code.0.clone(),
+            label: ws.label.clone(),
+            created_at_ms,
+            expires_at_ms: now_ms.saturating_add(remaining_ms),
+            path: format!("/w/{}", ws.code.0),
+            pane_codes: ws.panes.iter().map(|p| p.code.0.clone()).collect(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct AuditLog {
     entries: VecDeque<AuditEntry>,
@@ -260,6 +311,7 @@ pub struct ShareSessionStore {
 #[derive(Default)]
 struct StoreInner {
     sessions: HashMap<SessionCode, ShareSession>,
+    workspaces: HashMap<SessionCode, WorkspaceShare>,
     audit: AuditLog,
 }
 
@@ -317,6 +369,72 @@ impl ShareSessionStore {
 
     pub async fn get(&self, code: &SessionCode) -> Option<ShareSession> {
         self.inner.read().await.sessions.get(code).cloned()
+    }
+
+    /// Mint a workspace share that bundles previously-minted pane shares.
+    /// Caller (the Tauri command) is responsible for creating each pane
+    /// share first via [`Self::create`]; this method just records the
+    /// bundle and returns the workspace secret.
+    pub async fn create_workspace(
+        &self,
+        code: SessionCode,
+        label: String,
+        panes: Vec<WorkspacePaneEntry>,
+        ttl: Duration,
+    ) -> String {
+        let secret = random_secret();
+        let secret_hash = sha256(secret.as_bytes());
+        let ws = WorkspaceShare {
+            code: code.clone(),
+            label,
+            secret_hash,
+            created_at: Instant::now(),
+            expires_at: Instant::now() + ttl,
+            panes,
+        };
+        let mut inner = self.inner.write().await;
+        inner.workspaces.insert(code.clone(), ws);
+        inner.audit.push(AuditEntry {
+            at_ms: system_now_ms(),
+            code: code.0,
+            participant: None,
+            event: AuditEventKind::Created,
+        });
+        secret
+    }
+
+    pub async fn get_workspace(&self, code: &SessionCode) -> Option<WorkspaceShare> {
+        self.inner.read().await.workspaces.get(code).cloned()
+    }
+
+    pub async fn list_workspaces(&self) -> Vec<WorkspaceShareInfo> {
+        let inner = self.inner.read().await;
+        inner.workspaces.values().map(WorkspaceShareInfo::from).collect()
+    }
+
+    pub async fn revoke_workspace(&self, code: &SessionCode) -> bool {
+        let mut inner = self.inner.write().await;
+        if let Some(ws) = inner.workspaces.remove(code) {
+            // Revoke every pane share that belonged to this workspace.
+            for pane in &ws.panes {
+                inner.sessions.remove(&pane.code);
+                inner.audit.push(AuditEntry {
+                    at_ms: system_now_ms(),
+                    code: pane.code.0.clone(),
+                    participant: None,
+                    event: AuditEventKind::Revoked,
+                });
+            }
+            inner.audit.push(AuditEntry {
+                at_ms: system_now_ms(),
+                code: code.0.clone(),
+                participant: None,
+                event: AuditEventKind::Revoked,
+            });
+            true
+        } else {
+            false
+        }
     }
 
     pub async fn revoke(&self, code: &SessionCode) -> bool {
@@ -390,14 +508,29 @@ impl ShareSessionStore {
     pub async fn sweep_expired(&self) {
         let now = Instant::now();
         let mut inner = self.inner.write().await;
-        let expired: Vec<SessionCode> = inner
+        let expired_sessions: Vec<SessionCode> = inner
             .sessions
             .iter()
             .filter(|(_, s)| s.expires_at <= now)
             .map(|(k, _)| k.clone())
             .collect();
-        for code in expired {
+        for code in expired_sessions {
             inner.sessions.remove(&code);
+            inner.audit.push(AuditEntry {
+                at_ms: system_now_ms(),
+                code: code.0,
+                participant: None,
+                event: AuditEventKind::Expired,
+            });
+        }
+        let expired_workspaces: Vec<SessionCode> = inner
+            .workspaces
+            .iter()
+            .filter(|(_, w)| w.expires_at <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for code in expired_workspaces {
+            inner.workspaces.remove(&code);
             inner.audit.push(AuditEntry {
                 at_ms: system_now_ms(),
                 code: code.0,
@@ -728,6 +861,8 @@ const VIEWER_CSS: &str = include_str!("../../viewer-pwa/viewer.css");
 const VIEWER_XTERM_CSS: &str = include_str!("../../viewer-pwa/vendor/xterm.css");
 const VIEWER_XTERM_JS: &str = include_str!("../../viewer-pwa/vendor/xterm.js");
 const VIEWER_ADDON_FIT_JS: &str = include_str!("../../viewer-pwa/vendor/addon-fit.js");
+const WORKSPACE_INDEX: &str = include_str!("../../viewer-pwa/workspace.html");
+const WORKSPACE_MJS: &str = include_str!("../../viewer-pwa/workspace.mjs");
 
 async fn viewer_index(State(state): State<AppState>, Path(code): Path<String>) -> Response {
     // 404 fast if the code doesn't exist so we don't ship the viewer to
@@ -752,6 +887,72 @@ async fn viewer_asset(Path((_code, name)): Path<(String, String)>) -> Response {
     static_response(body, ctype)
 }
 
+async fn workspace_index(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> Response {
+    if state.store.get_workspace(&SessionCode(code)).await.is_none() {
+        return (StatusCode::NOT_FOUND, "no such workspace share").into_response();
+    }
+    static_response(WORKSPACE_INDEX.as_bytes(), "text/html; charset=utf-8")
+}
+
+async fn workspace_asset(Path((_code, name)): Path<(String, String)>) -> Response {
+    let (body, ctype): (&[u8], &str) = match name.as_str() {
+        "workspace.mjs" => (WORKSPACE_MJS.as_bytes(), "text/javascript; charset=utf-8"),
+        "viewer.css" => (VIEWER_CSS.as_bytes(), "text/css; charset=utf-8"),
+        _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    static_response(body, ctype)
+}
+
+#[derive(serde::Deserialize)]
+struct ManifestRequest {
+    secret: String,
+}
+
+#[derive(Serialize)]
+struct ManifestPane {
+    code: String,
+    secret: String,
+    label: String,
+}
+
+#[derive(Serialize)]
+struct ManifestResponse {
+    label: String,
+    panes: Vec<ManifestPane>,
+}
+
+async fn workspace_manifest(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    axum::Json(body): axum::Json<ManifestRequest>,
+) -> Response {
+    let Some(ws) = state.store.get_workspace(&SessionCode(code)).await else {
+        return (StatusCode::NOT_FOUND, "no such workspace share").into_response();
+    };
+    if ws.expires_at <= Instant::now() {
+        return (StatusCode::GONE, "workspace share expired").into_response();
+    }
+    if !constant_time_eq(&sha256(body.secret.as_bytes()), &ws.secret_hash) {
+        return (StatusCode::UNAUTHORIZED, "bad secret").into_response();
+    }
+    let resp = ManifestResponse {
+        label: ws.label.clone(),
+        panes: ws
+            .panes
+            .iter()
+            .map(|p| ManifestPane {
+                code: p.code.0.clone(),
+                secret: p.secret.clone(),
+                label: p.label.clone(),
+            })
+            .collect(),
+    };
+    axum::Json(resp).into_response()
+}
+
 fn static_response(body: &'static [u8], content_type: &str) -> Response {
     Response::builder()
         .status(StatusCode::OK)
@@ -770,6 +971,9 @@ pub fn router(
         .route("/ws/:code", get(ws_handler))
         .route("/s/:code", get(viewer_index))
         .route("/s/:code/:name", get(viewer_asset))
+        .route("/w/:code", get(workspace_index))
+        .route("/w/:code/:name", get(workspace_asset))
+        .route("/w/:code/manifest", axum::routing::post(workspace_manifest))
         .with_state(AppState { store, emitter, input_handler })
 }
 
@@ -1236,6 +1440,81 @@ mod tests {
         let kinds: Vec<_> = store.audit_entries().await.iter().map(|e| format!("{:?}", e.event)).collect();
         assert!(kinds.iter().any(|k| k == "InputDropped"));
         assert!(!kinds.iter().any(|k| k == "InputReceived"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_manifest_returns_pane_codes_with_secret() {
+        // Pre-mint two pane shares and a workspace that bundles them; then
+        // hit the manifest endpoint with the right secret and verify the
+        // returned pane list.
+        let store = ShareSessionStore::new();
+        let m1 = store.create(SessionCode("p1".into()), "pane-a".into(), SharePermission::Read, Duration::from_secs(30), false).await;
+        let m2 = store.create(SessionCode("p2".into()), "pane-b".into(), SharePermission::Read, Duration::from_secs(30), false).await;
+        let entries = vec![
+            WorkspacePaneEntry { code: SessionCode("p1".into()), secret: m1.secret.clone(), label: "Tab · pane A".into(), target_pane_id: "pane-a".into() },
+            WorkspacePaneEntry { code: SessionCode("p2".into()), secret: m2.secret.clone(), label: "Tab · pane B".into(), target_pane_id: "pane-b".into() },
+        ];
+        let ws_secret = store
+            .create_workspace(SessionCode("wsx".into()), "My Workspace".into(), entries, Duration::from_secs(60))
+            .await;
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None, None).await.unwrap();
+
+        // 1. Landing page is served when the workspace exists.
+        let landing = reqwest::get(format!("http://{addr}/w/wsx")).await.unwrap();
+        assert_eq!(landing.status(), 200);
+        assert!(landing.headers().get("content-type").unwrap().to_str().unwrap().starts_with("text/html"));
+
+        // 2. Manifest with wrong secret → 401.
+        let bad = reqwest::Client::new()
+            .post(format!("http://{addr}/w/wsx/manifest"))
+            .json(&serde_json::json!({ "secret": "nope" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), 401);
+
+        // 3. Manifest with right secret → JSON with both pane codes + secrets.
+        let good = reqwest::Client::new()
+            .post(format!("http://{addr}/w/wsx/manifest"))
+            .json(&serde_json::json!({ "secret": ws_secret }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(good.status(), 200);
+        let body: serde_json::Value = good.json().await.unwrap();
+        assert_eq!(body["label"], "My Workspace");
+        let panes = body["panes"].as_array().unwrap();
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0]["code"], "p1");
+        assert_eq!(panes[0]["secret"], m1.secret);
+        assert_eq!(panes[1]["code"], "p2");
+        assert_eq!(panes[1]["secret"], m2.secret);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_landing_404s_for_unknown_code() {
+        let store = ShareSessionStore::new();
+        let (addr, _h) = serve(([127, 0, 0, 1], 0).into(), store, None, None).await.unwrap();
+        let resp = reqwest::get(format!("http://{addr}/w/missing")).await.unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoking_workspace_revokes_bundled_pane_shares() {
+        let store = ShareSessionStore::new();
+        store.create(SessionCode("pa".into()), "a".into(), SharePermission::Read, Duration::from_secs(30), false).await;
+        store.create(SessionCode("pb".into()), "b".into(), SharePermission::Read, Duration::from_secs(30), false).await;
+        let entries = vec![
+            WorkspacePaneEntry { code: SessionCode("pa".into()), secret: "x".into(), label: "a".into(), target_pane_id: "a".into() },
+            WorkspacePaneEntry { code: SessionCode("pb".into()), secret: "y".into(), label: "b".into(), target_pane_id: "b".into() },
+        ];
+        store.create_workspace(SessionCode("ws".into()), "L".into(), entries, Duration::from_secs(60)).await;
+        assert!(store.get(&SessionCode("pa".into())).await.is_some());
+        let revoked = store.revoke_workspace(&SessionCode("ws".into())).await;
+        assert!(revoked);
+        assert!(store.get(&SessionCode("pa".into())).await.is_none(), "pa should be gone after workspace revoke");
+        assert!(store.get(&SessionCode("pb".into())).await.is_none(), "pb should be gone after workspace revoke");
+        assert!(store.get_workspace(&SessionCode("ws".into())).await.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -3511,6 +3511,20 @@ body.has-tabs #empty-state { display: none; }
 }
 .collab-panel-header-actions button:hover { color: var(--text-primary, #eee); }
 
+.collab-panel-share-workspace {
+  background: rgba(56,189,248,0.12) !important;
+  border: 1px solid rgba(56,189,248,0.32) !important;
+  border-radius: 4px !important;
+  color: #c0e8ff !important;
+  font-size: 11px !important;
+  padding: 3px 8px !important;
+  margin-right: 4px;
+}
+.collab-panel-share-workspace:hover {
+  background: rgba(56,189,248,0.22) !important;
+  color: #ddf3ff !important;
+}
+
 .collab-panel-tabs {
   display: flex;
   border-bottom: 1px solid var(--border, #333);

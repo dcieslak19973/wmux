@@ -2856,9 +2856,24 @@ print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get
 // `start_session_stream` (search for `for_each_share_on_pane`).
 
 use crate::collab_server::{
-    AuditEntry, ShareInfo, ShareSessionStore,
+    AuditEntry, ShareInfo, ShareSessionStore, WorkspacePaneEntry, WorkspaceShareInfo,
 };
 use collab_proto::{SessionCode, SharePermission};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspacePaneSpec {
+    pub pane_id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceMintResult {
+    pub code: String,
+    pub secret: String,
+    pub server_port: u16,
+    pub path: String,
+    pub info: WorkspaceShareInfo,
+}
 
 /// Tracks whether the collab HTTP/WS server has been bound, and on what
 /// port. Managed as Tauri state; populated on first `share_pane` call.
@@ -2972,6 +2987,130 @@ pub async fn revoke_share(
     store: State<'_, ShareSessionStore>,
 ) -> Result<bool, String> {
     Ok(store.inner().revoke(&SessionCode(code)).await)
+}
+
+/// Mint a workspace share that bundles one pane share per supplied pane
+/// spec. The host frontend enumerates which panes from the current
+/// workspace to include (terminals with a session id, typically) and
+/// passes them in `panes`. All bundled shares get the same permission,
+/// TTL, and mutual-confirm setting.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn share_workspace(
+    app: AppHandle,
+    workspace_label: String,
+    panes: Vec<WorkspacePaneSpec>,
+    ttl_seconds: u64,
+    require_mutual_confirm: Option<bool>,
+    permission: Option<SharePermission>,
+    store: State<'_, ShareSessionStore>,
+    handle: State<'_, CollabServerHandle>,
+    manager: State<'_, SessionManager>,
+) -> Result<WorkspaceMintResult, String> {
+    if panes.is_empty() {
+        return Err("workspace has no shareable panes".to_string());
+    }
+
+    // Boot the collab server if it isn't running yet — same logic as
+    // share_pane, kept inline rather than extracted because the closures
+    // capture command-local state (app handle + session manager clone).
+    let port = match handle.port() {
+        Some(p) => p,
+        None => {
+            let emitter_app = app.clone();
+            let emitter: crate::collab_server::CollabEventEmitter = std::sync::Arc::new(
+                move |event: &str, payload: serde_json::Value| {
+                    let _ = emitter_app.emit(event, payload);
+                },
+            );
+            let sm = manager.inner().clone();
+            let input_handler: crate::collab_server::CollabInputHandler = std::sync::Arc::new(
+                move |pane_id: &str, bytes: &[u8]| {
+                    let sm = sm.clone();
+                    let pane_id = pane_id.to_string();
+                    let bytes = bytes.to_vec();
+                    tauri::async_runtime::spawn(async move {
+                        sm.write_to(&pane_id, &bytes).await;
+                    });
+                },
+            );
+            let (addr, _h) = crate::collab_server::serve(
+                ([0, 0, 0, 0], 0).into(),
+                store.inner().clone(),
+                Some(emitter),
+                Some(input_handler),
+            )
+            .await
+            .map_err(|e| format!("collab server bind failed: {e}"))?;
+            handle.set_port(addr.port());
+            addr.port()
+        }
+    };
+
+    let ttl = std::time::Duration::from_secs(ttl_seconds.max(60));
+    let perm = permission.unwrap_or(SharePermission::Read);
+    let mc = require_mutual_confirm.unwrap_or(false);
+
+    // Mint one pane share per spec, collecting the workspace entries.
+    let mut entries: Vec<WorkspacePaneEntry> = Vec::with_capacity(panes.len());
+    for spec in &panes {
+        let pane_code_str = short_session_code();
+        let pane_code = SessionCode(pane_code_str.clone());
+        let minted = store
+            .inner()
+            .create(pane_code.clone(), spec.pane_id.clone(), perm, ttl, mc)
+            .await;
+        entries.push(WorkspacePaneEntry {
+            code: pane_code,
+            secret: minted.secret,
+            label: spec.label.clone(),
+            target_pane_id: spec.pane_id.clone(),
+        });
+    }
+
+    // Mint the workspace bundle pointing at those pane shares.
+    let workspace_code_str = short_session_code();
+    let workspace_code = SessionCode(workspace_code_str.clone());
+    let workspace_secret = store
+        .inner()
+        .create_workspace(
+            workspace_code.clone(),
+            workspace_label,
+            entries,
+            ttl,
+        )
+        .await;
+
+    let info = store
+        .inner()
+        .list_workspaces()
+        .await
+        .into_iter()
+        .find(|w| w.code == workspace_code_str)
+        .ok_or_else(|| "workspace vanished immediately after mint".to_string())?;
+
+    Ok(WorkspaceMintResult {
+        code: workspace_code_str.clone(),
+        secret: workspace_secret,
+        server_port: port,
+        path: format!("/w/{workspace_code_str}"),
+        info,
+    })
+}
+
+#[tauri::command]
+pub async fn revoke_workspace_share(
+    code: String,
+    store: State<'_, ShareSessionStore>,
+) -> Result<bool, String> {
+    Ok(store.inner().revoke_workspace(&SessionCode(code)).await)
+}
+
+#[tauri::command]
+pub async fn list_active_workspace_shares(
+    store: State<'_, ShareSessionStore>,
+) -> Result<Vec<WorkspaceShareInfo>, String> {
+    Ok(store.inner().list_workspaces().await)
 }
 
 #[tauri::command]

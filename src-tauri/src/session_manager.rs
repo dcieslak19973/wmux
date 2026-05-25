@@ -219,7 +219,7 @@ impl ShellTarget {
                 args.push("-q".to_string());
                 args.push("-c".to_string());
                 args.push(quote_windows_cmd_arg(
-                    r#"exec "$(getent passwd "$USER" | cut -d: -f7)""#,
+                    r#"_sh=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7); exec "${_sh:-${SHELL:-/bin/bash}}""#,
                 ));
                 args.push("/dev/null".to_string());
                 Ok(if args.is_empty() {

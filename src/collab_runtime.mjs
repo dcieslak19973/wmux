@@ -25,6 +25,7 @@ export function createCollabRuntime({
   // paneId → Set<shareCode>
   const sharesByPane = new Map();
   let cachedAddresses = [];
+  let cachedTailscale = null; // { state, dns_name, tailscale_ips, error }
   let cachedPort = null;
   let panelEl = null;
   let refreshTimer = null;
@@ -34,6 +35,14 @@ export function createCollabRuntime({
       cachedAddresses = await invoke('list_local_addresses');
     } catch {
       cachedAddresses = [];
+    }
+  }
+
+  async function loadTailscaleStatus() {
+    try {
+      cachedTailscale = await invoke('detect_tailscale_status');
+    } catch {
+      cachedTailscale = { state: 'error', dns_name: null, tailscale_ips: [], error: 'detect failed' };
     }
   }
 
@@ -122,12 +131,51 @@ export function createCollabRuntime({
 
   // ── Share dialog ────────────────────────────────────────────────────────
 
+  // Returns [{ kind, host, url }] grouped by reach: 'tailnet-dns' (preferred
+  // MagicDNS name), 'tailnet-ip' (raw 100.x), 'lan' (non-loopback IPv4 on
+  // a local interface), 'loopback' (fallback).
   function urlsForShare(info, secret) {
     const port = cachedPort;
     if (!port) return [];
-    const hostList = cachedAddresses.length ? cachedAddresses : ['localhost'];
     const frag = `#t=${encodeURIComponent(secret)}`;
-    return hostList.map((host) => `http://${host}:${port}${info.path}${frag}`);
+    const out = [];
+    const make = (kind, host) => ({ kind, host, url: `http://${host}:${port}${info.path}${frag}` });
+
+    if (cachedTailscale?.state === 'running') {
+      if (cachedTailscale.dns_name) out.push(make('tailnet-dns', cachedTailscale.dns_name));
+      for (const ip of cachedTailscale.tailscale_ips || []) {
+        if (ip.includes(':')) continue; // skip IPv6 for clarity; user usually wants v4
+        out.push(make('tailnet-ip', ip));
+      }
+    }
+    for (const addr of cachedAddresses) out.push(make('lan', addr));
+    if (out.length === 0) out.push(make('loopback', 'localhost'));
+    return out;
+  }
+
+  const URL_KIND_LABELS = {
+    'tailnet-dns': 'Tailnet (DNS)',
+    'tailnet-ip': 'Tailnet',
+    'lan': 'LAN',
+    'loopback': 'Loopback',
+  };
+
+  function tailscaleHintHtml() {
+    const ts = cachedTailscale;
+    if (!ts) return '';
+    if (ts.state === 'running') {
+      return `<span class="collab-share-tailscale-ok">Tailscale running &mdash; viewers anywhere on your tailnet can reach the Tailnet URLs above.</span>`;
+    }
+    if (ts.state === 'needs_login') {
+      return `<span class="collab-share-tailscale-warn">Tailscale installed but not logged in. Run <code>tailscale login</code> for cross-network access.</span>`;
+    }
+    if (ts.state === 'stopped') {
+      return `<span class="collab-share-tailscale-warn">Tailscale is stopped. Start it for cross-network access.</span>`;
+    }
+    if (ts.state === 'not_installed') {
+      return `<span class="collab-share-tailscale-warn">Tailscale not installed &mdash; LAN-only. Install from <a href="https://tailscale.com/download" target="_blank" rel="noopener">tailscale.com/download</a> for cross-network sharing.</span>`;
+    }
+    return `<span class="collab-share-tailscale-warn">Tailscale detection error${ts.error ? `: ${escHtml(ts.error)}` : ''}.</span>`;
   }
 
   function showShareDialog(paneId, mint) {
@@ -154,6 +202,7 @@ export function createCollabRuntime({
         <div class="collab-share-row collab-share-row-stack">
           <span class="collab-share-label">URLs (pick one your viewer can reach)</span>
           <div class="collab-share-urls"></div>
+          <div class="collab-share-tailscale-hint"></div>
         </div>
         <div class="collab-share-row">
           <span class="collab-share-label">Permission</span>
@@ -174,15 +223,16 @@ export function createCollabRuntime({
     if (urls.length === 0) {
       urlsContainer.innerHTML = '<div class="collab-share-empty">No reachable IP detected. Try the loopback URL or check that the collab server bound to a network interface.</div>';
     } else {
-      for (const url of urls) {
+      for (const entry of urls) {
         const row = document.createElement('div');
-        row.className = 'collab-share-url-row';
+        row.className = `collab-share-url-row collab-share-url-row-${entry.kind}`;
         row.innerHTML = `
-          <code class="collab-share-url">${escHtml(url)}</code>
+          <span class="collab-share-url-pill collab-share-url-pill-${entry.kind}">${escHtml(URL_KIND_LABELS[entry.kind] ?? entry.kind)}</span>
+          <code class="collab-share-url">${escHtml(entry.url)}</code>
           <button class="collab-share-copy" title="Copy URL">Copy</button>
         `;
         row.querySelector('.collab-share-copy').addEventListener('click', () => {
-          navigator.clipboard?.writeText(url).then(() => {
+          navigator.clipboard?.writeText(entry.url).then(() => {
             showToast?.('URL copied to clipboard', 'success');
           }).catch(() => {
             showError?.('Copy failed');
@@ -191,6 +241,10 @@ export function createCollabRuntime({
         urlsContainer.appendChild(row);
       }
     }
+
+    // Tailscale hint line — informative, never blocking.
+    const hintEl = dialog.querySelector('.collab-share-tailscale-hint');
+    if (hintEl) hintEl.innerHTML = tailscaleHintHtml();
     dialog.querySelector('.collab-share-dialog-close').addEventListener('click', closeShareDialog);
     dialog.querySelector('[data-action="done"]').addEventListener('click', closeShareDialog);
     dialog.querySelector('[data-action="revoke"]').addEventListener('click', async () => {
@@ -211,7 +265,10 @@ export function createCollabRuntime({
 
   async function startShareForPane(paneId) {
     closeShareDialog();
-    await loadAddresses(); // refresh interface list every share
+    // Refresh interface + Tailscale state every share so the dialog shows
+    // current URLs (laptop may have moved networks, daemon may have logged
+    // out, etc.).
+    await Promise.all([loadAddresses(), loadTailscaleStatus()]);
     try {
       const mint = await invoke('share_pane', {
         targetPaneId: paneId,

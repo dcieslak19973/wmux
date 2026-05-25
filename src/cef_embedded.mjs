@@ -155,8 +155,10 @@ export async function createCefEmbeddedSurface(mountEl, url) {
   });
 
   ws.addEventListener('close', (e) => {
-    console.warn('[cef-embed] WebSocket closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
-    if (!container.isConnected) return; // dispose path
+    if (!container.isConnected) return; // legitimate dispose — silent
+    console.warn('[cef-embed] WebSocket closed unexpectedly', {
+      code: e.code, reason: e.reason, wasClean: e.wasClean,
+    });
     status.textContent = 'CDP disconnected';
     status.style.color = '#9ca3af';
   });

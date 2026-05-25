@@ -2664,6 +2664,45 @@ pub async fn check_shell_integration() -> Result<bool, String> {
     Ok(content.contains(SHELL_INTEGRATION_PS1.trim_end()))
 }
 
+impl RemoteShellKind {
+    /// Wire string returned to the frontend. Bash and zsh both accept
+    /// the same $'…' agent quoting, so we collapse them into "bash" for
+    /// the buildFixCmd dispatch. Fish is its own variant.
+    fn as_frontend_str(&self) -> &'static str {
+        match self {
+            RemoteShellKind::Bash | RemoteShellKind::Zsh => "bash",
+            RemoteShellKind::Fish => "fish",
+        }
+    }
+}
+
+/// Frontend helper: detect the login shell of a WSL distro so panes
+/// can dispatch fix-agent / ask-agent commands with the right quoting.
+/// Returns "bash" (covers bash + zsh) or "fish". Cheap call: one
+/// wsl.exe + getent round-trip.
+#[tauri::command]
+pub async fn detect_login_shell_wsl(distro: Option<String>) -> Result<String, String> {
+    let kind = detect_wsl_login_shell(distro.as_deref());
+    Ok(kind.as_frontend_str().to_string())
+}
+
+/// Frontend helper: detect the login shell on a remote SSH host. Same
+/// return shape as the WSL variant.
+#[tauri::command]
+pub async fn detect_login_shell_ssh(
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<String, String> {
+    let kind = tokio::task::spawn_blocking(move || {
+        detect_ssh_login_shell(&host, user.as_deref(), port, identity_file.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(kind.as_frontend_str().to_string())
+}
+
 /// Detect the user's login shell inside WSL by reading /etc/passwd.
 /// Falls back to bash if anything fails so subsequent install commands
 /// still produce a meaningful result.

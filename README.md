@@ -233,3 +233,4 @@ For remote tmux specifically, the current contract is one wmux terminal tab equa
 - [ ] Continue improving restore fidelity for more transient UI state and cross-window coordination.
 - [ ] Replace xterm.js renderer with Ghostty/wgpu terminal for GPU acceleration
 - [ ] Git worktree isolation — give each parallel agent its own git worktree so multiple agents can work on separate branches simultaneously without interfering with each other's working tree.
+- [ ] **Multiplayer / collaboration** — pair-terminal-ing, remote-yourself, and agent supervision. LAN-first design, Tailscale for cross-network access. See [`docs/multiplayer-design.md`](docs/multiplayer-design.md) for the architecture and phased plan, and [`docs/adr/0001-multiplayer-via-tailscale.md`](docs/adr/0001-multiplayer-via-tailscale.md) for why we chose Tailscale over a custom rendezvous server.

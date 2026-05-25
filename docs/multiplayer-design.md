@@ -1,51 +1,53 @@
 # wmux Multiplayer — Design & Implementation Plan
 
-> Real-time collaboration for wmux: share panes with coworkers, connect to your own work machine from elsewhere, supervise agents together. Peer-to-peer by default, tiny rendezvous server, no required identity provider.
+> Real-time collaboration for wmux: share panes with coworkers on the same network, connect to your own work machine from elsewhere, supervise agents together. **LAN-first** — no rendezvous server, no signaling broker, no WebRTC. Cross-network access piggybacks on Tailscale.
 
 ## Why
 
 Zed's killer feature is the multiplayer/Live Share-style system that lets two engineers pair-program from a single workspace. wmux's analog is **pair-terminal-ing + remote-yourself + agent-supervision**: collaborate on (or self-access) the surfaces we already have — panes, agents, workspaces, blocks — rather than text buffers.
 
-What this doc is: an end-to-end architecture proposal plus a phased implementation plan with concrete tasks.
+What this doc is: an end-to-end architecture proposal plus a phased implementation plan.
 
 What this doc is **not**: a finished spec. Open questions are called out as we go.
+
+This doc supersedes an earlier version that proposed a custom Axum rendezvous server + WebRTC + bundled TURN. The "Rejected alternatives" section at the bottom records why that was scrapped — short version: most pair-terminal use cases are LAN-local, and "remote yourself" is exactly what Tailscale was built for. Building our own NAT-traversal stack to solve a problem someone else already solved was a waste.
 
 ---
 
 ## Use cases the design must serve
 
-Two distinct trust models, both common, both deserving first-class support.
-
-### A. Pair with someone else
+### A. Pair with someone on the same network
 
 - "Look over my shoulder while I debug this prod issue"
 - "Pair on this refactor in shared terminals"
 - "Audit what my coworker's Claude agent just did"
 
-Properties: short-lived (minutes to hours), shared with one or two specific people, link expires automatically.
+Properties: short-lived, both peers on the same LAN / corp VPN / Wi-Fi, link expires automatically. **This is the 80% case.**
 
-### B. Remote-yourself
+### B. Remote-yourself across networks
 
 - "Leave wmux running at work, peek at the build from my phone on the train"
 - "iPad on the couch, see the running deploy on my desktop"
-- "Generate a token once for my phone, use it for months"
 
-Properties: long-lived (days to weeks), one user across multiple devices, intermittent connectivity, cellular ↔ corporate-firewall NAT path.
+Properties: long-lived, one user across multiple devices, intermittent cellular connectivity, **the two endpoints are on different networks**. Needs explicit cross-network help — Tailscale provides it.
 
-Both use the **same wire protocol and the same connection topology** — they differ only in the auth-token type and lifetime, not in mechanism. Build them together.
+### C. Pair with someone on a different network
+
+- "Remote coworker wants to look at my session over their LTE / home Wi-Fi"
+
+Same trust model as A, same transport need as B. We assume the coworker is willing to install Tailscale and join a shared tailnet — same infra as B, no additional architecture.
 
 ### Distribution assumption
 
-90%+ of sharing sessions are expected to be one host + one viewer. The long tail (1 host + several viewers, demo-style fan-out) is rare. This distribution shapes the architecture decision below.
+90%+ of sharing sessions are one host + one viewer. Fan-out (1 host + many viewers) is rare enough to be Phase 6's problem.
 
 ### Non-goals
 
-Decisions we are explicitly **not** doing, so they don't keep coming back as open questions:
-
-- **Voice / video calling inside wmux.** Users already have Zoom, Slack huddles, Teams, Discord. Building this in is meaningful complexity for marginal differentiation. Anyone who wants voice while pairing can keep a separate call open.
-- **Project-hosted community rendezvous service.** We won't run a "wmux.io/collab" instance ourselves — it's an ongoing operations + abuse-handling + security burden we're not signing up for. Self-hosting is the only supported path. See the "Hosting the rendezvous" section below for what we *do* support.
-- **Native mobile app.** A PWA web viewer covers the mobile use case at a fraction of the cost. No iOS or Android project.
-- **Per-user "device family" abstraction.** A self-token maps to exactly one (device, host) pair. Accessing N machines from one phone means generating N tokens. Unifying via a per-user account is the obvious refactor, but it's effectively reintroducing OAuth/accounts as a base requirement — we're keeping things simple instead. N tokens per device-host pair is by design, not a TODO.
+- **Voice / video calling inside wmux.** Users have Zoom / Slack / Teams.
+- **Project-hosted rendezvous service.** We're not running infra for users.
+- **Native mobile app.** PWA covers it.
+- **Custom NAT traversal.** Tailscale's coordination server + DERP relay network is operational, free for the use cases wmux cares about, and more battle-tested than anything we'd build.
+- **A "viewer doesn't need to install anything" cross-network story.** This was the requirement that forced WebRTC + custom signaling in the old design. We're explicitly dropping it: cross-network viewers install Tailscale once. Within-network viewers don't install anything.
 
 ---
 
@@ -54,306 +56,237 @@ Decisions we are explicitly **not** doing, so they don't keep coming back as ope
 | System | Topology | Sync primitive | Strengths | Mismatch for wmux |
 |---|---|---|---|---|
 | **[Zed](https://zed.dev/docs/collaboration/overview)** | Centralized [Axum collab server](https://deepwiki.com/zed-industries/zed/11-collaboration-and-remote-development), [RPC over WS + protobuf](https://deepwiki.com/zed-industries/zed/11.1-project-panel), [LiveKit](https://github.com/zed-industries/zed/blob/main/livekit.yaml) for voice | [CRDTs for buffers](https://zed.dev/blog/crdts) | Polished UX | Editor-centric; CRDTs don't map to PTY streams; central relay model |
-| **[VS Code Live Share](https://learn.microsoft.com/en-us/visualstudio/liveshare/use/share-server-visual-studio-code)** | MS-hosted relay, E2E encrypted | File-system sync + terminal sharing | Cheap bandwidth, terminal sharing already a feature | Closed SaaS; won't fly in restricted-data environments |
-| **[P2P Live Share](https://github.com/kermanx/p2p-live-share)** | WebRTC direct between peers | Same idea minus relay | Proves P2P is feasible for this use case | Editor-centric still |
-| **[tmate](https://cloudthrill.ca/how-to-remotely-share-your-terminal)** | Public SSH infrastructure | Plain byte stream | Battle-tested, zero install for viewer | No persistent identity / remote-yourself flow |
+| **[VS Code Live Share](https://learn.microsoft.com/en-us/visualstudio/liveshare/use/share-server-visual-studio-code)** | MS-hosted relay, E2E encrypted | File-system sync + terminal sharing | Cheap bandwidth | Closed SaaS; won't fly in restricted-data environments |
+| **[tmate](https://cloudthrill.ca/how-to-remotely-share-your-terminal)** | Public SSH infrastructure | Plain byte stream | Battle-tested | No persistent identity; viewer needs SSH client |
 | **[Warp Session Sharing](https://docs.warp.dev/knowledge-and-collaboration/session-sharing)** | Warp cloud, shareable link | Cloud-published stream | Closest to "wmux but with sharing" | Closed SaaS; mandatory cloud account |
-| **[Tailscale](https://tailscale.com/)** (architectural inspiration only) | WireGuard mesh + coordination server + DERP relay fallback | TCP/UDP tunnels | Solves remote-yourself perfectly | Not session-aware; users must already be on a tailnet |
+| **[Tailscale](https://tailscale.com/)** | WireGuard mesh + coordination + DERP fallback | TCP/UDP tunnels | Solves cross-network access generically | None — we're using it directly |
 
 **Takeaways:**
-- Centralized "relays every byte" is overkill for our 1↔1-dominant distribution. P2P avoids it.
-- A small rendezvous server is still useful — for NAT-traversal signaling, hosting a web viewer, optionally for TURN fallback when direct connection fails.
-- OAuth/SAML/IdP is the *enterprise* answer, not the *default* answer. A token-based pairing model works for the OSS / solo-developer case with no IdP at all.
+- For same-network sharing, every line of NAT-traversal code is dead weight. Bind an HTTP/WS server and ship.
+- For cross-network access, the work has already been done — by Tailscale, in production, for years.
 
 ---
 
 ## Architecture
 
-### Topology: P2P with thin rendezvous
+### Topology: HTTP server in wmux + Tailscale for cross-network
 
 ```
-   ┌───────────┐                    ┌─────────────────┐                    ┌────────────┐
-   │  Host     │                    │  rendezvous     │                    │  Viewer    │
-   │  wmux     │◄─── signaling ───►│  server         │◄─── signaling ───►│  (wmux or  │
-   │           │     (WSS)          │  (Axum, ~500    │     (WSS)          │  web PWA)  │
-   │           │                    │   lines + tiny  │                    │            │
-   │           │                    │   SQLite)       │                    │            │
-   │           │                    └─────────────────┘                    │            │
-   │           │                                                            │            │
-   │           │◄══════════ WebRTC RTCDataChannel (direct, P2P) ═══════════►│            │
-   │           │                                                            │            │
-   │           │                  ┌──────────────┐                          │            │
-   │           │◄── STUN ────────►│  STUN server │                          │            │
-   │           │ "my public IP?"  │  (public,    │                          │            │
-   │           │                  │  free)       │                          │            │
-   │           │                  └──────────────┘                          │            │
-   │           │                                                            │            │
-   │           │◄═════════════ TURN relay (fallback only) ════════════════►│            │
-   │           │                  ┌──────────────┐                          │            │
-   │           │                  │  TURN server │  used only when direct  │            │
-   │           │                  │  (coturn,    │  WebRTC fails (~25% on  │            │
-   │           │                  │  bundled)    │  corporate ↔ cellular)  │            │
-   │           │                  └──────────────┘                          │            │
-   └───────────┘                                                            └────────────┘
+   ┌─────────────────┐                                ┌────────────┐
+   │  Host wmux      │                                │  Viewer    │
+   │                 │                                │  (browser  │
+   │  ┌───────────┐  │  ◄── WebSocket (binary) ────►  │  PWA or    │
+   │  │ HTTP/WS   │  │                                │  wmux)     │
+   │  │ server    │  │                                │            │
+   │  │ on local  │  │                                │            │
+   │  │ interface │  │                                │            │
+   │  └───────────┘  │                                │            │
+   └─────────────────┘                                └────────────┘
+        Same LAN: bind 0.0.0.0:<port>, viewer hits http://host.local:<port>/s/<code>
+        Same Tailnet: bind to Tailnet interface, viewer hits http://<host>.<tailnet>.ts.net:<port>/s/<code>
 ```
 
-The **only piece that's ours in the hot path is the rendezvous**, and it doesn't see session content. Session bytes go P2P over a WebRTC data channel, encrypted by default at the DTLS layer.
+That's it. **No rendezvous server. No signaling broker. No STUN, no TURN, no WebRTC.** A plain HTTP server inside wmux, a WebSocket per active sharing session, a static page that loads xterm.js.
 
-### Why not centralized relay
+Cross-network access works because **Tailscale makes the cross-network case look identical to the same-network case from wmux's perspective.** When both peers are on the same tailnet, the laptop and phone have stable Tailnet IPs that route to each other through Tailscale's WireGuard mesh — wmux doesn't know or care that one of them is on cellular.
 
-An earlier draft of this doc had a centralized relay that fanned out session bytes to all viewers. P2P is preferable because:
+### The two moving parts
 
-- **Under the expected 1↔1 distribution, the fan-out cost the relay was solving never materializes.** With one viewer, the host sends each chunk once whether it's P2P or via a relay. The relay's O(1)-at-server win is irrelevant.
-- **The server never sees content.** Solves the compliance/privacy question by default, not as a v6 add-on.
-- **Lower operational cost.** Rendezvous bandwidth is tiny (signaling messages only); TURN bandwidth is paid only for the ~25% of sessions that need NAT relay.
-- **Direct path is lower latency** than relay-hop for peers on the same continent.
+| Component | What it does | Sees content? |
+|---|---|---|
+| **wmux (host)** | Hosts HTTP server + WebSocket endpoint; serves the PWA viewer's static assets; streams pane output / accepts pane input | Yes (it *is* the endpoint) |
+| **Viewer (PWA in a browser, or another wmux)** | Renders pane state, optionally sends input | Yes (it *is* the endpoint) |
 
-For the rare big-fan-out case (one host, 10+ viewers — demos, team standup), the host can *additively* opt into "also stream to the rendezvous as a recording/fan-out source." That's a Phase 6 bolt-on, not a core architectural concern.
+That's the whole supply chain. **Tailscale is in the path for cross-network access but doesn't see plaintext** — its WireGuard tunnel terminates at the host's Tailscale daemon, which then routes the still-encrypted-by-the-app traffic (we use HTTPS internally) to wmux's HTTP server.
 
-### The four moving parts
-
-| Component | What it does | Who runs it | Sees content? |
-|---|---|---|---|
-| **wmux (host + viewer)** | Hosts an `RTCPeerConnection`, sends/receives session bytes over an `RTCDataChannel` | The end user | Yes (it *is* the endpoint) |
-| **Rendezvous server** | Forwards SDP offers/answers + ICE candidates between peers; serves the web viewer page; maintains long-lived WS to hosts so they can be "called" by remote-self viewers | OSS user self-hosts; community-hosted instance for casual users | **No** |
-| **STUN server** | Tells each peer its public IP/port as seen from the internet | Public free servers (Google, Cloudflare); we don't run this | No |
-| **TURN server** | Encrypted relay when direct WebRTC fails to punch through NAT | Bundled with rendezvous binary (coturn or webrtc-rs's built-in); user runs alongside | **No** (ciphertext only) |
-
-The rendezvous server's job is genuinely small: ~500 lines of Rust + a SQLite token table.
-
-### The session handshake — step by step
+### The session handshake
 
 **Host shares a pane:**
 1. User clicks "Share pane" in wmux.
-2. wmux generates a session code (e.g. `j3k-r9p`), creates a `share` access token in the rendezvous's token table.
-3. wmux opens `wss://collab.wmux/signal/j3k-r9p?role=host`, identified by the token.
-4. wmux creates an `RTCPeerConnection` with STUN + TURN URLs configured.
-5. Returns `https://collab.wmux/s/j3k-r9p#t=<short-secret>` for the user to share.
+2. wmux generates a short session code (e.g. `j3k-r9p`) and an entropy-laden bearer secret. Stores `{code, secret_hash, pane_label, permission, expires_at}` in an in-memory map.
+3. Starts (if not already running) an HTTP/WS server bound to the configured interface. Default: bind to all non-loopback interfaces on a randomized port.
+4. Returns one or more URLs based on what's bindable:
+   - LAN: `http://<host-mDNS-or-IP>:<port>/s/j3k-r9p#t=<secret>`
+   - Tailnet (if Tailscale is up): `http://<host>.<tailnet>.ts.net:<port>/s/j3k-r9p#t=<secret>`
 
 **Viewer joins:**
-1. Opens the URL. Browser PWA or wmux deep-link loads, extracts token from URL fragment.
-2. Opens `wss://collab.wmux/signal/j3k-r9p?role=guest`, identified by token.
-3. Rendezvous matches host + guest, exchanges SDPs and ICE candidates between them.
-4. Both sides converge on a connection path (LAN direct → public-IP direct via STUN → TURN relay), establish the data channel.
-5. Signaling WS can close. Session bytes flow directly between peers.
+1. Opens the URL. The static PWA loads, reads the secret from the URL fragment.
+2. Opens `ws://<host>:<port>/ws/j3k-r9p` and presents the secret as the first message (or as a `Sec-WebSocket-Protocol` header).
+3. Host validates the secret hash, checks expiry, attaches the WebSocket to the pane's output broadcast.
+4. Host sends the initial-state snapshot (SerializeAddon dump) as the first frame.
+5. Bytes flow in both directions over the WebSocket. Same protocol locally as over Tailscale.
 
-**Remote-yourself (slight variation):**
-1. Host's wmux holds a **persistent** signaling WebSocket to the rendezvous, marked with its registered host-device ID.
-2. User's phone (or other device) opens the rendezvous PWA, identifies as the holder of a `self` access token.
-3. Rendezvous looks up "what host does this self-token grant access to?", finds the host's persistent WS, asks it to produce an offer.
-4. Normal WebRTC handshake follows. Data channel is direct between phone and laptop.
+**Remote-yourself:**
+Identical to the above. Your phone hits `http://<your-laptop>.<your-tailnet>.ts.net:<port>/s/<code>` instead of `http://your-laptop.local`. No "persistent host-signaling WebSocket," no "phone home" channel — Tailscale's coordination server is the phone-home channel, and it's already running on both endpoints.
 
-The host being **persistently online with the rendezvous** is the one structural addition for remote-yourself. Same wire protocol, same handshake, just an always-on heartbeat WebSocket so the phone can reach the laptop even when the laptop wasn't expecting a call.
+### Tailscale integration: two options
 
-### Authentication: two token types, zero IdP required
+We've narrowed to two paths. Both work; pick based on the maturity-vs-friction trade.
 
-The auth model is intentionally lightweight: bearer tokens in the URL fragment, scoped at creation time, revocable from the host. No accounts, no SSO, no OAuth — those become enterprise add-ons (Phase 7), not core requirements.
+**Option A — require users to install Tailscale daemon.**
+wmux assumes Tailscale is running on the host machine. It detects the Tailnet interface (via `tailscale status --json` or the local Tailscale API on port 41112) and offers Tailnet URLs in the share UX when available. **One-time install for the user; rock-solid path.** Stable, supported, what most Tailscale users do anyway.
 
-#### Share token
+**Option B — embed Tailscale via `tailscale-rs` (tsnet).**
+wmux brings its own Tailscale stack — no daemon to install. The user still needs a Tailscale account to associate the embedded node with a tailnet, but doesn't have to install or run the daemon separately. **`tailscale-rs` was pre-1.0 experimental preview as of Aug 2025 (per the research that drove this rewrite); current maturity needs to be confirmed before committing.**
 
-- Generated by clicking "Share pane" or "Share workspace" on a specific surface.
-- Short-lived (default 4 hours, configurable).
-- Scoped to a single named surface.
-- Read-only by default; host can promote a specific guest to read-write.
-- **Encoding: raw high-entropy secret carried in the URL fragment**, e.g. `https://collab.example/s/j3k-r9p#t=<256-bit-base64>`. Fragments aren't sent to the server in the HTTP request line and don't appear in server access logs. They do live in the viewer's browser history — but share tokens are short-lived and scoped enough that this is an acceptable trade for the "paste a link" UX.
-- Goes in a Slack DM / IM / paste.
+**Default: Option A.** Smaller surface area, no pre-1.0 dependency. Revisit Option B once `tailscale-rs` hits 1.0 or once enough users object to installing the daemon.
 
-#### Self (personal-access) token
+#### Tailscale vs Headscale: equivalent from wmux's perspective
 
-- Generated once, on the host wmux, from a "Devices" settings panel.
-- Long-lived (default 90 days, auto-renewed when the device connects; user can set "no expiry" or shorter).
-- Scoped to *all* of the host's surfaces — same trust as a desktop login.
-- Read-write.
-- **Encoding: short-lived redemption code, not the raw token.** Host wmux shows a 6–8-character code (e.g. `3-foggy-puppet` style) as a QR + plaintext on screen. New device opens the rendezvous URL, presents the redemption code over WSS, and receives the real long-lived token + saves it to local secure storage (keychain on macOS, Credential Manager on Windows, equivalent on Linux). The redemption code expires after ~5 minutes whether it's been redeemed or not. The real long-lived token never appears in any URL or browser history.
-- Initial transfer to the new device: QR scan on phone, or copy-paste the short code if no camera handy.
+[Headscale](https://github.com/juanfont/headscale) is an open-source reimplementation of Tailscale's coordination server. Users point their Tailscale clients at a Headscale instance they (or their org) run, instead of `controlplane.tailscale.com`. **From wmux's point of view, the two are indistinguishable** — the client on each device is still the regular Tailscale client, `tailscale status --json` returns the same shape, the Tailnet IPs route the same way.
 
-#### Storage
+Headscale users get:
+- No Tailscale account / no third-party trust.
+- No free-tier device caps (Tailscale's free tier is 3 users / 100 devices personal; generous but real).
+- Operational burden: they run the coordination server themselves.
 
-The rendezvous server keeps one small table:
+Whether someone uses Tailscale.com or self-hosts Headscale is **a user choice that doesn't affect wmux's design**. We document both as supported paths, write no special-case code for either.
 
-```sql
-CREATE TABLE access_tokens (
-    token_hash     TEXT PRIMARY KEY,    -- SHA-256 of the secret; we never store the plaintext
-    kind           TEXT NOT NULL,       -- 'share' | 'self'
-    host_device_id TEXT NOT NULL,       -- which wmux instance this token routes to
-    scope          TEXT,                -- 'pane:<label>' | 'workspace:<id>' | 'all'
-    label          TEXT,                -- human-readable: "Dan's iPhone", "Alice for Tuesday review"
-    permission     TEXT NOT NULL,       -- 'read' | 'read-write'
-    created_at     TIMESTAMP,
-    expires_at     TIMESTAMP NULL,
-    last_used_at   TIMESTAMP,
-    revoked_at     TIMESTAMP NULL
-);
-```
+### Authentication
 
-That's the entire identity model. No user accounts needed.
+The auth model is intentionally lightweight: a per-session short code paired with a high-entropy bearer secret in the URL fragment. **No accounts, no SSO, no token-mint server, no IdP.** The host's own running wmux is the issuer.
 
-#### Optional mutual-confirm on first use
+| Property | Value |
+|---|---|
+| Code shape | Human-pasteable short ID, e.g. `j3k-r9p`. ~24 bits — not secret on its own. |
+| Secret shape | 256-bit base64 in URL fragment, e.g. `#t=<hash>`. The actual auth material. |
+| Storage | In-memory map on the host. Lost on wmux restart (which we treat as a feature: shares don't outlive the session). |
+| TTL | Configurable per share. Default 4 hours for pair-share. Default `until wmux exits` for remote-yourself. |
+| Revoke | One click on the share's row in the Devices/Shares panel. |
 
-For security-conscious deployments, a per-device "trust on first use" prompt: when a new device presents a previously-unseen IP/UA combination against a self-token, the host wmux pops a dialog: *"New device 'iPhone (cellular, AT&T)' connecting. Allow? [Allow] [Allow once] [Deny]"*. SSH-style known-hosts pattern, inverted (host-side rather than client-side). Off by default (token is enough); toggle-on in settings.
+Why URL-fragment, not URL-path: fragments don't appear in server access logs, proxy logs, or HTTP request lines. They do live in the viewer's browser history, but for short-lived share codes that's an acceptable trade.
+
+The **server-side audit log** (every connect/disconnect/byte count) lives on the host's local disk only. No third party sees it.
+
+### Trust model & threat scenarios
+
+In-scope, addressed:
+- **Eavesdropping inside the LAN.** For untrusted LANs (coffee shop), generate a self-signed cert and bind HTTPS — see Open Question #1 below.
+- **Eavesdropping in transit cross-network.** Tailscale's WireGuard tunnel is the answer.
+- **Replay of expired share codes.** Server enforces `expires_at` and `revoked_at` in-memory.
+- **Bearer-token theft via screenshot.** Short default TTLs + revocation.
+
+Out-of-scope:
+- **Compromised host machine.** Outside multiplayer's scope.
+- **Bearer-token phishing.** Same mitigations as the old design: short TTLs, optional "confirm on first connection from a new IP" toggle.
 
 ### Object model
 
-The rendezvous tracks three first-class concepts:
+The host wmux tracks two first-class concepts:
 
-1. **Session** — an active sharing arrangement. Identified by a short URL-friendly code.
-2. **Surface** — a single shared thing inside a session: a pane, a workspace, an agent. Surfaces have a kind (`pane:terminal`, `pane:agent`, `workspace`) and a permission level (`read`, `read-write`, `admin`).
-3. **Participant** — a viewer/collaborator connected to a session with a specific role, attached to an access token.
+1. **ShareSession** — an active sharing arrangement. Identified by a short code. Holds the secret, pane reference, expiry, permission level, and the list of currently-connected participants.
+2. **Participant** — a WebSocket connection currently attached to a ShareSession. Has a participant ID, an IP/UA fingerprint, and a permission level (inherited from the share or promoted by the host).
 
-Each session is created by a specific access token; each participant connection is gated by token validity.
+The previous design had a separate `Surface` abstraction; in the simpler model, `ShareSession` directly references the pane/workspace/agent being shared.
 
-### What gets synced and how — by surface kind
+### What gets synced — by surface kind
 
-| Surface kind | Source of truth | Sync mechanism | Conflict resolution |
-|---|---|---|---|
-| Terminal pane (read-only) | Host's ConPTY output stream | Broadcast bytes over WebRTC data channel as length-framed records | None needed |
-| Terminal pane (read-write) | Host's ConPTY, multiple writers | Broadcast output; guests' input multiplexed back to host's `write_to_session` command | "Whoever's bytes arrive first wins"; PTY linearizes naturally |
-| Workspace layout | Host's `layout_state` JSON | Periodic snapshot + delta events | Host-authoritative; v3+: CRDT (Yrs) if co-edit becomes a real need |
-| Agent pane state | Host's pane block-store + agent-state hooks | Event stream of agent-state transitions, separate from terminal bytes | Host-authoritative |
-| Cursor / selection in browser-pane URL bar | Per-participant | Ephemeral broadcast over data channel | None |
+| Surface kind | Source of truth | Sync mechanism |
+|---|---|---|
+| Terminal pane (read-only) | Host's ConPTY output | Length-framed byte chunks over the WebSocket |
+| Terminal pane (read-write) | Host's ConPTY, multiple writers | Output broadcast; viewer input forwarded to `write_to_session` |
+| Workspace layout | Host's `layout_state` JSON | Periodic snapshot + delta on change |
+| Agent pane state | Host's pane block-store + agent-state hooks | Parallel event stream alongside terminal bytes |
 
-For v1 we ship **read-only terminal pane streaming** and **workspace layout snapshots**. That's the minimal unit of value.
-
-### Threat model
-
-In-scope:
-- Eavesdropping on a session by anyone without the token (defeated by WebRTC's DTLS encryption + token-scoped signaling).
-- Rendezvous server impersonation (TLS on the WSS endpoint).
-- Replay of expired share tokens (server enforces `expires_at` and `revoked_at`).
-- Token theft via screenshot or shoulder-surfing (high-entropy tokens; tokens in URL fragments so they don't appear in server access logs; revoke + regenerate).
-
-Out-of-scope (v1, addressed in later phases or layers):
-- Bearer-token phishing — if user is tricked into sending their `self` token to an attacker, the attacker gets access until revocation. Mitigations: short-ish default TTLs, optional mutual-confirm-on-first-use, public-key device pairing as a v8+ upgrade.
-- DDoS abuse of the rendezvous — assumed small-team usage; layer in rate-limiting as the project grows.
-- Compromised host machine — outside the scope of multiplayer.
-
-### Critical UX choices
-
-- **Read-only by default for share links.** Promoting a guest to read-write is an explicit host action ("Grant Alice write access").
-- **Per-surface scope, not per-session.** A share token authorizes one pane (or one workspace's enumerated panes). You explicitly nominate what to share.
-- **In-app collaborator presence indicator.** Each shared pane shows a small badge of who's currently viewing it, color-coded by participant.
-- **Devices settings panel.** wmux Settings → Devices → list of active self-tokens with labels, last-seen times, revoke buttons. Personal-access-link revocation has to be one click.
-- **Audit log on the host, not the server.** Every connection/disconnection/permission-change/byte-count is logged at the host, signed by the participant's token. The audit log lives on the host's local disk.
-- **Web viewer is feature-parity for read-only.** Pane bytes stream into stock xterm.js. The web viewer is installable as a PWA so it's home-screen-able on phones.
+For Phase 1 we ship **read-only terminal pane streaming**.
 
 ---
 
 ## Phased implementation plan
 
-### Phase 0 — Foundation (3–4 days)
+### Phase 0 — Foundation
 
-Scaffolding for everything that follows. End state: wmux instances can authenticate to the rendezvous via tokens and exchange a "hello" over a data channel. No useful sharing yet.
-
-**Tasks:**
-
-- [ ] **0.1 — New crate `collab-server`** in the workspace. Axum + tokio + sqlx (SQLite) + tower. Single binary entry. Health endpoint. Dockerfile. Bundles a TURN server (coturn or webrtc-rs's TURN feature) on the same binary or as a sibling process.
-- [ ] **0.2 — Protocol crate `collab-proto`** shared between server and wmux. Signaling envelope (Offer/Answer/IceCandidate/Hello) + session-layer messages (OutputChunk/InputChunk/LayoutDelta). Serde-JSON for v0.x — switch to bincode later if bandwidth matters.
-- [ ] **0.3 — Rendezvous schema** for `access_tokens`, `sessions`, `signaling_messages` (transient), `audit_log`. SQLite migrations via `refinery` or `sqlx-cli`.
-- [ ] **0.4 — Token mint/redeem endpoints** in the rendezvous. `POST /tokens` (authenticated by an existing token; bootstrap via a server-config secret for first token), `DELETE /tokens/:hash`, `GET /tokens` (list for revocation UI). Plus the WSS endpoints `/signal/:code` for hosts and guests.
-- [ ] **0.5 — wmux `CollabClient` state** managed by Tauri. Knows the rendezvous URL, persists tokens to wmux's user-data-dir, opens the persistent host-WS, manages an `RTCPeerConnection` (via `webrtc-rs`) per active session.
-- [ ] **0.6 — Devices settings panel.** Lists self-tokens, lets user mint a new one (shows QR + URL), revoke an existing one. Lists active host sessions and their `share` tokens with expiry / revoke.
-- [ ] **0.7 — End-to-end smoke test:** two wmux instances on the same machine; one mints a self-token, the second redeems it, signaling handshake completes, a "ping" is exchanged over the data channel.
-
-**Done when:** the smoke test passes locally and against a deployed rendezvous (free-tier VPS or k8s).
-
-### Phase 1 — Read-only pane sharing (3–5 days)
-
-The MVP: share a pane, viewer sees it live in a browser or in another wmux.
+End state: wmux exposes an HTTP/WS server that two wmux instances can talk to over loopback, exchanging a `Hello` message and a `SessionMessage::OutputChunk`. No share UX, no real auth yet. Validates the wire protocol on a real socket.
 
 **Tasks:**
 
-- [ ] **1.1 — "Share this pane" pane-toolbar button.** Mints a share token scoped to that pane, opens a session, returns the join URL.
-- [ ] **1.2 — Output broadcast over the data channel.** Tap into the existing `terminal-output-{sessionId}` event stream in `commands.rs::start_session_stream`. When a pane is shared, fork the byte stream to the data channel.
-- [ ] **1.3 — Initial-state snapshot.** A new joiner needs the full visible buffer, not just bytes that arrive after join. Use the existing `SerializeAddon` snapshot. Send as the first record after the data channel opens.
-- [ ] **1.4 — Web viewer (PWA).** Static page served from `collab-server` at `/s/:code`. Imports xterm.js + addon-fit, opens an `RTCPeerConnection` directly to the host (the rendezvous's signaling WS is the broker). Installable as a PWA — home-screen icon, offline manifest, mobile-viewport-friendly.
-- [ ] **1.5 — Native wmux viewer.** Custom URL handler `wmux://join/...` opens a host's session as a read-only pane via the same WebRTC path.
-- [ ] **1.6 — Presence indicators.** A small `👁 N` badge on the shared pane in the host's wmux, with names from participant labels. Updates live as guests join/leave.
-- [ ] **1.7 — Audit log entries** at the host. Every join/leave/byte-count rolls up into a local SQLite table; viewable from Settings → Audit Log.
-- [ ] **1.8 — TURN fallback verified.** Force a peer connection through TURN (disable host candidates), verify the data channel still works. Required because ~25% of corporate-↔-cellular sessions need it.
+- [ ] **0.1 — Slim `collab-proto` crate.** Keep `SessionMessage` (OutputChunk / InputChunk / LayoutDelta) and `Hello`. Drop the WebRTC `SignalingMessage` enum from the old design — there's no signaling.
+- [ ] **0.2 — `collab_server.rs` module inside `src-tauri`.** New module — *not* a separate crate; it runs inside the wmux process, shares state with the session manager, and goes away when wmux closes. Uses `axum` (already a candidate from earlier scaffolding) and `tokio-tungstenite`. Exposes `/ws/:code` and a `/s/:code` static-asset handler.
+- [ ] **0.3 — In-memory `ShareSessionStore`** behind a `tokio::sync::RwLock`. CRUD for `(code, secret_hash, target_pane_id, permission, expires_at, created_at)` records. Background task expires stale entries every 60s.
+- [ ] **0.4 — Bind-policy plumbing.** Settings option: `collab.bind` = `loopback` | `lan` | `tailnet` | `all`. Defaults to `lan`. Server starts on first share and stops when no shares remain.
+- [ ] **0.5 — Two-wmux smoke test.** A `cargo test` integration test that spawns two `axum::Router`s in-process, has one mint a share, the other connect to `/ws/:code`, validates a `Hello` round-trip and a single `OutputChunk` propagating. No real PTY needed.
 
-**Done when:** Host shares a pane, opens the link on a phone over cellular, sees the terminal rendering live including ongoing output.
+**Done when:** the smoke test passes. No UI yet.
 
-### Phase 2 — Remote-yourself (2–3 days)
+### Phase 1 — LAN-only read-only pane sharing
 
-Long-lived self-tokens + persistent host-side rendezvous WS + PWA-friendly mobile flow.
+The MVP: click "Share pane," send a coworker on your LAN a link, they see the terminal live in their browser.
 
 **Tasks:**
 
-- [ ] **2.1 — Persistent host-signaling WebSocket.** wmux opens a long-lived WSS to the rendezvous on startup (if any self-tokens exist) and reconnects with backoff. This is the "phone home" channel that lets a remote viewer ring the bell.
-- [ ] **2.2 — Self-token generation flow.** Devices settings → "Add device" → QR code on screen, scannable by phone. Phone opens the URL, gets added as a device with label "iPhone (model X)" auto-inferred from UA.
-- [ ] **2.3 — Phone-arrives → host-creates-offer flow.** Rendezvous receives a join from a self-token's URL, looks up the host's persistent WS, sends a "new join request" message; host produces an offer; standard WebRTC handshake.
-- [ ] **2.4 — Reconnection / resume.** Train tunnels and laptop sleep both happen. WebRTC reconnect within 30 s shouldn't require re-handshake; longer disconnects re-handshake but resume seamlessly (host buffers up to N minutes of output for replay). Configurable buffer size, defaulting to ~5 minutes' worth (a few MB).
-- [ ] **2.5 — Optional mutual-confirm.** Toggle in Devices settings: "Confirm new IPs on this device before allowing access". When enabled, the host's wmux pops a dialog on first connection from a new IP/UA fingerprint per token.
-- [ ] **2.6 — Mobile-viewport polish on the PWA.** Pinch-to-zoom for xterm.js, tap-and-hold for selection, virtual-keyboard handling. Most of this is xterm.js config + a few CSS tweaks.
+- [ ] **1.1 — "Share this pane" pane-toolbar button.** Mints a ShareSession scoped to that pane. Shows a dialog with the LAN URL + a copy button + an expiry selector.
+- [ ] **1.2 — Output broadcast.** Tap into the existing `terminal-output-{sessionId}` event stream in `commands.rs::start_session_stream`. When a pane has one or more active share viewers, fork the byte stream to each viewer's WebSocket.
+- [ ] **1.3 — Initial-state snapshot.** A new joiner gets the full visible buffer via the existing `SerializeAddon` snapshot, sent as the first frame after `Hello`.
+- [ ] **1.4 — Web viewer (PWA).** Static page served from wmux at `/s/:code`. Imports xterm.js + addon-fit, opens the WebSocket, renders bytes. PWA manifest + service worker so it installs to the home screen.
+- [ ] **1.5 — Presence indicators.** Small `👁 N` badge on the shared pane in the host's wmux, with names from participant labels. Updates live as viewers join / leave.
+- [ ] **1.6 — Audit log entries** at the host. Connect / disconnect / byte-count rolls up into a local SQLite table; viewable from Settings → Audit Log.
+- [ ] **1.7 — Manual share-revoke.** Devices/Shares panel lets the host kill an active share with one click; connected viewers disconnect immediately.
+- [ ] **1.8 — Optional TLS-self-signed.** For LANs the user doesn't fully trust: generate a per-session self-signed cert, prompt the viewer to accept once. Off by default (plain HTTP for LAN is fine on a trusted home / corp network); opt-in for untrusted Wi-Fi.
 
-**Done when:** I generate a self-token at my desk, scan with my phone, leave wmux running, walk to the train, open the PWA on my phone over LTE, see my running terminal session and can interact with it.
+**Done when:** Host shares a pane, coworker on the same LAN pastes the URL into their browser, sees the terminal rendering live including ongoing output.
 
-### Phase 3 — Collaborative input (2–4 days)
+### Phase 2 — Cross-network via Tailscale
+
+End state: same share flow works between a laptop and a phone on cellular, with Tailscale providing the transport.
+
+**Tasks:**
+
+- [ ] **2.1 — Tailscale-presence detection.** Read `tailscale status --json` (or hit `http://localhost:41112/localapi/v0/status` — Tailscale's documented local API) on startup and on a settings refresh. Cache the result for ~30 s.
+- [ ] **2.2 — Tailnet URLs in the share UX.** When Tailscale is up, the share dialog shows both LAN and Tailnet URLs (clearly labeled). User picks which to send.
+- [ ] **2.3 — "Tailscale not installed" empty-state.** Devices settings shows install instructions + a link to Tailscale's setup docs when no daemon is detected. We don't reproduce their onboarding.
+- [ ] **2.4 — Reconnection on the WebSocket.** Train tunnels and laptop sleep both happen. Viewer's WebSocket reconnects with exponential backoff (1s / 2s / 4s / 8s, capped at 30s). On reconnect, the host replays buffered output (5-minute / ~4MB ring buffer per share).
+- [ ] **2.5 — Mobile-viewport polish.** Pinch-to-zoom for xterm.js, tap-and-hold for selection, virtual-keyboard handling. Mostly xterm.js config + CSS.
+- [ ] **2.6 — Optional mutual-confirm.** Toggle in settings: "Confirm new IPs/UAs before allowing access." When on, the host's wmux pops a dialog on first connection from a new fingerprint per share.
+
+**Done when:** I share a pane, walk to the train, open the URL on my phone over LTE, see my running terminal live and reconnect cleanly through tunnels.
+
+### Phase 3 — Collaborative input
 
 Promote a shared pane from read to read-write. Multiple users can type into the same terminal.
 
 **Tasks:**
 
-- [ ] **3.1 — Permission-promotion UI.** Host clicks a participant in the presence indicator → "Grant write access". Updates the access token's `permission` field; emits a permission-change message over the data channel.
-- [ ] **3.2 — Viewer-side input capture.** When a viewer's role is read-write, xterm.js input events get forwarded to the host as `InputChunk` events over the data channel.
-- [ ] **3.3 — Host-side input merge.** Input events get piped into the same `write_to_session` Tauri command that local input uses. The PTY linearizes; no explicit ordering required for v1.
+- [ ] **3.1 — Permission-promotion UI.** Host clicks a participant in the presence indicator → "Grant write access." Updates the ShareSession's per-participant permission; emits a permission-change frame.
+- [ ] **3.2 — Viewer-side input capture.** Read-write viewers forward xterm.js input events as `SessionMessage::InputChunk` over the WebSocket.
+- [ ] **3.3 — Host-side input merge.** Input chunks pipe into the same `write_to_session` Tauri command that local input uses. The PTY linearizes — no explicit ordering required for v1.
 - [ ] **3.4 — Input attribution.** Each `InputChunk` carries the participant ID; host pane shows a brief "Alice is typing" status-bar hint.
-- [ ] **3.5 — Optional keystroke audit.** Server flag: log every InputChunk's metadata (length, participant, timestamp) — content optional, off by default for privacy/volume, on for compliance.
+- [ ] **3.5 — Optional keystroke audit.** Setting: log every InputChunk's metadata (length, participant, timestamp). Content optional. Off by default.
 
-**Done when:** Host promotes Alice to write-access, Alice types `ls` in the PWA, host's terminal runs it and broadcasts output back.
+**Done when:** Host promotes Alice to write-access, Alice types `ls`, host's terminal runs it and broadcasts output back.
 
-### Phase 4 — Workspace sharing (3–4 days)
+### Phase 4 — Workspace sharing
 
 Share a whole workspace layout, not just one pane.
 
 **Tasks:**
 
-- [ ] **4.1 — Workspace as a surface kind.** New `workspace` surface; share token can be scoped to a whole workspace + an explicit list of pane surfaces inside it.
-- [ ] **4.2 — Layout snapshot + delta.** Host publishes the workspace's layout JSON on connect, then sends deltas on every meaningful change. Reuse the existing layout-persistence machinery.
-- [ ] **4.3 — Viewer-side layout rendering.** Viewer's wmux opens a "joined workspace" view that mirrors the host's pane tree as read-only panes. Native viewer only — web/PWA viewer for workspaces is v5+.
-- [ ] **4.4 — Per-pane opt-in.** Sharing a workspace doesn't auto-share every pane. Each pane in the workspace gets a "share" checkbox; unshared panes show as opaque placeholders to viewers.
-- [ ] **4.5 — Optimistic CRDT path for layout** (deferred until it's needed). Multiple admins co-editing the layout = rare. Wrap in Yrs only when complaints land.
+- [ ] **4.1 — Workspace-as-a-share-target.** A ShareSession can reference a workspace + an explicit list of pane labels inside it.
+- [ ] **4.2 — Layout snapshot + delta.** Host publishes the workspace's layout JSON on connect, then sends deltas on every meaningful change. Reuses existing layout-persistence machinery.
+- [ ] **4.3 — Viewer-side layout rendering.** Viewer's wmux opens a "joined workspace" view that mirrors the host's pane tree as read-only panes. Native viewer only; PWA workspace view is later.
+- [ ] **4.4 — Per-pane opt-in.** Sharing a workspace doesn't auto-share every pane. Each pane gets a "share" checkbox; unshared panes show as opaque placeholders to viewers.
 
-**Done when:** Alice opens her workspace, marks two panes as shared, sends Bob the link. Bob joins; sees Alice's pane tree with two live shared panes and the rest as placeholders.
+**Done when:** Alice opens her workspace, marks two panes as shared, sends Bob the link. Bob joins; sees Alice's pane tree with two live panes and the rest as placeholders.
 
-### Phase 5 — Agent supervision (2–3 days)
+### Phase 5 — Agent supervision
 
 The real differentiator vs Live Share / tmate. Agent panes broadcast structured state in addition to terminal bytes.
 
 **Tasks:**
 
-- [ ] **5.1 — Agent pane as a richer surface.** Beyond the terminal byte stream, broadcast structured agent-state events (working/blocked/ready transitions, OSC 133 block start/end, hook-driven state) over a parallel data-channel track.
+- [ ] **5.1 — Agent surface broadcast.** Beyond the terminal byte stream, broadcast structured agent-state events (working/blocked/ready, OSC 133 block start/end, hook-driven state) on a separate channel.
 - [ ] **5.2 — Viewer-side agent timeline.** Web viewer renders a richer panel for agent panes: terminal on one side, agent-event timeline on the other.
-- [ ] **5.3 — Handoff request flow.** "Pass control of this Claude" — viewer requests write access; host approves; viewer drives the agent's input. Every handoff is logged in the audit log.
-- [ ] **5.4 — Agent-session-sharing MCP tools.** `share_agent_pane(label, permission)` / `revoke_agent_share(label)` so an external orchestrator can grant/revoke programmatically.
+- [ ] **5.3 — Handoff request flow.** "Pass control of this Claude" — viewer requests write access; host approves; viewer drives the agent's input. Every handoff is in the audit log.
+- [ ] **5.4 — Agent-share MCP tools.** `share_agent_pane(label, permission)` / `revoke_agent_share(label)` so an external orchestrator can grant/revoke programmatically.
 
-**Done when:** Host shares a Claude pane. Viewer sees terminal + live timeline of agent blocks. Viewer requests control; host approves; viewer types a follow-up prompt; the host's Claude responds. Audit log shows the handoff.
+**Done when:** Host shares a Claude pane. Viewer sees terminal + live timeline. Viewer requests control; host approves; viewer types a follow-up prompt; host's Claude responds.
 
-### Phase 6 — Optional centralized recording / fan-out relay (1–2 days)
+### Phase 6 — Fan-out and recording (deferred)
 
-For the rare big-fan-out and "watch a recording later" cases.
+For the rare big-fan-out and "watch a recording later" cases. Same problem as before; same solution shape (host opens an extra recording sink). Deferred until somebody actually asks.
 
-**Tasks:**
+### Phase 7 — Enterprise auth (deferred)
 
-- [ ] **6.1 — Opt-in flag on the host: "Also stream to rendezvous as a recording source."** Host opens a second data channel — this one to the rendezvous itself, which can record bytes server-side and fan them out to many viewers without the host re-encoding N times.
-- [ ] **6.2 — Recording playback** — rendezvous serves `/recording/:id` with the captured stream + timestamps, replayable in the web viewer's xterm.js.
-- [ ] **6.3 — Delayed-join replay** — when fan-out mode is active, viewers who join late get the full history from the rendezvous, not just the live tail.
-
-**Done when:** Host enables fan-out mode for a workshop demo, 20 viewers join the same session, they all see the live terminal and can scroll back through earlier output.
-
-### Phase 7 — Enterprise auth add-on (when a real customer asks; ~2–3 days)
-
-Layer SSO over the existing token model — does not replace it.
-
-**Tasks:**
-
-- [ ] **7.1 — OAuth / OIDC config on the rendezvous.** Pluggable identity provider — Google, GitHub, custom OIDC, SAML via something like `samael`.
-- [ ] **7.2 — Token creation gated by SSO.** All `POST /tokens` require an authenticated SSO session; the resulting token carries the SSO subject ID.
-- [ ] **7.3 — Group-based scoping.** Org admins can write policy like "users in the `traders` group can mint self-tokens with no expiry; users in `interns` are limited to 8-hour share tokens."
-- [ ] **7.4 — Revoke-on-leave hooks.** SCIM/SAML "user deprovisioned" event → revoke all of that user's active tokens.
-- [ ] **7.5 — Audit attributes by SSO identity** rather than just token label.
-
-**Done when:** An org configures the rendezvous against their IdP; all tokens are minted under SSO identities; the audit log shows real names instead of "Dan's iPhone".
+If a customer ever asks: layer OAuth/OIDC over the share-mint flow. SSO becomes another way to authorize "is this user allowed to receive a share token?" but the transport doesn't change.
 
 ---
 
@@ -361,86 +294,29 @@ Layer SSO over the existing token model — does not replace it.
 
 ### Performance budget
 
-Target: **<100 KB/s per peer** for a busy 80×24 terminal at sustained output. WebRTC's data channels with built-in DTLS overhead come in well under this for typical terminal traffic.
+Target: **<100 KB/s per peer** for a busy 80×24 terminal at sustained output. A WebSocket carries this trivially over LAN or Tailscale.
 
 ### Reconnection
 
-- **Short disconnect (<30 s):** WebRTC reconnect logic handles it without re-handshake.
-- **Medium disconnect (30 s – buffer size):** re-handshake transparently; host replays buffered output to bring the viewer current.
-- **Long disconnect (> buffer size):** viewer reconnects to a new session position, sees a snapshot of the current state instead of full replay.
+- **Short disconnect (<30 s):** WebSocket reconnect logic handles it.
+- **Medium disconnect (up to buffer size):** re-handshake; host replays buffered output.
+- **Long disconnect (> buffer size):** viewer gets a fresh snapshot, no full replay.
 
 Host buffer defaults to ~5 minutes / ~4 MB per shared surface, configurable.
 
-### TURN sizing
+### Bind interface policy
 
-The rendezvous server's bundled TURN handles the ~25% of sessions that can't direct-connect. Sizing rough cut: average 50 KB/s × 25% of sessions × N concurrent sessions = bandwidth budget. A modest VPS handles hundreds of concurrent users.
+Default to "all non-loopback IPv4 interfaces" — covers LAN + Tailnet without special-casing. Users on coffee-shop Wi-Fi can switch to `tailnet-only` from settings.
 
-If self-hosted-TURN bandwidth becomes a problem:
-- Use a managed TURN service (Cloudflare's TURN free tier is generous; Twilio is paid).
-- Document Tailscale integration so users skip TURN entirely.
-- Server CPU is unaffected — TURN is dumb byte forwarding.
+### Mobile PWA
 
-### Hosting the rendezvous
-
-Each user (or team / org) runs their own rendezvous server — see the non-goals section. To make that as low-friction as possible, the project ships:
-
-**Tier 1 — supported, tested, recommended:**
-- **Docker image** (`ghcr.io/dcieslak19973/wmux-collab-server:latest`) bundling rendezvous + coturn TURN. Single command: `docker run -p 443:443/tcp -p 3478:3478/udp ...`. Runs on any VPS, k8s cluster, or NAS.
-- **Fly.io template** in `collab-server/deploy/fly.toml`. Free-tier eligible for a single-instance signaling-only deployment; small spend (~$5/mo) once TURN bandwidth kicks in.
-- **One-shot bootstrap script** in `collab-server/deploy/bootstrap.sh` that sets up coturn + the rendezvous on a fresh Ubuntu VPS, including a Let's Encrypt cert.
-
-**Tier 2 — documented, user-supported:**
-- **Cloudflare Tunnel + a home server.** Keeps everything on your LAN; tunnel exposes the rendezvous endpoint to the internet without a public IP. Cloudflare's free TURN tier covers most users' bandwidth.
-- **Tailscale assumption.** If host + viewers are already on the same tailnet, skip the rendezvous entirely — direct wmux↔wmux WebRTC over the tailnet works because there's no NAT to traverse.
-
-**Tier 3 — not supported but possible:**
-- Self-built rendezvous on Railway / Render / serverless-of-the-week. Probably works but we don't actively test against these.
-
-**What the rendezvous costs to run:**
-- **CPU / RAM:** trivial. A few hundred MB and minimal CPU. Even a `t2.nano`-class VPS is overkill.
-- **Bandwidth:** signaling alone is negligible (~KB per session). TURN is the variable: ~25% of sessions × ~50 KB/s × session duration. For a single user with occasional shares, well within free-tier limits everywhere. For a team with dozens of concurrent shares, expect ~$10–50/mo on commercial bandwidth.
-- **Storage:** SQLite database grows slowly (audit log + token table). Single-MB scale even after a year of heavy use.
-
-**Onboarding the first user:**
-- New wmux install prompts for a rendezvous URL on first attempt to share or generate a self-token.
-- "I don't have one yet" → opens the docs page with the Tier 1 deployment options + a 5-minute Fly.io walkthrough.
-- Future: a `wmux collab-server quickstart` CLI subcommand that runs through Fly.io setup interactively. Not in initial scope.
-
-### Mobile PWA — what it is and how it gets onto a phone
-
-The mobile viewer is a **Progressive Web App (PWA)**, not a native iOS/Android app. For the mobile-unfamiliar reader, the short version:
-
-A PWA is a regular web page with two extras: a small "manifest" file (icon, name, colors) and a "service worker" (cached JS that lets it load offline). Together they let mobile browsers treat the page as an installable app instead of a tab.
-
-**How a viewer ends up with the "app" on their phone:**
-
-1. Host sends them a share link (e.g. via Slack) or shows them a QR code.
-2. They open it in their phone's browser. Just a web page — no install yet.
-3. The browser sees the PWA manifest and offers "Add to Home Screen" (iOS Safari: share button → Add to Home Screen; Android Chrome: usually a banner prompt).
-4. They tap accept. An icon appears on their home screen.
-5. Tapping the icon launches the viewer in fullscreen mode (no browser address bar) — feels like a regular app.
-
-Subsequent launches are fast because the service worker has cached the assets locally. Updates happen automatically when wmux's rendezvous serves a new build.
-
-**Why we use a PWA instead of a native app:**
-
-- **One codebase.** The same files at `collab-server/static/` serve desktop browsers AND mobile, with only CSS / touch-handler differences. No iOS or Android project to maintain.
-- **No app stores.** No Apple Developer fees, no app review, no Google Play console. Users get the link, add to home screen, done.
-- **Updates are instant.** No release cycle — push a new version of the static files, users get it next launch.
-- **Works on iPad / desktop the same way.** Same code, same install flow on any platform.
-
-What PWAs can't do that we don't need: background processing, Bluetooth, push notifications on iOS (technically possible since iOS 16.4 but with restrictions). For "render a terminal and talk WebRTC," PWAs are fully sufficient.
-
-Concretely, the implementation work is:
-- Web App Manifest (`/manifest.webmanifest`) with icons + `display: standalone`.
-- Service worker (`/sw.js`) that caches xterm.js and the viewer page.
-- Touch-friendly xterm.js config: pinch-zoom, tap-and-hold-to-select, virtual-keyboard handling.
-
-Writing a native iOS/Android app is a non-goal — the PWA covers the mobile case at a fraction of the engineering cost.
+Same as before: regular web page + manifest + service worker. Installable from iOS Safari and Android Chrome. Updated automatically on next launch. No app store. The implementation work is just xterm.js config for touch-friendly behavior (pinch-zoom, tap-and-hold-to-select, virtual-keyboard handling).
 
 ### Open questions
 
-1. **TURN credentials.** TURN servers traditionally use short-lived credentials issued by the signaling server. Plenty of well-known patterns; needs a small implementation in the rendezvous.
+1. **LAN HTTPS story.** Plain HTTP on a trusted LAN is fine; on untrusted Wi-Fi (coffee shop) we want TLS. Self-signed certs work but require viewer cert-acceptance UX. Mitigation: default to `tailnet-only` if Tailscale is detected (which gives transport encryption for free) and only fall back to LAN for explicitly-trusted networks. Worth a closer look in Phase 1.
+2. **mDNS / `.local` resolution on Windows hosts.** Phone-to-Windows-machine over LAN needs the phone to resolve a hostname. Bonjour on iOS, mDNS on Android — both work in practice but are flaky. Likely punt and just use the host's LAN IP in the URL (`http://192.168.1.42:port/...`).
+3. **`tailscale-rs` maturity (Aug 2025: pre-1.0).** Decision deferred to when we revisit Option B. Until then, Phase 2 is on Option A (user installs the daemon).
 
 ---
 
@@ -448,14 +324,12 @@ Writing a native iOS/Android app is a non-goal — the PWA covers the mobile cas
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| WebRTC blocked by aggressive corporate firewalls (no UDP, no STUN, no TURN) | low–medium | Document TURN-over-TCP fallback (port 443); for the rare totally-locked-down case, fall back to a "tunneled WebSocket" mode where the rendezvous bridges. Hard-gate Phase 1 acceptance on confirming a few corporate environments work. |
-| `webrtc-rs` integration burden | medium | The crate is mature and used in production. Budget 2–3 days extra in Phase 0 to internalize the API. |
-| Bearer-token leak via screenshot / shoulder-surf | medium | Short default TTLs for share tokens; opt-in mutual-confirm-on-first-use for self tokens; clearly-visible "this URL grants access" warning when minting. |
-| Host buffer overflow on long output bursts | low | Already handled at the pane level for layout-persistence; reuse that backpressure. |
-| Mobile PWA on iOS Safari has subtle xterm.js bugs | medium | Plan a day in Phase 1 for mobile-specific QA. xterm.js has known mobile issues that mostly are addon-fit + virtual-keyboard related; well-trodden ground. |
-| `webrtc-rs` data channel reliability mode mismatches xterm output expectations | low | Use reliable+ordered mode (default). Same delivery semantics as TCP/WebSocket — no surprises. |
-| User generates a self-token, never revokes it, leaves company / loses phone | medium | UX nudges: "you have N tokens with no expiry; review them"; periodic reminders surfaced inside wmux. |
-| Self-hosting the rendezvous is a barrier to OSS adoption ("I just want to share my pane, do I really have to deploy a server?") | high | Make the deployment story very polished: tested Docker image, Fly.io template with one-command setup, in-product "I don't have a rendezvous yet" wizard that walks the user through Fly.io. Highlight the Tailscale-only path which sidesteps the rendezvous for users who already have a tailnet. |
+| Users on locked-down corporate networks can't expose ports on the host | medium | Tailscale path doesn't need ports exposed — it's outbound-only. Document this as the recommended path for corporate environments. |
+| LAN HTTPS UX (self-signed cert) is bad enough to push users to Tailscale even on LAN | medium | That's fine — we're not married to LAN HTTP. Tailscale-everywhere is a reasonable fallback recommendation. |
+| `tailscale-rs` not yet stable, blocking embed (Option B) path | n/a | Option A doesn't need it. Revisit Option B post-1.0. |
+| User generates a long-TTL self-share, never revokes it | medium | UX nudges in Devices panel; periodic reminders for long-TTL shares. |
+| Mobile PWA on iOS Safari has subtle xterm.js bugs | medium | Plan a day in Phase 2 for mobile QA. xterm.js mobile gotchas are well-documented. |
+| Coworker doesn't have Tailscale → cross-network pair-program path broken | high | Acknowledge it: cross-network pairing requires the coworker to install Tailscale. Document the install flow. For most pair-programming, same-network suffices. |
 
 ---
 
@@ -463,34 +337,62 @@ Writing a native iOS/Android app is a non-goal — the PWA covers the mobile cas
 
 ```
 wmux/
-├── browser-helper/                     (existing — out-of-process CEF browser)
-├── collab-server/                      ← NEW: rendezvous + bundled TURN
-│   ├── Cargo.toml
-│   ├── src/
-│   │   ├── main.rs
-│   │   ├── http.rs                     (routes: WS signaling, web/PWA viewer, audit, tokens)
-│   │   ├── signaling.rs                (offer/answer/ICE forwarding)
-│   │   ├── token.rs                    (mint/redeem/revoke)
-│   │   ├── persistence.rs              (sqlx)
-│   │   ├── auth.rs                     (token verification + optional OAuth/OIDC adapter)
-│   │   └── static/                     (web-viewer PWA: HTML + xterm.js + service worker)
-│   └── migrations/
-├── collab-proto/                       ← NEW: shared message types (signaling + session)
+├── browser-helper/                        (existing — out-of-process CEF browser)
+├── collab-proto/                          ← slim shared-types crate (SessionMessage, Hello only)
 │   └── src/lib.rs
 ├── src-tauri/src/
-│   ├── collab_client.rs                ← NEW: webrtc-rs PeerConnection + DataChannel mgmt
-│   ├── collab_tokens.rs                ← NEW: local token storage / mint requests
-│   └── commands.rs                     (add share_pane, mint_self_token, revoke_token, list_devices...)
-└── src/
-    └── collab_runtime.mjs              ← NEW: frontend hooks for shares + presence + devices UI
+│   ├── collab_server.rs                   ← NEW: axum HTTP/WS server, started on demand
+│   ├── collab_share_store.rs              ← NEW: in-memory ShareSessionStore
+│   ├── collab_tailscale.rs                ← NEW: Tailscale-presence detection (Phase 2)
+│   └── commands.rs                        (+ share_pane, revoke_share, list_active_shares...)
+├── src/
+│   └── collab_runtime.mjs                 ← NEW: frontend hooks for shares + presence + devices UI
+└── viewer-pwa/                            ← NEW: static assets served by wmux at /s/:code
+    ├── index.html
+    ├── manifest.webmanifest
+    ├── sw.js
+    └── viewer.mjs
 ```
+
+The `collab-server` *crate* from the previous design is **gone** — its functionality moves into a module inside `src-tauri`. The `collab-proto` crate stays but slimmed (no SignalingMessage).
 
 ---
 
 ## Concrete next step
 
-The smallest thing that proves the architecture is **Phase 0 + Phase 1.1–1.4** — read-only-share MVP end-to-end via WebRTC. About a week. After that lands, the rest is incremental.
+**Phase 0** — slim the proto crate, drop `collab-server`, stand up `collab_server.rs` inside src-tauri, write the two-wmux smoke test. ~2 days. Validates the wire protocol on a real WebSocket without any UI work.
 
-If a smaller gut-check first: **Phase 0.1–0.5 alone** — two wmux instances handshaking and exchanging a "hello" over a data channel — is roughly two solid days and validates the WebRTC + token model before we invest in the share UX.
+**Phase 1** — share-pane UX + PWA viewer over LAN. ~3 days after Phase 0. Done when you can share a pane to a coworker's laptop on your LAN and see it render.
 
-I'd kick off Phase 0 in a new branch (`feat/collab-foundation`) and treat Phase 1 as a follow-up PR once the plumbing is in.
+**Phase 2** — Tailscale-aware URLs. ~1 day after Phase 1, mostly settings/UI work and a `tailscale status --json` call.
+
+---
+
+## Rejected alternatives
+
+The previous version of this doc (see git history) proposed:
+
+- **A separate `collab-server` Rust crate** running as an internet-facing rendezvous, accepting WSS signaling traffic from hosts and viewers.
+- **WebRTC RTCDataChannel** as the peer-to-peer transport with DTLS encryption.
+- **STUN + bundled TURN** to handle NAT traversal, with a fallback path for ~25% of corporate↔cellular sessions.
+- **A token-mint/redeem subsystem** in the rendezvous, with SQLite-backed `access_tokens`.
+- **Persistent host-signaling WebSockets** so phones could "ring the bell" of a laptop sitting behind NAT.
+
+**The realization:** the rendezvous wasn't a small thing on the side. It was a wmux-specific reimplementation of a *Tailscale-coordination-server-shaped* thing. Both solve the same problem with the same shape:
+
+| | Tailscale/Headscale coordination | Custom rendezvous (rejected) |
+|---|---|---|
+| Introduces peers to each other | WireGuard pubkey exchange | WebRTC SDP / ICE exchange |
+| Holds long-lived presence so peers can be "called" | Each client maintains a control connection | Host's persistent signaling WebSocket |
+| Provides relay fallback when direct fails | DERP | Bundled TURN |
+| Sees session plaintext | No | No |
+| Gates who can join | Tailnet ACLs | `access_tokens` table |
+| Production-tested, clients exist for every platform | Yes | No — we'd build it |
+
+Why scrapped:
+- **Most use cases are LAN-local.** Pair-programming with someone in the same office, demo'ing to the team, pair-debugging — all same-network. The entire NAT-traversal apparatus solves a problem these cases don't have.
+- **The cross-network cases are exactly the coordination-server problem.** Reinventing NAT traversal, identity, and relay infrastructure to compete with a free, working, battle-tested product (Tailscale, or self-hosted via Headscale) was poor engineering judgment. The constraint that drove it ("viewer must not install anything") was mine, not the user's; once dropped, the WebRTC architecture collapses.
+- **Operational burden of running a rendezvous, even self-hosted.** Every user who wanted cross-network access had to deploy a server. The Phase-0 plan was 7 sub-tasks long *just to get a hello-world handshake working*. With Tailscale, cross-network is a settings toggle.
+- **`collab-server` would have meant maintaining auth, persistence, signaling, and TURN forever.** Removing that crate removes a whole vector of future maintenance.
+
+The brief life of the `collab-server` crate (PR #35, opened and closed without merging) is the artifact of this pivot.

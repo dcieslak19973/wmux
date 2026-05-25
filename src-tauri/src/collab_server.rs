@@ -59,6 +59,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 const OUTPUT_BROADCAST_CAPACITY: usize = 256;
+const AGENT_EVENT_BROADCAST_CAPACITY: usize = 128;
 const AUDIT_RING_CAPACITY: usize = 1024;
 const REPLAY_BUFFER_MAX_BYTES: usize = 4 * 1024 * 1024; // ~4 MB
 const REPLAY_BUFFER_MAX_AGE: Duration = Duration::from_secs(5 * 60); // 5 minutes
@@ -140,6 +141,10 @@ pub struct ShareSession {
     pub expires_at: Instant,
     pub secret_hash: [u8; 32],
     pub output_tx: broadcast::Sender<Vec<u8>>,
+    /// Phase 5: structured agent state events (OSC 133 block boundaries,
+    /// Claude Code hook callbacks, etc.) broadcast alongside the byte
+    /// stream. Viewers render these in a timeline panel.
+    pub agent_event_tx: broadcast::Sender<serde_json::Value>,
     pub presence: Arc<AtomicUsize>,
     pub snapshot: Arc<Mutex<Option<Vec<u8>>>>,
     /// Rolling ring of recent PTY bytes. Replayed to any connecting (or
@@ -352,6 +357,7 @@ impl ShareSessionStore {
         let secret = random_secret();
         let secret_hash = sha256(secret.as_bytes());
         let (output_tx, _rx) = broadcast::channel(OUTPUT_BROADCAST_CAPACITY);
+        let (agent_event_tx, _aerx) = broadcast::channel(AGENT_EVENT_BROADCAST_CAPACITY);
         let session = ShareSession {
             code: code.clone(),
             target_pane_id,
@@ -360,6 +366,7 @@ impl ShareSessionStore {
             expires_at: Instant::now() + ttl,
             secret_hash,
             output_tx,
+            agent_event_tx,
             presence: Arc::new(AtomicUsize::new(0)),
             snapshot: Arc::new(Mutex::new(None)),
             replay_buffer: Arc::new(std::sync::Mutex::new(ReplayBuffer::default())),
@@ -508,6 +515,18 @@ impl ShareSessionStore {
         for session in inner.sessions.values() {
             if session.target_pane_id == pane_id {
                 f(session);
+            }
+        }
+    }
+
+    /// Fan out a structured agent event (OSC 133 block boundary, Claude
+    /// hook callback, …) to every share targeting `pane_id`. Send errors
+    /// (no subscribers yet) are ignored.
+    pub async fn push_agent_event(&self, pane_id: &str, payload: serde_json::Value) {
+        let inner = self.inner.read().await;
+        for session in inner.sessions.values() {
+            if session.target_pane_id == pane_id {
+                let _ = session.agent_event_tx.send(payload.clone());
             }
         }
     }
@@ -838,11 +857,20 @@ async fn handle_socket(
     .await;
 
     let mut output_rx = session.output_tx.subscribe();
+    let mut agent_rx = session.agent_event_tx.subscribe();
     loop {
         tokio::select! {
             chunk = output_rx.recv() => {
                 let Ok(bytes) = chunk else { break };
                 let frame = SessionMessage::OutputChunk { bytes };
+                let text = serde_json::to_string(&frame).unwrap();
+                if socket.send(Message::Text(text)).await.is_err() {
+                    break;
+                }
+            }
+            agent_evt = agent_rx.recv() => {
+                let Ok(payload) = agent_evt else { continue };
+                let frame = SessionMessage::AgentEvent { payload };
                 let text = serde_json::to_string(&frame).unwrap();
                 if socket.send(Message::Text(text)).await.is_err() {
                     break;
@@ -1513,6 +1541,24 @@ mod tests {
         let _final_msg = connect_task.await.unwrap();
         let kinds: Vec<_> = store.audit_entries().await.iter().map(|e| format!("{:?}", e.event)).collect();
         assert!(kinds.iter().any(|k| k == "ApprovalDenied"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_event_broadcasts_to_attached_viewer() {
+        let (secret, _session, store, addr) = mint_and_serve("pane-ae").await;
+        let mut ws = connect_and_auth(addr, "smoke-abc", &secret).await;
+        drain_handshake(&mut ws).await;
+
+        // After the handshake, push an agent event via the store; the WS
+        // handler's select loop should forward it as SessionMessage::AgentEvent.
+        store.push_agent_event("pane-ae", serde_json::json!({ "kind": "block_start", "ts": 123 })).await;
+        match next_message(&mut ws).await {
+            SessionMessage::AgentEvent { payload } => {
+                assert_eq!(payload["kind"], "block_start");
+                assert_eq!(payload["ts"], 123);
+            }
+            other => panic!("expected AgentEvent, got {other:?}"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

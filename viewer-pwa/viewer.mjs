@@ -148,6 +148,9 @@ function connect({ isReconnect } = { isReconnect: false }) {
       const bytes = Array.isArray(msg.bytes) ? msg.bytes : [];
       term.write(new Uint8Array(bytes));
     }
+    if (msg.kind === 'agent_event') {
+      appendAgentEvent(msg.payload);
+    }
   });
 
   ws.addEventListener('close', (evt) => {
@@ -186,4 +189,77 @@ connect();
 // http where SW is restricted to localhost), the viewer still works.
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
+// ── Agent timeline (Phase 5) ────────────────────────────────────────────
+
+const TIMELINE_MAX_ENTRIES = 200;
+const timelineEl = document.getElementById('agent-timeline');
+const timelineListEl = document.getElementById('agent-timeline-list');
+const timelineToggleEl = document.getElementById('timeline-toggle');
+const TIMELINE_PREF = 'wmux.viewer.showTimeline';
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function fmtTime(ms) {
+  if (typeof ms !== 'number') return '';
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+function appendAgentEvent(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  const row = document.createElement('div');
+  row.className = `agent-timeline-row agent-timeline-${payload.kind || 'unknown'}`;
+  const time = fmtTime(payload.ts);
+  let body = '';
+  if (payload.kind === 'block_start') {
+    body = '▶ command started';
+  } else if (payload.kind === 'block_command') {
+    body = `▶ ${escHtml(payload.command ?? '').slice(0, 240)}`;
+  } else if (payload.kind === 'block_end') {
+    const code = payload.exit_code;
+    const ok = code == null || code === 0;
+    body = ok ? '✓ exit 0' : `✗ exit ${code}`;
+  } else if (payload.kind === 'agent_hook') {
+    const tool = payload.tool ? ` · ${escHtml(payload.tool)}` : '';
+    const msg = payload.message ? ` — ${escHtml(payload.message).slice(0, 200)}` : '';
+    body = `${escHtml(payload.hook_event ?? 'hook')}${tool}${msg}`;
+  } else {
+    body = escHtml(JSON.stringify(payload)).slice(0, 240);
+  }
+  row.innerHTML = `<span class="agent-timeline-time">${escHtml(time)}</span><span class="agent-timeline-body">${body}</span>`;
+  timelineListEl.appendChild(row);
+  // Cap entries; drop oldest from the top.
+  while (timelineListEl.childElementCount > TIMELINE_MAX_ENTRIES) {
+    timelineListEl.firstElementChild?.remove();
+  }
+  // Auto-scroll to newest unless user has scrolled up to read history.
+  const nearBottom = timelineListEl.scrollHeight - timelineListEl.scrollTop - timelineListEl.clientHeight < 40;
+  if (nearBottom) timelineListEl.scrollTop = timelineListEl.scrollHeight;
+}
+
+function loadTimelinePref() {
+  try { return localStorage.getItem(TIMELINE_PREF) !== '0'; } catch { return true; }
+}
+function saveTimelinePref(visible) {
+  try { localStorage.setItem(TIMELINE_PREF, visible ? '1' : '0'); } catch {}
+}
+function applyTimelineVisibility(visible) {
+  document.body.classList.toggle('timeline-hidden', !visible);
+  // xterm reflows when its container width changes.
+  setTimeout(() => fitAddon.fit(), 60);
+}
+if (timelineToggleEl) {
+  let visible = loadTimelinePref();
+  applyTimelineVisibility(visible);
+  timelineToggleEl.addEventListener('click', () => {
+    visible = !visible;
+    saveTimelinePref(visible);
+    applyTimelineVisibility(visible);
+  });
 }

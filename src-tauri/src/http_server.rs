@@ -486,7 +486,7 @@ fn all_mcp_tools() -> Vec<serde_json::Value> {
                     },
                     {
                         "name": "list_agents",
-                        "description": "List all active wmux panes with metadata for agent discovery. Returns session_id, label (e.g. 'Ubuntu', 'user@host'), last_command (the most recent command run in that pane — useful for detecting which agent is running), is_running (whether a command is currently executing), and block_count. Works across local, WSL, and SSH panes.",
+                        "description": "List all active wmux panes with metadata for agent discovery. Returns session_id, label (e.g. 'Ubuntu', 'user@host'), last_command (the most recent command run in that pane — useful for detecting which agent is running), is_running (whether a command is currently executing), block_count, and worktree_path (non-null when this pane owns a git worktree created via the WT toolbar button). Works across local, WSL, and SSH panes.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {}

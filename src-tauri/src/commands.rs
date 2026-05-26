@@ -3611,6 +3611,125 @@ pub async fn detect_tailscale_status() -> Result<TailscaleStatus, String> {
     })
 }
 
+// ── Git worktree per-pane ─────────────────────────────────────────────────────
+
+/// Create a git worktree for the given pane and `cd` the shell into it.
+///
+/// `repo_root` must be the absolute path to the root of a git repository
+/// (Windows path, already normalised — pass the value from `get_git_context`).
+/// `branch_name` is the new branch to create; it must not already exist.
+///
+/// On success returns the absolute path of the new worktree.
+/// Only supported for Local panes; WSL and SSH panes return an error.
+#[tauri::command]
+pub async fn create_pane_worktree(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    branch_name: String,
+    repo_root: String,
+) -> Result<String, String> {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt as _;
+
+    // Validate branch name — no whitespace, no git-special chars.
+    if branch_name.is_empty() {
+        return Err("Branch name cannot be empty".into());
+    }
+    if branch_name.contains(|c: char| c.is_whitespace() || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')) {
+        return Err(format!("Branch name '{branch_name}' contains invalid characters"));
+    }
+
+    // Only local panes are supported in V1.
+    match manager.pane_worktree_eligibility(&session_id).await {
+        None => return Err("session not found".into()),
+        Some((false, _)) => return Err(
+            "git worktree isolation is currently only supported for local (Windows) panes. \
+             For WSL panes, run `git worktree add` manually inside the pane.".into()
+        ),
+        Some((_, true)) => return Err("This pane already has a worktree. Remove it first.".into()),
+        Some((true, false)) => {}
+    }
+
+    // Compute worktree path: %USERPROFILE%\.wmux\worktrees\<repo-name>\<branch>
+    let user_profile = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| r"C:\Users\Default".into());
+    let repo_name = std::path::Path::new(&repo_root)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".into());
+    let worktree_path = std::path::PathBuf::from(&user_profile)
+        .join(".wmux")
+        .join("worktrees")
+        .join(&repo_name)
+        .join(&branch_name);
+    let worktree_path_str = worktree_path.to_string_lossy().into_owned();
+
+    if worktree_path.exists() {
+        return Err(format!("Path already exists: {worktree_path_str}"));
+    }
+
+    // git worktree add -b <branch> <path> HEAD
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(&repo_root)
+        .args(["worktree", "add", "-b"])
+        .arg(&branch_name)
+        .arg(&worktree_path_str)
+        .arg("HEAD");
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let out = cmd.output().map_err(|e| format!("git invocation failed: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!("git worktree add failed: {stderr}"));
+    }
+
+    // Store path and `cd` the pane into the new worktree.
+    manager.set_worktree_path(&session_id, worktree_path_str.clone()).await;
+    let cd_cmd = format!("cd \"{worktree_path_str}\"\r");
+    manager.write_to(&session_id, cd_cmd.as_bytes()).await;
+
+    Ok(worktree_path_str)
+}
+
+/// Remove the git worktree owned by a pane.
+///
+/// If `force` is false and the worktree has uncommitted changes the command
+/// returns an error. Pass `force: true` to discard changes.
+#[tauri::command]
+pub async fn remove_pane_worktree(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    force: bool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt as _;
+
+    let wt_path = manager.get_worktree_path(&session_id).await
+        .ok_or("This pane has no managed worktree")?;
+
+    // Dirty check (unless force).
+    if !force {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(&wt_path)
+            .args(["status", "--porcelain", "--untracked-files=all"]);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        if let Ok(out) = cmd.output() {
+            let dirty = String::from_utf8_lossy(&out.stdout);
+            if !dirty.trim().is_empty() {
+                return Err(format!(
+                    "Worktree has uncommitted changes. Pass force=true to discard, or commit first.\n{dirty}"
+                ));
+            }
+        }
+    }
+
+    crate::session_manager::cleanup_worktree(&wt_path);
+    manager.take_worktree_path(&session_id).await;
+    Ok(())
+}
+
 /// Tiny URL-safe code generator (~40 bits). Sufficient: this is the path
 /// component; the bearer secret in the URL fragment carries the entropy.
 fn short_session_code() -> String {

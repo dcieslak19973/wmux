@@ -1503,6 +1503,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     <button class="pane-tb-btn pane-tb-agent" data-action="agent" title="Set preferred AI agent for this pane">AI</button>
     <button class="pane-tb-btn pane-tb-pr" data-action="pr-review" title="Open PR diff view">PR</button>
     <button class="pane-tb-btn pane-tb-share" data-action="share" title="Share this pane">SH</button>
+    <button class="pane-tb-btn pane-tb-worktree" data-action="worktree" title="Git worktree isolation (Ctrl+Shift+G)">WT</button>
     <button class="pane-tb-btn pane-tb-close" data-action="close" title="Close pane (Ctrl+Shift+W)">&#x2715;</button>
   `;
   toolbarEl.querySelector('[data-action="split-h"]').addEventListener('click', (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); showSplitTypePicker(sessionId, 'h', r.left, r.bottom + 4); });
@@ -1530,6 +1531,11 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       { label: 'Read-only', action: () => collabRuntime?.startShareForWorkspace('read') },
       { label: 'Read-write (viewers can type)', danger: true, action: () => collabRuntime?.startShareForWorkspace('read_write') },
     ], r.left, r.bottom + 4);
+  });
+  toolbarEl.querySelector('[data-action="worktree"]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    showWorktreeMenu(sessionId, r.left, r.bottom + 4);
   });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   if (isBlocksCapable) {
@@ -1755,6 +1761,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     screenSnapshot,
     outputSnapshot,
     gitContext: null,
+    worktreePath: null,
     labelOverride: initialState?.labelOverride ?? null,
     preferredAgent: null,
     // Quoting flavour for fix-agent / ask-agent commands. Defaults to
@@ -1836,6 +1843,74 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   }
 
   return sessionId;
+}
+
+// ── Git worktree per-pane ─────────────────────────────────────────────────────
+
+function showWorktreeMenu(sessionId, x, y) {
+  const pane = panes.get(sessionId);
+  if (!pane) return;
+
+  if (pane.worktreePath) {
+    const branch = pane.gitContext?.branch ?? pane.worktreePath.split(/[\\/]/).pop() ?? '?';
+    showContextMenu([
+      { type: 'label', text: `Worktree: ${branch}` },
+      { label: 'Remove worktree', danger: true, action: () => removePaneWorktree(sessionId) },
+      { label: 'Remove worktree (force)', danger: true, action: () => removePaneWorktree(sessionId, true) },
+    ], x, y);
+  } else {
+    showContextMenu([
+      { type: 'label', text: 'Git worktree isolation' },
+      { label: 'Create worktree...', action: () => promptAndCreateWorktree(sessionId) },
+    ], x, y);
+  }
+}
+
+async function promptAndCreateWorktree(sessionId) {
+  const pane = panes.get(sessionId);
+  if (!pane) return;
+  const repoRoot = pane.gitContext?.repo_root;
+  if (!repoRoot) {
+    showError('No git repository detected in this pane. Navigate to a repo directory first.');
+    return;
+  }
+  const suggested = `wt-${Date.now().toString(36)}`;
+  const branch = window.prompt('New branch name for worktree:', suggested);
+  if (!branch) return;
+  try {
+    const wtPath = await invoke('create_pane_worktree', { sessionId, branchName: branch, repoRoot });
+    pane.worktreePath = wtPath;
+    updateWorktreeButton(sessionId);
+  } catch (err) {
+    showError(`Could not create worktree: ${err}`);
+  }
+}
+
+async function removePaneWorktree(sessionId, force = false) {
+  const pane = panes.get(sessionId);
+  if (!pane) return;
+  try {
+    await invoke('remove_pane_worktree', { sessionId, force });
+    pane.worktreePath = null;
+    updateWorktreeButton(sessionId);
+  } catch (err) {
+    showError(`Could not remove worktree: ${err}`);
+  }
+}
+
+function updateWorktreeButton(sessionId) {
+  const pane = panes.get(sessionId);
+  if (!pane) return;
+  const btn = pane.domEl?.closest('.pane-wrap')?.querySelector('[data-action="worktree"]');
+  if (!btn) return;
+  if (pane.worktreePath) {
+    btn.classList.add('is-active');
+    const branch = pane.gitContext?.branch ?? pane.worktreePath.split(/[\\/]/).pop() ?? '?';
+    btn.title = `Worktree active: ${branch} (click to manage)`;
+  } else {
+    btn.classList.remove('is-active');
+    btn.title = 'Git worktree isolation (Ctrl+Shift+G)';
+  }
 }
 
 // Split type picker
@@ -3739,6 +3814,21 @@ keybindingsRuntime.register({
   label: 'Close active pane',
   defaultBindings: ['ctrl+w'],
   handler: () => { if (!closeCurrentSurface() && activePaneId) closePane(activePaneId); },
+});
+
+keybindingsRuntime.register({
+  id: 'pane.worktree',
+  label: 'Git worktree: create or manage for active pane',
+  defaultBindings: ['ctrl+shift+g'],
+  shouldRun: () => !!activePaneId,
+  handler: () => {
+    const pane = panes.get(activePaneId);
+    if (!pane) return;
+    const btn = pane.domEl?.closest('.pane-wrap')?.querySelector('[data-action="worktree"]');
+    const r = btn?.getBoundingClientRect();
+    if (r) showWorktreeMenu(activePaneId, r.left, r.bottom + 4);
+    else promptAndCreateWorktree(activePaneId);
+  },
 });
 
 const showHSplitPicker = () => {

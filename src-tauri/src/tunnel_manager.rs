@@ -25,6 +25,8 @@ use crate::session_manager::{find_exe, ShellTarget};
 enum TunnelHandle {
     Process(Child),
     Task(JoinHandle<()>),
+    /// Remote port is directly reachable — no tunnel needed, nothing to clean up.
+    Direct,
 }
 
 struct TunnelEntry {
@@ -86,6 +88,40 @@ impl TunnelManager {
 
             ShellTarget::Ssh { host, user, port, identity_file } |
             ShellTarget::RemoteTmux { host, user, port, identity_file, .. } => {
+                // Try direct connectivity before falling back to an SSH tunnel.
+                // On corporate networks the remote host is often reachable on the
+                // LAN and a tunnel adds latency + an extra ssh process for no gain.
+                //
+                // Order: (1) hostname as-is, (2) each resolved IP, (3) SSH tunnel.
+                if try_direct_tcp(host, remote_port).await {
+                    self.tunnels.lock().await.insert(
+                        (pane_id.to_string(), remote_port),
+                        TunnelEntry { connect_host: host.clone(), local_port: remote_port, handle: TunnelHandle::Direct },
+                    );
+                    return Ok(remap_url(url, host, remote_port));
+                }
+
+                // Resolve hostname → IPs and try each.
+                let resolved: Vec<std::net::IpAddr> = tokio::net::lookup_host(format!("{host}:0"))
+                    .await
+                    .into_iter()
+                    .flatten()
+                    .map(|s| s.ip())
+                    .filter(|ip| !ip.is_loopback())
+                    .collect();
+
+                for ip in &resolved {
+                    let ip_str = ip.to_string();
+                    if try_direct_tcp(&ip_str, remote_port).await {
+                        self.tunnels.lock().await.insert(
+                            (pane_id.to_string(), remote_port),
+                            TunnelEntry { connect_host: ip_str.clone(), local_port: remote_port, handle: TunnelHandle::Direct },
+                        );
+                        return Ok(remap_url(url, &ip_str, remote_port));
+                    }
+                }
+
+                // Fall back to SSH local port-forward.
                 let local_port = pick_ephemeral_port()?;
                 let child = spawn_ssh_tunnel(
                     host, user.as_deref(), *port, identity_file.as_deref(),
@@ -113,6 +149,7 @@ impl TunnelManager {
                 match &mut entry.handle {
                     TunnelHandle::Process(c) => { let _ = c.kill(); }
                     TunnelHandle::Task(t)    => t.abort(),
+                    TunnelHandle::Direct     => {}
                 }
                 false
             } else {
@@ -123,6 +160,17 @@ impl TunnelManager {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Return true if `host:port` accepts a TCP connection within 400 ms.
+/// Used to probe direct reachability before falling back to an SSH tunnel.
+async fn try_direct_tcp(host: &str, port: u16) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        TcpStream::connect((host, port)),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
+}
 
 /// Bind 127.0.0.1:0, get the assigned port, release the listener.
 fn pick_ephemeral_port() -> Result<u16, String> {

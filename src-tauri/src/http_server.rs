@@ -353,10 +353,12 @@ fn now_ms() -> u64 {
 }
 
 fn agent_hook_state_from_event(data: &serde_json::Value) -> AgentHookState {
-    let hook_event = data["hook_event_name"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
+    let raw_event = data["hook_event_name"].as_str().unwrap_or("unknown");
+    // Normalize Codex-specific event names to the wmux vocabulary.
+    let hook_event = match raw_event {
+        "SubagentStop" => "Stop",
+        other => other,
+    }.to_string();
     let tool = data["tool_name"].as_str().map(|s| s.to_string());
     let message = data["message"].as_str().map(|s| s.to_string());
     AgentHookState { hook_event, tool, message, event_ms: now_ms() }

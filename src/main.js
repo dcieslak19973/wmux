@@ -1582,29 +1582,62 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     });
 
     const hooksBtn = toolbarEl.querySelector('[data-action="hooks"]');
-    const installHooksCmd = isWsl ? 'install_claude_hooks_wsl' : 'install_claude_hooks';
-    const installHooksArgs = isWsl ? { distro: target.distro ?? null } : {};
-    const checkHooksCmd = isWsl ? 'check_claude_hooks_wsl' : 'check_claude_hooks';
-    const checkHooksArgs = isWsl ? { distro: target.distro ?? null } : {};
+    const distroArg = isWsl ? { distro: target.distro ?? null } : {};
 
-    invoke(checkHooksCmd, checkHooksArgs).then((installed) => {
-      if (installed) {
+    const HOOK_AGENTS = [
+      {
+        key: 'claude',
+        label: 'Claude Code',
+        checkCmd:   isWsl ? 'check_claude_hooks_wsl'   : 'check_claude_hooks',
+        installCmd: isWsl ? 'install_claude_hooks_wsl' : 'install_claude_hooks',
+      },
+      {
+        key: 'codex',
+        label: 'Codex',
+        checkCmd:   isWsl ? 'check_codex_hooks_wsl'   : 'check_codex_hooks',
+        installCmd: isWsl ? 'install_codex_hooks_wsl' : 'install_codex_hooks',
+      },
+    ];
+
+    // Track per-agent install status for menu labels.
+    const hookInstalled = {};
+    Promise.all(
+      HOOK_AGENTS.map((a) =>
+        invoke(a.checkCmd, distroArg)
+          .then((ok) => { hookInstalled[a.key] = ok; })
+          .catch(() => { hookInstalled[a.key] = false; })
+      )
+    ).then(() => {
+      if (Object.values(hookInstalled).some(Boolean)) {
         hooksBtn.classList.add('is-installed');
-        hooksBtn.title = 'Claude Code hooks installed (click to reinstall)';
+        const names = HOOK_AGENTS.filter((a) => hookInstalled[a.key]).map((a) => a.label).join(', ');
+        hooksBtn.title = `Hooks installed: ${names} (click to manage)`;
       }
-    }).catch(() => {});
+    });
 
-    hooksBtn.addEventListener('click', async (e) => {
+    hooksBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      hooksBtn.disabled = true;
-      try {
-        await invoke(installHooksCmd, installHooksArgs);
-        hooksBtn.classList.add('is-installed');
-        hooksBtn.title = 'Claude Code hooks installed (click to reinstall)';
-      } catch (err) {
-        hooksBtn.title = `Hook install failed: ${err}`;
-      }
-      hooksBtn.disabled = false;
+      const r = hooksBtn.getBoundingClientRect();
+      const items = [
+        { type: 'label', text: 'Install lifecycle hooks' },
+        ...HOOK_AGENTS.map((a) => ({
+          label: `${hookInstalled[a.key] ? '✓ ' : ''}${a.label}`,
+          action: async () => {
+            hooksBtn.disabled = true;
+            try {
+              await invoke(a.installCmd, distroArg);
+              hookInstalled[a.key] = true;
+              hooksBtn.classList.add('is-installed');
+              const names = HOOK_AGENTS.filter((x) => hookInstalled[x.key]).map((x) => x.label).join(', ');
+              hooksBtn.title = `Hooks installed: ${names} (click to manage)`;
+            } catch (err) {
+              showError(`Hook install failed (${a.label}): ${err}`);
+            }
+            hooksBtn.disabled = false;
+          },
+        })),
+      ];
+      showContextMenu(items, r.left, r.bottom + 4);
     });
 
   }

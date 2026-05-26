@@ -442,6 +442,9 @@ struct SessionEntry {
     output_buf: Arc<Mutex<Vec<u8>>>,
     /// OSC 133 block history for agent queries.
     block_store: Arc<Mutex<BlockStore>>,
+    /// Absolute path of the git worktree owned by this pane, if one was created
+    /// via `create_pane_worktree`. Cleaned up automatically on pane close.
+    worktree_path: Option<String>,
 }
 
 impl Clone for SessionEntry {
@@ -452,6 +455,7 @@ impl Clone for SessionEntry {
             label: self.label.clone(),
             output_buf: self.output_buf.clone(),
             block_store: self.block_store.clone(),
+            worktree_path: self.worktree_path.clone(),
         }
     }
 }
@@ -464,6 +468,7 @@ pub struct SessionMeta {
     pub last_command: Option<String>,
     pub is_running: bool,
     pub block_count: usize,
+    pub worktree_path: Option<String>,
 }
 
 /// Authoritative agent state pushed by a Claude Code hook event.
@@ -622,7 +627,7 @@ impl SessionManager {
 
         self.sessions.lock().await.insert(
             id.clone(),
-            SessionEntry { session: Arc::new(session), label: label.clone(), target, output_buf, block_store },
+            SessionEntry { session: Arc::new(session), label: label.clone(), target, output_buf, block_store, worktree_path: None },
         );
         Ok((id, label))
     }
@@ -692,7 +697,42 @@ impl SessionManager {
     }
 
     pub async fn close(&self, id: &str) -> bool {
-        self.sessions.lock().await.remove(id).is_some()
+        let entry = self.sessions.lock().await.remove(id);
+        if let Some(e) = entry {
+            if let Some(wt) = e.worktree_path {
+                cleanup_worktree(&wt);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn set_worktree_path(&self, id: &str, path: String) -> bool {
+        if let Some(entry) = self.sessions.lock().await.get_mut(id) {
+            entry.worktree_path = Some(path);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn take_worktree_path(&self, id: &str) -> Option<String> {
+        self.sessions.lock().await.get_mut(id)?.worktree_path.take()
+    }
+
+    pub async fn get_worktree_path(&self, id: &str) -> Option<String> {
+        self.sessions.lock().await.get(id)?.worktree_path.clone()
+    }
+
+    /// Returns (is_local, has_existing_worktree). Used by create_pane_worktree
+    /// to gate on pane type without exposing SessionEntry fields.
+    pub async fn pane_worktree_eligibility(&self, id: &str) -> Option<(bool, bool)> {
+        let sessions = self.sessions.lock().await;
+        let entry = sessions.get(id)?;
+        let is_local = matches!(entry.target, ShellTarget::Local);
+        let has_wt = entry.worktree_path.is_some();
+        Some((is_local, has_wt))
     }
 
     pub async fn list(&self) -> Vec<String> {
@@ -711,6 +751,7 @@ impl SessionManager {
                 last_command: store.last_command().map(str::to_owned),
                 is_running: store.is_running(),
                 block_count: store.block_count(),
+                worktree_path: entry.worktree_path.clone(),
             });
         }
         result
@@ -1026,6 +1067,60 @@ fn decode_utf16le(raw: &[u8]) -> String {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Remove a git worktree at `path`. Runs `git worktree remove --force` then
+/// falls back to `fs::remove_dir_all`, followed by a best-effort `git worktree
+/// prune` to remove stale administrative data from the main repo's `.git`.
+pub(crate) fn cleanup_worktree(path: &str) {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt as _;
+
+    // Resolve the git repo this worktree belongs to so we can run `prune`.
+    let repo_root: Option<String> = {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(path).args(["rev-parse", "--git-common-dir"]);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        cmd.output().ok().and_then(|o| {
+            if o.status.success() {
+                let raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                // --git-common-dir returns a path relative to `path` or absolute.
+                let p = std::path::Path::new(&raw);
+                if p.is_absolute() {
+                    p.parent().map(|x| x.to_string_lossy().into_owned())
+                } else {
+                    std::path::Path::new(path).join(&raw).parent()
+                        .map(|x| x.to_string_lossy().into_owned())
+                }
+            } else {
+                None
+            }
+        })
+    };
+
+    let mut removed_via_git = false;
+    {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["worktree", "remove", "--force", path]);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        if let Ok(status) = cmd.status() {
+            removed_via_git = status.success();
+        }
+    }
+
+    if !removed_via_git {
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    if let Some(root) = repo_root {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(&root).args(["worktree", "prune"]);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        let _ = cmd.status();
+    }
+}
 
 fn default_shell() -> String {
     let candidates = [

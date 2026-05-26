@@ -109,6 +109,8 @@ pub fn run() {
             commands::get_pr_diff_summary,
             commands::get_pr_file_diff,
             commands::list_git_worktrees,
+            commands::create_pane_worktree,
+            commands::remove_pane_worktree,
             commands::ask_agent_oneshot,
             commands::install_claude_hooks,
             commands::check_claude_hooks,

@@ -3081,6 +3081,131 @@ print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
 }
 
+// ── Codex hook installation ────────────────────────────────────────────────
+
+fn get_codex_settings_path() -> Result<PathBuf, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "cannot find home directory".to_string())?;
+    Ok(PathBuf::from(home).join(".codex").join("hooks.json"))
+}
+
+/// Install wmux lifecycle hooks into the Windows Codex hooks.json.
+/// Codex uses the same hooks format and event names as Claude Code.
+#[tauri::command]
+pub async fn install_codex_hooks() -> Result<String, String> {
+    let settings_path = get_codex_settings_path()?;
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let existing = if settings_path.exists() {
+        std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?
+    } else {
+        "{}".to_string()
+    };
+
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&existing).unwrap_or_else(|_| serde_json::json!({}));
+
+    if !settings["hooks"].is_object() {
+        settings["hooks"] = serde_json::json!({});
+    }
+
+    for event in ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "SubagentStop"] {
+        let updated = merge_hook_entry(&settings["hooks"][event], CLAUDE_HOOK_CMD_PS1);
+        settings["hooks"][event] = updated;
+    }
+
+    let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&settings_path, content).map_err(|e| e.to_string())?;
+    Ok("installed".to_string())
+}
+
+/// Return whether the wmux hooks are present in the Windows Codex hooks.json.
+#[tauri::command]
+pub async fn check_codex_hooks() -> Result<bool, String> {
+    let settings_path = match get_codex_settings_path() {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
+    if !settings_path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+    let settings: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    Ok(settings["hooks"]
+        .as_object()
+        .is_some_and(|hooks| {
+            hooks.values().any(|events| {
+                events.as_array().is_some_and(|arr| {
+                    arr.iter().any(|entry| {
+                        entry["hooks"].as_array().is_some_and(|hs| {
+                            hs.iter().any(|h| {
+                                h["command"]
+                                    .as_str()
+                                    .is_some_and(|cmd| cmd.contains(CLAUDE_HOOK_UNIQUE))
+                            })
+                        })
+                    })
+                })
+            })
+        }))
+}
+
+/// Install wmux lifecycle hooks into the WSL Codex hooks.json (~/.codex/hooks.json).
+#[tauri::command]
+pub async fn install_codex_hooks_wsl(distro: Option<String>) -> Result<String, String> {
+    let hook_cmd = CLAUDE_HOOK_CMD_BASH.replace('\'', "'\\''");
+    let install_cmd = format!(
+        "python3 -c \"\
+import json,os;\
+p=os.path.expanduser('~/.codex/hooks.json');\
+os.makedirs(os.path.dirname(p),exist_ok=True);\
+s=json.loads(open(p).read()) if os.path.exists(p) else {{}};\
+s.setdefault('hooks',{{}});\
+marker='agent-event?pane_id=';\
+[s['hooks'].__setitem__(ev,[e for e in s['hooks'].get(ev,[]) if not any(marker in h.get('command','') for h in e.get('hooks',[]))]+[{{'matcher':'','hooks':[{{'type':'command','command':'{hook_cmd}'}}]}}]) for ev in ['PreToolUse','PostToolUse','Stop','UserPromptSubmit','SubagentStop']];\
+open(p,'w').write(json.dumps(s,indent=2))\
+\" 2>&1"
+    );
+
+    let mut cmd = Command::new("wsl.exe");
+    if let Some(d) = &distro {
+        cmd.args(["--distribution", d.as_str()]);
+    }
+    let output = cmd
+        .args(["--", "bash", "-c", &install_cmd])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("hook install failed: {stderr}"));
+    }
+    Ok("installed".to_string())
+}
+
+/// Return whether the wmux hooks are present in the WSL Codex hooks.json.
+#[tauri::command]
+pub async fn check_codex_hooks_wsl(distro: Option<String>) -> Result<bool, String> {
+    let check_cmd = "python3 -c \"\
+import json,os;\
+p=os.path.expanduser('~/.codex/hooks.json');\
+s=json.loads(open(p).read()) if os.path.exists(p) else {};\
+print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get('hooks',{}).values() for e in v for hk in e.get('hooks',[])) else 'no')\
+\" 2>/dev/null || echo no";
+
+    let mut cmd = Command::new("wsl.exe");
+    if let Some(d) = &distro {
+        cmd.args(["--distribution", d.as_str()]);
+    }
+    let output = cmd
+        .args(["--", "bash", "-c", check_cmd])
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
+}
+
 // ── Collab share commands (Phase 1) ─────────────────────────────────────
 //
 // See `src/collab_server.rs` and `docs/multiplayer-design.md`. The server

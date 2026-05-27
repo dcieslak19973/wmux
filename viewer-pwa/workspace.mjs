@@ -263,6 +263,12 @@ function renderNode(node, paneInfo) {
   if (node.kind === 'split') {
     return renderSplit(node, paneInfo);
   }
+  if (node.kind === 'placeholder') {
+    const el = document.createElement('div');
+    el.className = 'workspace-leaf workspace-leaf-missing workspace-leaf-placeholder';
+    el.textContent = `${node.label ?? 'Pane'} — not available in shared view`;
+    return el;
+  }
   const errEl = document.createElement('div');
   errEl.className = 'workspace-empty';
   errEl.textContent = `unknown layout node: ${node.kind ?? '?'}`;

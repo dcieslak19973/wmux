@@ -301,6 +301,11 @@ export function createCollabRuntime({
   // shareable terminal panes), in which case callers collapse it out.
   function buildViewerLayout(el, paneIdToCode) {
     if (!el) return null;
+    // Non-terminal panes share the pane-leaf class but have no session stream.
+    // Check these BEFORE the generic pane-leaf branch or they return null.
+    if (el.classList?.contains('browser-pane-leaf'))   return { kind: 'placeholder', label: 'Browser' };
+    if (el.classList?.contains('markdown-pane-leaf'))  return { kind: 'placeholder', label: 'Markdown' };
+    if (el.classList?.contains('pr-review-pane-leaf')) return { kind: 'placeholder', label: 'PR Review' };
     if (el.classList?.contains('pane-leaf')) {
       const code = paneIdToCode.get(el.dataset.sessionId);
       return code ? { kind: 'leaf', code } : null;
@@ -309,9 +314,14 @@ export function createCollabRuntime({
       const dir = el.classList.contains('pane-split-h') ? 'h' : 'v';
       const kids = [...el.children].filter((c) => !c.classList.contains('pane-divider'));
       const [aSide, bSide] = kids;
-      // pane-split nests like: <split><leaf or split/><wrapper><leaf or split/></wrapper></split>
+      // Terminal splits wrap the right side: <split><leaf/><wrapper><leaf/></wrapper></split>
+      // Browser/markdown/pr-review splits do NOT wrap: <split><leaf/><browser-leaf/></split>
+      // Use bSide directly if it's already a recognised leaf or split; otherwise unwrap.
+      const bContent = (bSide?.classList?.contains('pane-leaf') || bSide?.classList?.contains('pane-split'))
+        ? bSide
+        : (bSide?.firstElementChild ?? bSide);
       const a = buildViewerLayout(aSide, paneIdToCode);
-      const b = buildViewerLayout(bSide?.firstElementChild ?? bSide, paneIdToCode);
+      const b = buildViewerLayout(bContent, paneIdToCode);
       if (!a && !b) return null;
       if (!b) return a;
       if (!a) return b;

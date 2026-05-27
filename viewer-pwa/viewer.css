@@ -353,3 +353,8 @@ main#workspace-root.workspace-split-mode {
   color: #d96a6a;
   font-size: 12px;
 }
+.workspace-leaf-placeholder {
+  color: #666;
+  font-size: 12px;
+  border: 1px dashed #333;
+}

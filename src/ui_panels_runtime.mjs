@@ -71,7 +71,7 @@ export function createUiPanelsRuntime({
     setTimeout(() => el.remove(), 5000);
   }
 
-  function showUpdatePrompt(updateInfo, { onInstall, onDismiss, onOpenSettings } = {}) {
+  function showUpdatePrompt(updateInfo, { onInstall, onDownload, onDismiss, onOpenSettings } = {}) {
     document.getElementById('update-prompt')?.remove();
     updatePromptVisible = true;
     const prompt = document.createElement('div');
@@ -90,6 +90,7 @@ export function createUiPanelsRuntime({
       <div class="update-prompt-actions">
         <button class="settings-btn-sm" data-action="settings">Settings</button>
         <button class="settings-btn-sm" data-action="later">Later</button>
+        <button class="settings-btn-sm" data-action="download">Download installer</button>
         <button class="settings-btn-sm update-prompt-install" data-action="install">Install update</button>
       </div>
     `;
@@ -109,8 +110,21 @@ export function createUiPanelsRuntime({
       cleanup();
       onDismiss?.();
     });
+    prompt.querySelector('[data-action="download"]').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = 'Downloading…';
+      try {
+        await onDownload?.();
+        button.textContent = 'Saved to Downloads';
+      } catch (err) {
+        button.disabled = false;
+        button.textContent = 'Download installer';
+      }
+    });
     prompt.querySelector('[data-action="install"]').addEventListener('click', async (event) => {
       const button = event.currentTarget;
+      const downloadBtn = prompt.querySelector('[data-action="download"]');
       button.disabled = true;
       button.textContent = 'Installing…';
       try {
@@ -118,6 +132,12 @@ export function createUiPanelsRuntime({
       } catch {
         button.disabled = false;
         button.textContent = 'Install update';
+        // Surface the download path as a fallback for environments that need admin.
+        if (downloadBtn) {
+          downloadBtn.textContent = 'Download installer (run as admin)';
+          downloadBtn.title = 'Save the installer to your Downloads folder, then right-click → Run as administrator';
+          downloadBtn.style.fontWeight = '600';
+        }
         return;
       }
     });

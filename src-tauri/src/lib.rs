@@ -100,6 +100,7 @@ pub fn run() {
             commands::get_app_version,
             commands::check_for_app_update,
             commands::install_app_update,
+            commands::download_update_installer,
             commands::complete_control_request,
             commands::exit_app,
             commands::install_shell_integration,

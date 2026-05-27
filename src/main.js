@@ -2861,9 +2861,12 @@ async function maybeAutoCheckForUpdates({ force = false } = {}) {
       try {
         await installAvailableUpdate({ endpoint, pubkey });
       } catch (err) {
-        showError(`Could not install update: ${err}`);
+        showError(`Could not install update: ${err}\n\nIf your environment requires admin rights, use "Download installer" to save the installer and run it as administrator.`);
         throw err;
       }
+    },
+    onDownload: async () => {
+      await invoke('download_update_installer', { config: { endpoint, pubkey } });
     },
     onDismiss: () => {
       localStorage.setItem(AUTO_UPDATE_DISMISSED_VERSION_KEY, result.version);

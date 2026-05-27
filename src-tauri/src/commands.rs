@@ -2548,6 +2548,62 @@ pub async fn install_app_update(
         .map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+pub struct DownloadedInstaller {
+    pub path: String,
+    pub version: String,
+}
+
+/// Download the update installer to the user's Downloads folder without running it.
+/// Opens the folder in the file manager when done so the user can run it manually
+/// (e.g. right-click → Run as administrator, or hand it to an IT admin workflow).
+#[tauri::command]
+pub async fn download_update_installer(
+    app: AppHandle,
+    config: UpdateConfigRequest,
+) -> Result<DownloadedInstaller, String> {
+    let update = build_runtime_updater(&app, &config)?
+        .build()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update is currently available".to_string())?;
+
+    let version = update.version.clone();
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let downloads_dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().home_dir().map(|h| h.join("Downloads")))
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&downloads_dir).map_err(|e| e.to_string())?;
+
+    // Derive the file extension from the download URL so we preserve the
+    // correct installer format (.msi, .exe, .AppImage, etc.).
+    let ext = update.download_url
+        .path_segments()
+        .and_then(|mut segs| segs.next_back())
+        .and_then(|name| std::path::Path::new(name).extension())
+        .and_then(|ext| ext.to_str())
+        .unwrap_or(if cfg!(target_os = "windows") { "msi" } else { "bin" });
+    let filename = format!("wmux-{version}.{ext}");
+    let dest = downloads_dir.join(&filename);
+    std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+
+    // Open the containing folder so it's visible to the user.
+    opener::open(&downloads_dir).ok();
+
+    Ok(DownloadedInstaller {
+        path: dest.to_string_lossy().into_owned(),
+        version,
+    })
+}
+
 #[tauri::command]
 pub async fn complete_control_request(
     bridge: State<'_, FrontendControlBridge>,

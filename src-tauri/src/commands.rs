@@ -2583,7 +2583,14 @@ pub async fn download_update_installer(
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&downloads_dir).map_err(|e| e.to_string())?;
 
-    let ext = if cfg!(target_os = "windows") { "exe" } else { "bin" };
+    // Derive the file extension from the download URL so we preserve the
+    // correct installer format (.msi, .exe, .AppImage, etc.).
+    let ext = update.download_url
+        .path_segments()
+        .and_then(|mut segs| segs.next_back())
+        .and_then(|name| std::path::Path::new(name).extension())
+        .and_then(|ext| ext.to_str())
+        .unwrap_or(if cfg!(target_os = "windows") { "msi" } else { "bin" });
     let filename = format!("wmux-{version}.{ext}");
     let dest = downloads_dir.join(&filename);
     std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;

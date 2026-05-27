@@ -2861,7 +2861,7 @@ async function maybeAutoCheckForUpdates({ force = false } = {}) {
       try {
         await installAvailableUpdate({ endpoint, pubkey });
       } catch (err) {
-        showError(`Could not install update: ${err}\n\nIf your environment requires admin rights, use "Download installer" to save the installer and run it as administrator.`);
+        showError(`Could not install update: ${err}\n\nIf your environment requires admin rights, use "Download installer" to save the .msi and run it as administrator, or deploy it silently via: msiexec /i wmux-<version>.msi /quiet`);
         throw err;
       }
     },

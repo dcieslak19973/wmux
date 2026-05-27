@@ -22,6 +22,7 @@ pub use control_bridge::FrontendControlBridge;
 pub use http_server::BrowserContentPending;
 pub use session_manager::{SessionManager, ShellTarget};
 pub use tunnel_manager::TunnelManager;
+pub use workbook::WorkbookLiveState;
 
 use tauri::Manager;
 use tauri_plugin_updater::Builder as UpdaterPluginBuilder;
@@ -37,6 +38,7 @@ pub fn run() {
     let browser_helpers = BrowserHelpers::new();
     let collab_store = collab_server::ShareSessionStore::new();
     let collab_handle = commands::CollabServerHandle::default();
+    let workbook_live_state = WorkbookLiveState::new();
 
     tauri::Builder::default()
         .plugin(UpdaterPluginBuilder::new().build())
@@ -47,6 +49,7 @@ pub fn run() {
         .manage(browser_helpers)
         .manage(collab_store)
         .manage(collab_handle)
+        .manage(workbook_live_state)
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
             commands::probe_remote_tmux_metadata,

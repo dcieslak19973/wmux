@@ -79,6 +79,7 @@ pub fn run() {
             commands::read_session_vault_entry,
             commands::capture_session_output,
             commands::capture_session_output_by_id,
+            commands::capture_pane_region_jpeg,
             commands::get_git_branch,
             commands::get_git_context,
             commands::save_artifact_preview,

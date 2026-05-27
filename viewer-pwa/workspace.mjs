@@ -269,6 +269,20 @@ function renderNode(node, paneInfo) {
     el.textContent = `${node.label ?? 'Pane'} — not available in shared view`;
     return el;
   }
+  if (node.kind === 'screenshot') {
+    const el = document.createElement('div');
+    el.className = 'workspace-leaf workspace-screenshot-leaf';
+    const header = document.createElement('div');
+    header.className = 'workspace-leaf-header';
+    header.innerHTML = `<span class="workspace-leaf-label">${escHtml(node.label ?? 'Pane')}</span>`;
+    const img = document.createElement('img');
+    img.className = 'workspace-screenshot-img';
+    img.src = node.data;
+    img.alt = node.label ?? 'Pane';
+    el.appendChild(header);
+    el.appendChild(img);
+    return el;
+  }
   const errEl = document.createElement('div');
   errEl.className = 'workspace-empty';
   errEl.textContent = `unknown layout node: ${node.kind ?? '?'}`;

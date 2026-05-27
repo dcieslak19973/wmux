@@ -1262,6 +1262,171 @@ pub async fn capture_session_output_by_id(
     Ok(manager.capture_output_by_id(&id).await)
 }
 
+/// Capture a rectangular region of the main WebView as a JPEG data URL.
+/// Coordinates are CSS logical pixels from `getBoundingClientRect()`.
+///
+/// Uses Windows GDI `PrintWindow(PW_RENDERFULLCONTENT)` which forces the DWM
+/// compositor to blit composited content — including cross-origin WebView2
+/// iframes — into the destination DC.  Non-Windows builds always return an
+/// error and the caller falls back to a placeholder.
+///
+/// Returns `"data:image/jpeg;base64,<b64>"` on success.
+#[tauri::command]
+pub async fn capture_pane_region_jpeg(
+    window: tauri::WebviewWindow,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    quality: Option<u8>,
+) -> Result<String, String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, x, y, width, height, quality);
+        return Err("capture_pane_region_jpeg is Windows-only".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    capture_pane_region_jpeg_win(window, x, y, width, height, quality).await
+}
+
+#[cfg(target_os = "windows")]
+async fn capture_pane_region_jpeg_win(
+    window: tauri::WebviewWindow,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    quality: Option<u8>,
+) -> Result<String, String> {
+    use std::sync::mpsc;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ, RGBQUAD,
+    };
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+
+    // Capture pixel data inside with_webview so we have access to the
+    // WebView2 controller (needed for the parent HWND).
+    type CaptureResult = Result<(Vec<u8>, u32, u32, u32, u32), String>;
+    let (tx, rx) = mpsc::sync_channel::<CaptureResult>(1);
+
+    window
+        .with_webview(move |wv| unsafe {
+            let send = |r: CaptureResult| {
+                tx.send(r).ok();
+            };
+
+            let mut hwnd = HWND::default();
+            if wv.controller().ParentWindow(&mut hwnd).is_err() {
+                send(Err("ParentWindow failed".into()));
+                return;
+            }
+
+            // Full window rect in screen coordinates (includes title bar + borders).
+            let mut win_rect = RECT::default();
+            if GetWindowRect(hwnd, &mut win_rect).is_err() {
+                send(Err("GetWindowRect failed".into()));
+                return;
+            }
+            let win_w = (win_rect.right - win_rect.left).max(1) as u32;
+            let win_h = (win_rect.bottom - win_rect.top).max(1) as u32;
+
+            // Derive the non-client offsets from client area size.
+            // nc_x = resize border width; nc_y = title bar + top border.
+            let mut cli = RECT::default();
+            let _ = GetClientRect(hwnd, &mut cli);
+            let cli_w = cli.right.max(1) as u32;
+            let cli_h = cli.bottom.max(1) as u32;
+            let nc_x = win_w.saturating_sub(cli_w) / 2;
+            let nc_y = win_h.saturating_sub(cli_h).saturating_sub(nc_x);
+
+            let dc = GetDC(Some(hwnd));
+            let mem_dc = CreateCompatibleDC(Some(dc));
+            let bmp = CreateCompatibleBitmap(dc, win_w as i32, win_h as i32);
+            let old = SelectObject(mem_dc, HGDIOBJ(bmp.0));
+
+            // PRINT_WINDOW_FLAGS(2) = PW_RENDERFULLCONTENT: forces DWM to
+            // composite WebView2 DirectComposition layers into the DC.
+            let _ = PrintWindow(hwnd, mem_dc, PRINT_WINDOW_FLAGS(2));
+
+            // Read pixels (top-down BGRA from GDI).
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: win_w as i32,
+                    biHeight: -(win_h as i32), // negative → top-down scan order
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0u32, // BI_RGB
+                    ..Default::default()
+                },
+                bmiColors: [RGBQUAD::default()],
+            };
+            let mut pixels = vec![0u8; (win_w * win_h * 4) as usize];
+            GetDIBits(
+                mem_dc,
+                bmp,
+                0,
+                win_h,
+                Some(pixels.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+
+            SelectObject(mem_dc, old);
+            let _ = DeleteObject(HGDIOBJ(bmp.0));
+            let _ = DeleteDC(mem_dc);
+            ReleaseDC(Some(hwnd), dc);
+
+            send(Ok((pixels, win_w, win_h, nc_x, nc_y)));
+        })
+        .map_err(|e| e.to_string())?;
+
+    let (pixels, win_w, win_h, nc_x, nc_y) = rx.recv().map_err(|e| e.to_string())??;
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+
+    // Convert CSS logical coords + non-client offset → physical pixel crop.
+    let px = nc_x + (x * scale) as u32;
+    let py = nc_y + (y * scale) as u32;
+    let pw = ((width * scale) as u32).min(win_w.saturating_sub(px));
+    let ph = ((height * scale) as u32).min(win_h.saturating_sub(py));
+    if pw == 0 || ph == 0 {
+        return Err("zero-size crop region".to_string());
+    }
+
+    // GDI returns BGRA; strip alpha and swap to RGB for the JPEG encoder.
+    let mut rgb = Vec::with_capacity((pw * ph * 3) as usize);
+    for row in py..(py + ph) {
+        for col in px..(px + pw) {
+            let i = ((row * win_w + col) * 4) as usize;
+            rgb.push(pixels[i + 2]); // R
+            rgb.push(pixels[i + 1]); // G
+            rgb.push(pixels[i]);     // B
+        }
+    }
+
+    let img = image::RgbImage::from_raw(pw, ph, rgb)
+        .ok_or_else(|| "failed to build crop image".to_string())?;
+
+    let mut jpeg_bytes = Vec::new();
+    {
+        use image::ImageEncoder;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality.unwrap_or(72))
+            .write_image(img.as_raw(), pw, ph, image::ExtendedColorType::Rgb8)
+            .map_err(|e| e.to_string())?;
+    }
+
+    use base64::Engine;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes)
+    ))
+}
+
 /// Persist an extracted HTML artifact locally and return a file URL that the
 /// embedded browser webview can navigate to.
 #[tauri::command]

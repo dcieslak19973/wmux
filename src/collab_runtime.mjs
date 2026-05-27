@@ -32,6 +32,7 @@ export function createCollabRuntime({
   // we can re-publish layout when panes split / close.
   // value: { code, paneIdToCode: Map<paneId, code>, permission, requireMutualConfirm }
   const activeWorkspaceSharesByHostWs = new Map();
+  let screenshotRefreshTimer = null;
   let cachedAddresses = [];
   let cachedTailscale = null; // { state, dns_name, tailscale_ips, error }
   let cachedPort = null;
@@ -299,13 +300,23 @@ export function createCollabRuntime({
   // `paneIdToCode` is a Map from host session id → minted pane share code.
   // Returns null for an entirely-ephemeral subtree (none of its leaves are
   // shareable terminal panes), in which case callers collapse it out.
-  function buildViewerLayout(el, paneIdToCode) {
+  function buildViewerLayout(el, paneIdToCode, screenshotMap = new Map()) {
     if (!el) return null;
     // Non-terminal panes share the pane-leaf class but have no session stream.
     // Check these BEFORE the generic pane-leaf branch or they return null.
-    if (el.classList?.contains('browser-pane-leaf'))   return { kind: 'placeholder', label: 'Browser' };
-    if (el.classList?.contains('markdown-pane-leaf'))  return { kind: 'placeholder', label: 'Markdown' };
-    if (el.classList?.contains('pr-review-pane-leaf')) return { kind: 'placeholder', label: 'PR Review' };
+    // If a screenshot was captured, include it; otherwise show a placeholder.
+    if (el.classList?.contains('browser-pane-leaf'))
+      return screenshotMap.has(el)
+        ? { kind: 'screenshot', data: screenshotMap.get(el), label: 'Browser' }
+        : { kind: 'placeholder', label: 'Browser' };
+    if (el.classList?.contains('markdown-pane-leaf'))
+      return screenshotMap.has(el)
+        ? { kind: 'screenshot', data: screenshotMap.get(el), label: 'Markdown' }
+        : { kind: 'placeholder', label: 'Markdown' };
+    if (el.classList?.contains('pr-review-pane-leaf'))
+      return screenshotMap.has(el)
+        ? { kind: 'screenshot', data: screenshotMap.get(el), label: 'PR Review' }
+        : { kind: 'placeholder', label: 'PR Review' };
     if (el.classList?.contains('pane-leaf')) {
       const code = paneIdToCode.get(el.dataset.sessionId);
       return code ? { kind: 'leaf', code } : null;
@@ -320,8 +331,8 @@ export function createCollabRuntime({
       const bContent = (bSide?.classList?.contains('pane-leaf') || bSide?.classList?.contains('pane-split'))
         ? bSide
         : (bSide?.firstElementChild ?? bSide);
-      const a = buildViewerLayout(aSide, paneIdToCode);
-      const b = buildViewerLayout(bContent, paneIdToCode);
+      const a = buildViewerLayout(aSide, paneIdToCode, screenshotMap);
+      const b = buildViewerLayout(bContent, paneIdToCode, screenshotMap);
       if (!a && !b) return null;
       if (!b) return a;
       if (!a) return b;
@@ -332,7 +343,7 @@ export function createCollabRuntime({
     }
     // Recurse into wrapper divs (the right-side wrapper of pane-split).
     if (el.firstElementChild) {
-      return buildViewerLayout(el.firstElementChild, paneIdToCode);
+      return buildViewerLayout(el.firstElementChild, paneIdToCode, screenshotMap);
     }
     return null;
   }
@@ -414,11 +425,44 @@ export function createCollabRuntime({
       }
     }
 
+    // Capture JPEG screenshots for all surface (non-terminal) panes in parallel.
+    // Falls back to placeholder silently if capture_image is unavailable.
+    const screenshotMap = new Map();
+    {
+      const surfaceEls = [];
+      for (const { rootEl } of tabRoots) {
+        const selfCheck = (el) => {
+          if (el?.classList?.contains('browser-pane-leaf') ||
+              el?.classList?.contains('markdown-pane-leaf') ||
+              el?.classList?.contains('pr-review-pane-leaf')) surfaceEls.push(el);
+        };
+        selfCheck(rootEl);
+        rootEl.querySelectorAll?.('.browser-pane-leaf,.markdown-pane-leaf,.pr-review-pane-leaf')
+          ?.forEach?.(selfCheck);
+      }
+      if (surfaceEls.length > 0) {
+        await Promise.allSettled(surfaceEls.map(async (el) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 2 || rect.height < 2) return;
+          try {
+            const data = await invoke('capture_pane_region_jpeg', {
+              x: Math.round(rect.x), y: Math.round(rect.y),
+              width: Math.round(rect.width), height: Math.round(rect.height),
+              quality: 72,
+            });
+            if (data) screenshotMap.set(el, data);
+          } catch {
+            // capture_image not supported or pane not visible — placeholder used
+          }
+        }));
+      }
+    }
+
     // Build the multi-tab layout shape:
     //   { kind: 'workspace', tabs: [{ id, title, layout }], active_tab_id }
     const tabPayloads = [];
     for (const { tab, rootEl } of tabRoots) {
-      const layout = buildViewerLayout(rootEl, wsShare.paneIdToCode);
+      const layout = buildViewerLayout(rootEl, wsShare.paneIdToCode, screenshotMap);
       if (!layout) continue;
       tabPayloads.push({ id: tab.id, title: tab.title || 'Tab', layout });
     }
@@ -447,6 +491,27 @@ export function createCollabRuntime({
       onHostLayoutChanged._timer = null;
       publishLayoutForWorkspace(wsId).catch((err) => console.warn('[collab] publish failed:', err));
     }, 150);
+  }
+
+  // Periodically re-publish workspace layout to refresh screenshots of live
+  // browser panes (e.g. a dev server the user is navigating). Stops itself
+  // when the workspace share is gone.
+  function startScreenshotRefresh(wsId) {
+    stopScreenshotRefresh();
+    screenshotRefreshTimer = setInterval(() => {
+      if (!activeWorkspaceSharesByHostWs.has(wsId)) {
+        stopScreenshotRefresh();
+        return;
+      }
+      publishLayoutForWorkspace(wsId).catch(() => {});
+    }, 5000);
+  }
+
+  function stopScreenshotRefresh() {
+    if (screenshotRefreshTimer) {
+      clearInterval(screenshotRefreshTimer);
+      screenshotRefreshTimer = null;
+    }
   }
 
   function findActiveTab() {
@@ -517,6 +582,9 @@ export function createCollabRuntime({
       // Capture the active tab's split layout and ship it to the backend
       // so the workspace viewer can render real splits instead of cards.
       await publishLayoutForWorkspace(wsId);
+
+      // Keep screenshots refreshed every 5 s while the share is live.
+      if (wsId) startScreenshotRefresh(wsId);
 
       await refresh();
       showWorkspaceShareDialog(mint, paneSpecs.length);

@@ -5,5 +5,9 @@ dist/
 target/
 **/target/
 
+# CI-generated CEF staging directories (populated by release.yml before tauri-action)
+binaries/
+cef-runtime/
+
 # Editor settings
 .vscode/

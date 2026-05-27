@@ -1,11 +1,53 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tauri::AppHandle;
 use tauri::Manager;
+use tokio::sync::Mutex as TokioMutex;
 
 pub const WORKBOOK_ROUTE: &str = "/workbook";
+
+// ---------------------------------------------------------------------------
+// Live workbook state — ephemeral, in-memory only (not persisted to disk).
+// Workbook pages POST their current UI state here after every render, and
+// agents POST commands that the workbook page polls and applies.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+pub struct WorkbookLiveState {
+    inner: Arc<TokioMutex<WorkbookLiveInner>>,
+}
+
+#[derive(Default)]
+struct WorkbookLiveInner {
+    states: HashMap<String, Value>,
+    commands: HashMap<String, Vec<Value>>,
+}
+
+impl WorkbookLiveState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn set_state(&self, id: &str, state: Value) {
+        self.inner.lock().await.states.insert(id.to_string(), state);
+    }
+
+    pub async fn get_state(&self, id: &str) -> Option<Value> {
+        self.inner.lock().await.states.get(id).cloned()
+    }
+
+    pub async fn push_command(&self, id: &str, command: Value) {
+        self.inner.lock().await.commands.entry(id.to_string()).or_default().push(command);
+    }
+
+    pub async fn drain_commands(&self, id: &str) -> Vec<Value> {
+        self.inner.lock().await.commands.remove(id).unwrap_or_default()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +78,10 @@ pub struct WorkbookSpec {
     pub created_at_ms: u64,
     #[serde(default)]
     pub updated_at_ms: u64,
+    /// Full HTML document the agent provides for complete creative control.
+    /// When set the structured schema fields are ignored for rendering.
+    #[serde(default)]
+    pub html: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -374,6 +420,9 @@ impl WorkbookStore {
 }
 
 pub fn render_workbook_html(spec: &WorkbookSpec) -> String {
+    if spec.html.is_some() {
+        return render_custom_workbook_html(spec);
+    }
     let spec_json = escape_json_for_html(&serde_json::to_string(spec).unwrap_or_else(|_| "{}".to_string()));
     let title = escape_html(&spec.title);
     let subtitle = spec
@@ -558,6 +607,25 @@ pub fn render_workbook_html(spec: &WorkbookSpec) -> String {
         .replace("__DESCRIPTION__", &description)
         .replace("__SPEC_JSON__", &spec_json)
         .replace("__WB_SCRIPT__", WORKBOOK_CLIENT_JS)
+}
+
+fn render_custom_workbook_html(spec: &WorkbookSpec) -> String {
+    let html = spec.html.as_deref().unwrap_or("");
+    let id_json = serde_json::to_string(&spec.id).unwrap_or_else(|_| r#""""#.to_string());
+    let id_escaped = spec.id.replace('\'', "\\'");
+    // Inject window.__wmux API so custom HTML can push state and receive commands.
+    // Uses relative URLs — safe because this page is served from the same origin.
+    let wmux_script = format!(
+        r#"<script>window.__wmux={{workbookId:{id_json},setState:function(s){{return fetch('/workbook-state?id={id_escaped}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(s)}}).catch(function(){{}});}},onCommand:function(cb){{var p=function(){{fetch('/workbook-command?id={id_escaped}').then(function(r){{return r.ok?r.json():[];}}).then(function(cs){{if(Array.isArray(cs))cs.forEach(cb);}}).catch(function(){{}}).finally(function(){{setTimeout(p,1500);}});}};setTimeout(p,1500);}}}};</script>"#
+    );
+    let lower = html.to_lowercase();
+    if let Some(pos) = lower.find("</head>") {
+        format!("{}{}{}", &html[..pos], wmux_script, &html[pos..])
+    } else if let Some(pos) = lower.find("<body") {
+        format!("{}{}{}", &html[..pos], wmux_script, &html[pos..])
+    } else {
+        format!("{wmux_script}{html}")
+    }
 }
 
 const WORKBOOK_CLIENT_JS: &str = r##"
@@ -781,6 +849,77 @@ const WORKBOOK_CLIENT_JS: &str = r##"
     host.innerHTML = `<div class="workbook-detail-card">${Object.entries(row).map(([key, value]) => `<div class="workbook-detail-row"><span>${escapeHtml(key)}</span><strong>${escapeHtml(formatValue(value))}</strong></div>`).join('')}</div>`;
   };
 
+  const pushState = (data) => {
+    if (!workbook.id) return;
+    fetch('/workbook-state?id=' + encodeURIComponent(workbook.id), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        search: state.search,
+        activeFilters: Object.assign({}, state.filters),
+        selectedGroup: state.selectedGroup,
+        selectedRowIndex: state.selectedRowIndex,
+        activeChartId: state.activeChartId,
+        visibleRowCount: data ? data.length : 0,
+        selectedRow: data ? (data[state.selectedRowIndex] ?? null) : null,
+      }),
+    }).catch(() => {});
+  };
+
+  const applyCommand = (cmd) => {
+    if (!cmd || !cmd.type) return;
+    switch (cmd.type) {
+      case 'set_filter':
+        if (cmd.field) state.filters[cmd.field] = cmd.value !== undefined ? cmd.value : 'all';
+        state.selectedRowIndex = 0;
+        render();
+        break;
+      case 'set_search': {
+        state.search = cmd.value !== undefined ? String(cmd.value) : '';
+        state.selectedRowIndex = 0;
+        const el = document.getElementById('workbook-search');
+        if (el) el.value = state.search;
+        render();
+        break;
+      }
+      case 'select_row':
+        if (typeof cmd.index === 'number') { state.selectedRowIndex = cmd.index; render(); }
+        break;
+      case 'select_chart':
+        if (cmd.chartId) {
+          state.activeChartId = cmd.chartId;
+          state.selectedGroup = null;
+          state.selectedRowIndex = 0;
+          render();
+        }
+        break;
+      case 'select_group':
+        state.selectedGroup = cmd.group !== undefined ? cmd.group : null;
+        state.selectedRowIndex = 0;
+        render();
+        break;
+      case 'reset':
+        state.search = '';
+        state.filters = Object.create(null);
+        state.sortField = workbook.table?.defaultSortField || workbook.columns?.[0]?.key || '';
+        state.sortDirection = workbook.table?.defaultSortDirection || 'desc';
+        state.activeChartId = workbook.layout?.selectedChartId || workbook.charts?.[0]?.id || null;
+        state.selectedGroup = null;
+        state.selectedRowIndex = 0;
+        render();
+        break;
+    }
+  };
+
+  const pollCommands = () => {
+    if (!workbook.id) return;
+    fetch('/workbook-command?id=' + encodeURIComponent(workbook.id))
+      .then((r) => r.ok ? r.json() : [])
+      .then((cmds) => { if (Array.isArray(cmds)) cmds.forEach(applyCommand); })
+      .catch(() => {})
+      .finally(() => { setTimeout(pollCommands, 1500); });
+  };
+
   const render = () => {
     const data = filteredRows();
     renderMetrics(data);
@@ -789,6 +928,7 @@ const WORKBOOK_CLIENT_JS: &str = r##"
     renderChart(data);
     renderTable(data);
     renderDetail(data);
+    pushState(data);
   };
 
   document.getElementById('workbook-search').addEventListener('input', (event) => {
@@ -809,6 +949,7 @@ const WORKBOOK_CLIENT_JS: &str = r##"
   });
 
   render();
+  setTimeout(pollCommands, 1500);
 })();
 "##;
 

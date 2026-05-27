@@ -9,6 +9,7 @@ This document describes the workbook app shape for wmux: a persistent, agent-edi
 3. Ask Claude to create or update a workbook with `workbook_create`, `workbook_add_chart`, and `workbook_open`.
 4. Open the returned `preview_url` in wmux, or use the `WKB` toolbar button to bring up the demo workbook surface.
 5. Keep iterating with `workbook_update`, `workbook_update_chart`, `workbook_remove_chart`, and `workbook_reorder_charts`.
+6. Read live UI state with `workbook_get_state`, or drive the pane with `workbook_send_command`.
 
 Example prompt for Claude:
 
@@ -22,6 +23,33 @@ Example prompt for Claude:
 - Preview path: `GET /workbook?id={id}`
 - Data model: workbook owns rows, columns, filters, metrics, charts, and layout
 - Rendering: wmux loads the preview URL in an embedded browser pane
+- State loop: workbook page POSTs live UI state to `POST /workbook-state?id={id}` after every render; agent reads it via `workbook_get_state`
+- Command loop: agent POSTs commands via `workbook_send_command`; page polls `GET /workbook-command?id={id}` every 1.5 s and applies them
+
+## Rendering modes
+
+### Structured (default)
+
+Use `rows`, `columns`, `metrics`, `charts`, and `filters`. Renders as the standard dark-theme table + bar-chart + detail-panel layout. Good for data exploration.
+
+### Custom HTML
+
+Set the `html` field to a complete HTML/CSS/JS document. wmux serves it directly with `window.__wmux` injected, giving agents full creative control: timelines, heatmaps, network graphs, annotated prose, canvas animations — anything.
+
+```js
+// Available in custom HTML after wmux injects the bootstrap script:
+window.__wmux.workbookId           // string — the workbook id
+window.__wmux.setState(stateObj)   // POST current UI state; agent reads via workbook_get_state
+window.__wmux.onCommand(callback)  // polls for agent commands; callback(cmd) on each one
+```
+
+Example custom workbook:
+```json
+{
+  "title": "Network Graph",
+  "html": "<!doctype html><html>...<script>window.__wmux.onCommand(cmd => { /* respond to agent */ });</script></html>"
+}
+```
 
 ## Workbook resource
 
@@ -36,6 +64,7 @@ Example prompt for Claude:
   "filters": [],
   "metrics": [],
   "charts": [],
+  "html": null,
   "table": {
     "enabled": true,
     "defaultSortField": "pullRequests",
@@ -68,157 +97,112 @@ Charts are first-class children of a workbook. A workbook can contain multiple c
 }
 ```
 
+## Live state
+
+The workbook page publishes its current UI state after every render. Shape for structured workbooks:
+
+```json
+{
+  "search": "query string or empty",
+  "activeFilters": { "fieldName": "selectedValue" },
+  "selectedGroup": "bar label or null",
+  "selectedRowIndex": 0,
+  "activeChartId": "chart-1",
+  "visibleRowCount": 42,
+  "selectedRow": { "repository": "wmux", "pullRequests": 5 }
+}
+```
+
+For custom HTML workbooks, shape is whatever the agent calls `window.__wmux.setState(obj)` with.
+
+## Commands
+
+Agents push commands via `workbook_send_command`. The workbook page polls every 1.5 s and applies them.
+
+| `type` | Required fields | Effect |
+|--------|----------------|--------|
+| `set_filter` | `field`, `value` | Apply a filter (use `"all"` to clear) |
+| `set_search` | `value` | Set the search query |
+| `select_row` | `index` | Select a table row by index |
+| `select_chart` | `chartId` | Switch the active chart |
+| `select_group` | `group` | Select a chart bar group (null to clear) |
+| `reset` | — | Clear all filters and selection |
+
+For custom HTML workbooks, the command object is forwarded as-is to the `onCommand` callback.
+
 ## MCP tools
 
 ### `workbook_list`
 List saved workbook summaries.
 
-Returns:
-- `id`
-- `title`
-- `subtitle`
-- `charts`
-- `rows`
-- `updatedAtMs`
-
 ### `workbook_get`
 Fetch a saved workbook by id.
 
-Input:
-```json
-{ "workbook_id": "wbk_123" }
-```
-
 ### `workbook_create`
-Create and persist a new workbook.
-
-Input:
-```json
-{
-  "workbook": {
-    "title": "Engineering Activity",
-    "rows": [],
-    "charts": []
-  }
-}
-```
-
-Returns:
-- `workbook`
-- `preview_url`
+Create and persist a new workbook. Supports structured (`rows`, `charts`, etc.) or custom (`html`) rendering mode.
 
 ### `workbook_update`
-Replace an existing workbook by id.
-
-Input:
-```json
-{
-  "workbook": {
-    "id": "wbk_123",
-    "title": "Engineering Activity v2"
-  }
-}
-```
+Replace an existing workbook spec by id.
 
 ### `workbook_delete`
 Delete a workbook.
 
-Input:
-```json
-{ "workbook_id": "wbk_123" }
-```
-
 ### `workbook_open`
-Open a workbook for preview.
-
-Input variants:
-```json
-{ "workbook_id": "wbk_123" }
-```
-
-or
-
-```json
-{ "workbook": { "title": "..." } }
-```
-
-Returns:
-- `workbook`
-- `preview_url`
+Open a workbook as a live browser pane inside wmux. Always call after `workbook_create` to make the workbook visible.
 
 ### `workbook_add_chart`
-Append a chart to a workbook.
-
-Input:
-```json
-{
-  "workbook_id": "wbk_123",
-  "chart": {
-    "title": "Issues by owner",
-    "kind": "bar",
-    "groupBy": "owner",
-    "valueField": "issues"
-  }
-}
-```
+Append a chart to a workbook's charts array.
 
 ### `workbook_update_chart`
 Replace a chart inside a workbook by chart id.
 
-Input:
-```json
-{
-  "workbook_id": "wbk_123",
-  "chart": {
-    "id": "chart_1",
-    "title": "Pull requests by repository"
-  }
-}
-```
-
 ### `workbook_remove_chart`
 Remove a chart from a workbook by chart id.
-
-Input:
-```json
-{
-  "workbook_id": "wbk_123",
-  "chart_id": "chart_1"
-}
-```
 
 ### `workbook_reorder_charts`
 Set the display order of charts.
 
+### `workbook_get_state`
+Read the current live UI state of an open workbook pane. Returns `null` if the workbook has not published state yet (not yet opened in a browser pane).
+
+Input:
+```json
+{ "workbook_id": "wbk_123" }
+```
+
+### `workbook_send_command`
+Drive a live workbook pane. The page applies the command within ~1.5 s.
+
 Input:
 ```json
 {
   "workbook_id": "wbk_123",
-  "chart_ids": ["chart_2", "chart_1"]
+  "command": { "type": "set_filter", "field": "repository", "value": "wmux" }
 }
 ```
 
 ## Lifecycle
 
-1. Claude creates a workbook with rows and one or more charts.
+1. Claude creates a workbook with rows and one or more charts (or custom HTML).
 2. wmux persists the workbook and returns a preview URL.
 3. wmux renders the workbook in an embedded browser pane.
-4. Claude adds or removes charts as the analysis evolves.
-5. wmux keeps the workbook state on disk so the same app can be reopened later.
+4. The workbook page begins publishing live UI state to `workbook_get_state`.
+5. Claude reads state, drives the pane with `workbook_send_command`, or updates the spec.
+6. wmux keeps the workbook state on disk so the same app can be reopened later.
 
 ## Recommended agent prompt
 
 Ask the agent to:
 
-- produce a workbook JSON object rather than a static image
-- include at least one metric and one chart
-- include chart ids so charts can be updated later
-- prefer multiple charts when the data supports multiple views
-- reopen the same workbook after each mutation to verify the result
+- For data exploration: produce a workbook JSON object with rows, metrics, and at least one chart
+- For creative/custom surfaces: set the `html` field to a complete document; use `window.__wmux.setState()` to publish meaningful state and `window.__wmux.onCommand()` to accept agent commands
+- Call `workbook_open` after creation to make it visible
+- Call `workbook_get_state` to read what the user is currently looking at before adding commentary or pivoting the analysis
+- Use `workbook_send_command` to guide the user's attention to specific data points
 
 ## Implementation notes
 
 - Workbooks are stored as JSON under the wmux app data directory.
 - Preview pages are served locally and loaded in the embedded browser.
-- The app surface is stateful, so it can be iterated on instead of regenerated from scratch.
-
+- Live state and commands are in-memory only — not persisted across app restarts.
+- `window.__wmux` is injected into custom HTML pages automatically by the renderer.

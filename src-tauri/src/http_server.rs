@@ -12,7 +12,7 @@
 ///   POST /agent-event?pane_id=<id>              — receive a Claude Code hook event
 ///   POST /mcp                                   — MCP JSON-RPC 2.0 (Streamable HTTP transport)
 use crate::session_manager::AgentHookState;
-use crate::workbook::{render_workbook_html, WorkbookChart, WorkbookSpec, WorkbookStore};
+use crate::workbook::{render_workbook_html, WorkbookChart, WorkbookLiveState, WorkbookSpec, WorkbookStore};
 use crate::{FrontendControlBridge, SessionManager};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -334,6 +334,68 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app:
                 Ok(content) => write_response_html(&mut stream, 200, &content).await,
                 Err(_) => write_response(&mut stream, 404, r#"{"error":"artifact not found"}"#).await,
             }
+        }
+        ("GET", "/workbook-state") => {
+            let params = parse_query(query);
+            let Some(workbook_id) = params.get("id") else {
+                write_response(&mut stream, 400, r#"{"error":"id required"}"#).await;
+                return;
+            };
+            let live = app.state::<WorkbookLiveState>();
+            let state = live.get_state(workbook_id).await;
+            let body = serde_json::to_string(&state).unwrap_or_else(|_| "null".to_string());
+            write_response(&mut stream, 200, &body).await;
+        }
+        ("POST", "/workbook-state") => {
+            let params = parse_query(query);
+            let Some(workbook_id) = params.get("id") else {
+                write_response(&mut stream, 400, r#"{"error":"id required"}"#).await;
+                return;
+            };
+            let workbook_id = workbook_id.clone();
+            let body_start = (header_end + 4).min(n);
+            let body = String::from_utf8_lossy(&req_bytes[body_start..n]);
+            let data: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => {
+                    write_response(&mut stream, 400, r#"{"error":"invalid JSON"}"#).await;
+                    return;
+                }
+            };
+            let live = app.state::<WorkbookLiveState>();
+            live.set_state(&workbook_id, data).await;
+            write_response(&mut stream, 200, r#"{"ok":true}"#).await;
+        }
+        ("GET", "/workbook-command") => {
+            let params = parse_query(query);
+            let Some(workbook_id) = params.get("id") else {
+                write_response(&mut stream, 400, r#"{"error":"id required"}"#).await;
+                return;
+            };
+            let live = app.state::<WorkbookLiveState>();
+            let commands = live.drain_commands(workbook_id).await;
+            let body = serde_json::to_string(&commands).unwrap_or_else(|_| "[]".to_string());
+            write_response(&mut stream, 200, &body).await;
+        }
+        ("POST", "/workbook-command") => {
+            let params = parse_query(query);
+            let Some(workbook_id) = params.get("id") else {
+                write_response(&mut stream, 400, r#"{"error":"id required"}"#).await;
+                return;
+            };
+            let workbook_id = workbook_id.clone();
+            let body_start = (header_end + 4).min(n);
+            let body = String::from_utf8_lossy(&req_bytes[body_start..n]);
+            let data: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => {
+                    write_response(&mut stream, 400, r#"{"error":"invalid JSON"}"#).await;
+                    return;
+                }
+            };
+            let live = app.state::<WorkbookLiveState>();
+            live.push_command(&workbook_id, data).await;
+            write_response(&mut stream, 200, r#"{"ok":true}"#).await;
         }
         _ => {
             write_response(&mut stream, 404, r#"{"error":"not found"}"#).await;
@@ -758,7 +820,7 @@ fn all_mcp_tools() -> Vec<serde_json::Value> {
                             "properties": {
                                 "workbook": {
                                     "type": "object",
-                                    "description": "Workbook spec. Required: title. Optional: rows (array of objects), columns (array of strings or {key,label} objects), metrics ([{label,value,detail}]), charts ([{title,kind,groupBy,valueField,aggregation,sort,limit}]), filters ([{label,field,kind}])."
+                                    "description": "Workbook spec. Required: title. Two rendering modes: (1) Structured — use rows, columns, metrics, charts, filters for the standard table+chart layout. (2) Custom HTML — set html to a complete HTML/CSS/JS document for full creative control (timelines, heatmaps, network graphs, annotated prose, whatever fits the data). In custom HTML mode, window.__wmux.setState(obj) publishes state the agent can read via workbook_get_state, and window.__wmux.onCommand(callback) receives commands from workbook_send_command."
                                 }
                             },
                             "required": ["workbook"]
@@ -849,6 +911,32 @@ fn all_mcp_tools() -> Vec<serde_json::Value> {
                                 }
                             },
                             "required": ["workbook_id", "chart_ids"]
+                        }
+                    },
+                    {
+                        "name": "workbook_get_state",
+                        "description": "Read the current live UI state of an open workbook — active filters, search query, selected row, visible row count, active chart id. Returns null if the workbook has not yet published state (i.e. it has not been opened in a browser pane yet).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string", "description": "Workbook id to read live state for." }
+                            },
+                            "required": ["workbook_id"]
+                        }
+                    },
+                    {
+                        "name": "workbook_send_command",
+                        "description": "Drive a live workbook pane: set filters, search, row selection, or active chart. The workbook page polls for commands every 1.5 s and applies them instantly. Supported command types: set_filter ({field, value}), set_search ({value}), select_row ({index}), select_chart ({chartId}), select_group ({group}), reset ({}). For custom-html workbooks, any object is forwarded to the window.__wmux.onCommand callback.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "workbook_id": { "type": "string" },
+                                "command": {
+                                    "type": "object",
+                                    "description": "Command to send. Required field: type. Additional fields depend on type: set_filter needs field+value, set_search needs value, select_row needs index, select_chart needs chartId, select_group needs group."
+                                }
+                            },
+                            "required": ["workbook_id", "command"]
                         }
                     },
                     {
@@ -1453,6 +1541,27 @@ pub async fn dispatch_tool(
                 "preview_url": WorkbookStore::preview_url(&saved.id)
             }))
             .map_err(|e| e.to_string())
+        }
+        "workbook_get_state" => {
+            let workbook_id = args["workbook_id"]
+                .as_str()
+                .ok_or_else(|| "workbook_id is required".to_string())?;
+            let live = app.state::<WorkbookLiveState>();
+            let state = live.get_state(workbook_id).await;
+            serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
+        }
+        "workbook_send_command" => {
+            let workbook_id = args["workbook_id"]
+                .as_str()
+                .ok_or_else(|| "workbook_id is required".to_string())?;
+            let command = args["command"].clone();
+            if command.is_null() {
+                return Err("command is required".to_string());
+            }
+            let live = app.state::<WorkbookLiveState>();
+            live.push_command(workbook_id, command).await;
+            serde_json::to_string_pretty(&serde_json::json!({"ok": true}))
+                .map_err(|e| e.to_string())
         }
         "browser_list" => {
             // Unified listing. Returns both iframe panes and CEF helpers in

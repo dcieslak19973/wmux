@@ -984,10 +984,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
         await openBrowserSplitForTab(tabId, resolved);
       } catch (err) {
         console.warn('[wmux] tunnel resolve failed, falling back to OS browser:', err);
-        window.open(uri, '_blank');
+        invoke('open_external_url', { url: uri }).catch((e) => console.warn('[wmux] open_external_url failed:', e));
       }
     } else {
-      window.open(uri, '_blank');
+      invoke('open_external_url', { url: uri }).catch((e) => console.warn('[wmux] open_external_url failed:', e));
     }
   }, {
     hover(event) {

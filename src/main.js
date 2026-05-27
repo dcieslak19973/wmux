@@ -1582,20 +1582,21 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     });
 
     const hooksBtn = toolbarEl.querySelector('[data-action="hooks"]');
-    const distroArg = isWsl ? { distro: target.distro ?? null } : {};
+    const sshArgs = isSsh ? { host: target.host, user: target.user ?? null, port: target.port ?? null, identityFile: target.identity_file ?? null } : null;
+    const hookArgs = isWsl ? { distro: target.distro ?? null } : isSsh ? sshArgs : {};
 
     const HOOK_AGENTS = [
       {
         key: 'claude',
         label: 'Claude Code',
-        checkCmd:   isWsl ? 'check_claude_hooks_wsl'   : 'check_claude_hooks',
-        installCmd: isWsl ? 'install_claude_hooks_wsl' : 'install_claude_hooks',
+        checkCmd:   isWsl ? 'check_claude_hooks_wsl'   : isSsh ? 'check_claude_hooks_ssh'   : 'check_claude_hooks',
+        installCmd: isWsl ? 'install_claude_hooks_wsl' : isSsh ? 'install_claude_hooks_ssh' : 'install_claude_hooks',
       },
       {
         key: 'codex',
         label: 'Codex',
-        checkCmd:   isWsl ? 'check_codex_hooks_wsl'   : 'check_codex_hooks',
-        installCmd: isWsl ? 'install_codex_hooks_wsl' : 'install_codex_hooks',
+        checkCmd:   isWsl ? 'check_codex_hooks_wsl'   : isSsh ? 'check_codex_hooks_ssh'   : 'check_codex_hooks',
+        installCmd: isWsl ? 'install_codex_hooks_wsl' : isSsh ? 'install_codex_hooks_ssh' : 'install_codex_hooks',
       },
     ];
 
@@ -1603,7 +1604,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     const hookInstalled = {};
     Promise.all(
       HOOK_AGENTS.map((a) =>
-        invoke(a.checkCmd, distroArg)
+        invoke(a.checkCmd, hookArgs)
           .then((ok) => { hookInstalled[a.key] = ok; })
           .catch(() => { hookInstalled[a.key] = false; })
       )
@@ -1625,7 +1626,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
           action: async () => {
             hooksBtn.disabled = true;
             try {
-              await invoke(a.installCmd, distroArg);
+              await invoke(a.installCmd, hookArgs);
               hookInstalled[a.key] = true;
               hooksBtn.classList.add('is-installed');
               const names = HOOK_AGENTS.filter((x) => hookInstalled[x.key]).map((x) => x.label).join(', ');

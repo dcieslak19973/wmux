@@ -64,6 +64,39 @@ jobs:
             throw "Missing repo secret TAURI_SIGNING_PRIVATE_KEY. Generate a Tauri updater keypair once, then add the private key as a GitHub Actions secret before pushing a release tag."
           }
 
+      # ── Browser helper + CEF runtime ─────────────────────────────────────────
+      # Build the out-of-process CEF helper and stage it where tauri.conf.json's
+      # externalBinaries / resources expect it.  The helper binary gets the
+      # target-triple suffix that Tauri requires for externalBinaries; CEF's
+      # runtime DLLs, pak files, and locales go into cef-runtime/ and are
+      # installed next to wmux.exe by the MSI (needed because CEF resolves its
+      # resources relative to the helper exe's directory).
+      - name: Build browser helper and stage CEF runtime
+        shell: pwsh
+        run: |
+          cargo build --package wmux-browser-helper --release
+
+          New-Item -ItemType Directory -Force binaries | Out-Null
+          Copy-Item target/release/wmux-browser-helper.exe `
+            binaries/wmux-browser-helper-x86_64-pc-windows-msvc.exe -Force
+
+          New-Item -ItemType Directory -Force cef-runtime | Out-Null
+          $cef_files = @(
+            "wmux-browser-helper-subprocess.exe",
+            "chrome_elf.dll", "d3dcompiler_47.dll", "dxcompiler.dll", "dxil.dll",
+            "libcef.dll", "libEGL.dll", "libGLESv2.dll",
+            "vk_swiftshader.dll", "vulkan-1.dll",
+            "icudtl.dat", "vk_swiftshader_icd.json",
+            "chrome_100_percent.pak", "chrome_200_percent.pak", "resources.pak"
+          )
+          foreach ($f in $cef_files) {
+            $src = "target/release/$f"
+            if (Test-Path $src) { Copy-Item $src "cef-runtime/$f" -Force }
+          }
+          if (Test-Path target/release/locales) {
+            Copy-Item target/release/locales cef-runtime/locales -Recurse -Force
+          }
+
       # ── Build + Release ───────────────────────────────────────────────────
       # tauri-action runs `beforeBuildCommand` (npm run build) automatically,
       # then `cargo tauri build`, then uploads artifacts to a GitHub Release.
@@ -89,6 +122,7 @@ jobs:
           releaseDraft: false     # publish automatically when the tag workflow succeeds
           prerelease: ${{ contains(github.ref_name, '-') }}  # e.g. v1.0.0-beta.1
           includeUpdaterJson: true
+          args: '--config bundle.release.json'
 
       - name: Package portable build
         shell: pwsh
@@ -104,6 +138,16 @@ jobs:
           Copy-Item "README.md" "$portableDir/README.md" -Force
           if (Test-Path "LICENSE") {
             Copy-Item "LICENSE" "$portableDir/LICENSE" -Force
+          }
+
+          # Include the CEF browser helper and its runtime files so the
+          # portable build can spawn browser panes without an MSI install.
+          if (Test-Path "cef-runtime") {
+            Copy-Item "cef-runtime/*" "$portableDir/" -Recurse -Force
+          }
+          if (Test-Path "binaries/wmux-browser-helper-x86_64-pc-windows-msvc.exe") {
+            Copy-Item "binaries/wmux-browser-helper-x86_64-pc-windows-msvc.exe" `
+              "$portableDir/wmux-browser-helper.exe" -Force
           }
 
           if (Test-Path $zipPath) {

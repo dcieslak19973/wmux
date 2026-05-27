@@ -3438,6 +3438,109 @@ print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
 }
 
+// ── SSH hook installation (Claude Code + Codex) ────────────────────────────
+
+#[tauri::command]
+pub async fn install_claude_hooks_ssh(
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<String, String> {
+    let hook_cmd_hex = hex_encode(CLAUDE_HOOK_CMD_BASH.as_bytes());
+    let install_cmd = format!(
+        "python3 -c \"\
+import json,os,binascii;\
+p=os.path.expanduser('~/.claude/settings.json');\
+s=json.loads(open(p).read()) if os.path.exists(p) else {{}};\
+h=s.setdefault('hooks',{{}});\
+cmd=binascii.unhexlify('{}').decode();\
+marker='agent-event?pane_id=';\
+entry={{'matcher':'','hooks':[{{'type':'command','command':cmd}}]}};\
+[h.__setitem__(e,[x for x in h.get(e,[]) if not any(marker in hk.get('command','') for hk in x.get('hooks',[]))]+[entry]) for e in ['PreToolUse','PostToolUse','Stop','Notification','UserPromptSubmit']];\
+os.makedirs(os.path.dirname(p),exist_ok=True);\
+open(p,'w').write(json.dumps(s,indent=2));\
+print('ok')\"",
+        hook_cmd_hex
+    );
+    let result = tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &install_cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(format!("installed: {result}"))
+}
+
+#[tauri::command]
+pub async fn check_claude_hooks_ssh(
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<bool, String> {
+    let check_cmd = "python3 -c \"\
+import json,os;\
+p=os.path.expanduser('~/.claude/settings.json');\
+s=json.loads(open(p).read()) if os.path.exists(p) else {};\
+print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get('hooks',{}).values() for e in v for hk in e.get('hooks',[])) else 'no')\
+\" 2>/dev/null || echo no";
+    let result = tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), check_cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(result.trim() == "yes")
+}
+
+#[tauri::command]
+pub async fn install_codex_hooks_ssh(
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<String, String> {
+    let hook_cmd = CLAUDE_HOOK_CMD_BASH.replace('\'', "'\\''");
+    let install_cmd = format!(
+        "python3 -c \"\
+import json,os;\
+p=os.path.expanduser('~/.codex/hooks.json');\
+os.makedirs(os.path.dirname(p),exist_ok=True);\
+s=json.loads(open(p).read()) if os.path.exists(p) else {{}};\
+s.setdefault('hooks',{{}});\
+marker='agent-event?pane_id=';\
+[s['hooks'].__setitem__(ev,[e for e in s['hooks'].get(ev,[]) if not any(marker in h.get('command','') for h in e.get('hooks',[]))]+[{{'matcher':'','hooks':[{{'type':'command','command':'{hook_cmd}'}}]}}]) for ev in ['PreToolUse','PostToolUse','Stop','UserPromptSubmit','SubagentStop']];\
+open(p,'w').write(json.dumps(s,indent=2))\
+\" 2>&1"
+    );
+    let result = tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &install_cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(format!("installed: {result}"))
+}
+
+#[tauri::command]
+pub async fn check_codex_hooks_ssh(
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<bool, String> {
+    let check_cmd = "python3 -c \"\
+import json,os;\
+p=os.path.expanduser('~/.codex/hooks.json');\
+s=json.loads(open(p).read()) if os.path.exists(p) else {};\
+print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get('hooks',{}).values() for e in v for hk in e.get('hooks',[])) else 'no')\
+\" 2>/dev/null || echo no";
+    let result = tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), check_cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(result.trim() == "yes")
+}
+
 // ── Collab share commands (Phase 1) ─────────────────────────────────────
 //
 // See `src/collab_server.rs` and `docs/multiplayer-design.md`. The server

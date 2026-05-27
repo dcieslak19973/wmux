@@ -36,28 +36,7 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ],
-    "externalBinaries": [
-      "../binaries/wmux-browser-helper"
-    ],
-    "resources": {
-      "../cef-runtime/wmux-browser-helper-subprocess.exe": "wmux-browser-helper-subprocess.exe",
-      "../cef-runtime/chrome_elf.dll": "chrome_elf.dll",
-      "../cef-runtime/d3dcompiler_47.dll": "d3dcompiler_47.dll",
-      "../cef-runtime/dxcompiler.dll": "dxcompiler.dll",
-      "../cef-runtime/dxil.dll": "dxil.dll",
-      "../cef-runtime/libcef.dll": "libcef.dll",
-      "../cef-runtime/libEGL.dll": "libEGL.dll",
-      "../cef-runtime/libGLESv2.dll": "libGLESv2.dll",
-      "../cef-runtime/vk_swiftshader.dll": "vk_swiftshader.dll",
-      "../cef-runtime/vulkan-1.dll": "vulkan-1.dll",
-      "../cef-runtime/icudtl.dat": "icudtl.dat",
-      "../cef-runtime/vk_swiftshader_icd.json": "vk_swiftshader_icd.json",
-      "../cef-runtime/chrome_100_percent.pak": "chrome_100_percent.pak",
-      "../cef-runtime/chrome_200_percent.pak": "chrome_200_percent.pak",
-      "../cef-runtime/resources.pak": "resources.pak",
-      "../cef-runtime/locales": "locales"
-    }
+    ]
   },
   "plugins": {
     "updater": {

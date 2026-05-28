@@ -441,6 +441,12 @@ fn run_remote_ssh_script(
     };
     cmd.arg("sh").arg("-lc").arg(script);
 
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+
     let output = cmd.output().map_err(|e| e.to_string())?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

@@ -3458,9 +3458,16 @@ pub async fn check_ssh_api_tunnel(
     identity_file: Option<String>,
 ) -> Result<bool, String> {
     let tunnel_port = crate::session_manager::pane_id_to_tunnel_port(&pane_id);
+    // Retry twice with 1 s sleep; fall back from curl → wget → /dev/tcp so the
+    // check works on minimal AMIs (Amazon Linux 2, Alpine) that lack curl.
     let check_cmd = format!(
-        "curl -sf --max-time 3 http://localhost:{}/info 2>/dev/null && echo __ok__ || echo __fail__",
-        tunnel_port
+        "for _i in 1 2; do \
+           if command -v curl >/dev/null 2>&1 && curl -sf --max-time 2 http://localhost:{p}/info >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
+           if command -v wget >/dev/null 2>&1 && wget -qO- --timeout=2 http://localhost:{p}/info >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
+           if bash -c 'exec 3<>/dev/tcp/localhost/{p}' 2>/dev/null; then echo __ok__; exit 0; fi; \
+           sleep 1; \
+         done; echo __fail__",
+        p = tunnel_port
     );
     let result = tokio::task::spawn_blocking(move || {
         run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &check_cmd)

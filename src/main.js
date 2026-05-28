@@ -1603,9 +1603,14 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       e.stopPropagation();
       if (mcpBtn.dataset.tunnelDown === 'true') {
         showError(
-          'The wmux API tunnel is not reachable from the remote machine.\n\n' +
-          'Your SSH server likely has AllowTcpForwarding disabled.\n\n' +
-          'Ask your admin to enable it, or add to your ~/.ssh/config:\n' +
+          'The wmux API tunnel could not be verified on the remote machine.\n\n' +
+          'Possible causes:\n' +
+          '• curl and wget are not installed — the check needs one to probe localhost\n' +
+          '• The tunnel is still connecting — try again in a few seconds\n' +
+          '• AllowTcpForwarding is disabled on the SSH server\n' +
+          '• A port conflict on the remote machine\n\n' +
+          'If AllowTcpForwarding is the issue, ask your admin to enable it,\n' +
+          'or add to your ~/.ssh/config:\n' +
           '  Host your-server\n    RemoteForward <port> localhost:7766\n\n' +
           '(The port wmux assigns is derived from your pane ID — check $WMUX_API_PORT in the session.)'
         );
@@ -1626,7 +1631,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
           if (!ok) {
             mcpBtn.dataset.tunnelDown = 'true';
             mcpBtn.classList.add('tunnel-down');
-            mcpBtn.title = 'MCP tunnel unavailable — SSH server may have AllowTcpForwarding disabled (click for details)';
+            mcpBtn.title = 'MCP tunnel check failed — click for possible causes';
           }
         })
         .catch((err) => {

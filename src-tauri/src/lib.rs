@@ -128,6 +128,7 @@ pub fn run() {
             commands::install_codex_hooks_wsl,
             commands::check_codex_hooks_wsl,
             commands::check_ssh_api_tunnel,
+            commands::configure_ssh_mcp,
             commands::install_claude_hooks_ssh,
             commands::check_claude_hooks_ssh,
             commands::install_codex_hooks_ssh,

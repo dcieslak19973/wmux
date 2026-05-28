@@ -3483,6 +3483,31 @@ pub async fn check_ssh_api_tunnel(
     Ok(result.contains("__ok__"))
 }
 
+/// Silently reconfigure the wmux MCP server entry on the remote machine so it
+/// points at the current session's tunnel port.  Idempotent: removes any
+/// existing "wmux" entry first so a stale port never blocks a new session.
+#[tauri::command]
+pub async fn configure_ssh_mcp(
+    pane_id: String,
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<(), String> {
+    let tunnel_port = crate::session_manager::pane_id_to_tunnel_port(&pane_id);
+    let cmd = format!(
+        "command -v claude >/dev/null 2>&1 && \
+         claude mcp remove wmux 2>/dev/null | true && \
+         claude mcp add --transport http wmux http://localhost:{tunnel_port}/mcp 2>/dev/null | true"
+    );
+    tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(())
+}
+
 // ── SSH hook installation (Claude Code + Codex) ────────────────────────────
 
 #[tauri::command]

@@ -1532,9 +1532,24 @@ pub async fn dispatch_tool(
                     .ok_or_else(|| "workbook_id or workbook is required".to_string())?;
                 store.get(workbook_id)?
             };
+            // Open the workbook in wmux's browser pane directly — more reliable
+            // than the hook-based path since it works regardless of whether
+            // Claude Code hooks are installed on the remote machine.
+            let local_url = format!("http://localhost:{}/workbook?id={}", actual_port(), workbook.id);
+            {
+                let bridge2 = bridge.clone();
+                let app2 = app.clone();
+                let url = local_url.clone();
+                tokio::spawn(async move {
+                    let _ = bridge2
+                        .request(&app2, "open-browser", serde_json::json!({ "url": url }))
+                        .await;
+                });
+            }
             serde_json::to_string_pretty(&serde_json::json!({
                 "workbook": workbook,
-                "preview_url": WorkbookStore::preview_url(api_base, &workbook.id)
+                "preview_url": WorkbookStore::preview_url(api_base, &workbook.id),
+                "local_url": local_url,
             }))
             .map_err(|e| e.to_string())
         }

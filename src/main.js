@@ -1631,6 +1631,12 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     const hookArgs = isWsl ? { distro: target.distro ?? null } : isSsh ? sshArgs : {};
 
     if (isSsh) {
+      // Auto-configure the wmux MCP entry on the remote after the tunnel is up.
+      // Runs silently via a background SSH connection — no terminal output.
+      setTimeout(() => {
+        invoke('configure_ssh_mcp', { paneId: sessionId, ...sshArgs }).catch(() => {});
+      }, 6000);
+
       // Check tunnel twice: first at 6 s (tunnel usually negotiates by then),
       // then retry at 14 s if the first attempt fails (handles slow connections).
       const runTunnelCheck = (onFail) =>
@@ -3709,12 +3715,8 @@ void listen('agent-hook-event', (event) => {
         else if (Array.isArray(content)) text = content[0]?.text ?? content[0]?.output ?? null;
         else if (content == null) text = null;
       }
-      const parsed = JSON.parse(text ?? '{}');
-      const preview_url = parsed.preview_url;
-      if (preview_url) {
-        const tabId = panes.get(pane_id)?.tabId ?? activeTabId;
-        openBrowserSplitForTab(tabId, preview_url).catch(() => {});
-      }
+      // Workbook auto-open is handled by the Rust dispatch (open-browser control
+      // request) so it works regardless of hook installation on the remote.
     } catch (_) { /* malformed response — ignore */ }
   }
 });

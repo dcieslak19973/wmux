@@ -1489,6 +1489,20 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   const sshErrorIsKeyPermission = (msg) =>
     /bad permissions|UNPROTECTED PRIVATE KEY|Load key|Permission denied.*publickey/i.test(msg);
 
+  const SSH_KEY_PERMISSION_HELP =
+    'SSH key permissions error — ssh.exe cannot use a key stored in the WSL filesystem.\n\n' +
+    'In PowerShell, run:\n\n' +
+    '  New-Item -ItemType Directory -Force "$env:USERPROFILE\\.ssh" | Out-Null\n' +
+    '  $content = (wsl -- cat "~/.ssh/your-key.pem") -join "`n"\n' +
+    '  [System.IO.File]::WriteAllText("$env:USERPROFILE\\.ssh\\your-key.pem", $content + "`n")\n' +
+    '  icacls "$env:USERPROFILE\\.ssh\\your-key.pem" /inheritance:r /grant:r "${env:USERNAME}:R"\n\n' +
+    'If access to .ssh is denied by your VDI, use Documents instead:\n\n' +
+    '  New-Item -ItemType Directory -Force "$env:USERPROFILE\\Documents\\ssh-keys" | Out-Null\n' +
+    '  $content = (wsl -- cat "~/.ssh/your-key.pem") -join "`n"\n' +
+    '  [System.IO.File]::WriteAllText("$env:USERPROFILE\\Documents\\ssh-keys\\your-key.pem", $content + "`n")\n' +
+    '  icacls "$env:USERPROFILE\\Documents\\ssh-keys\\your-key.pem" /inheritance:r /grant:r "${env:USERNAME}:R"\n\n' +
+    'Then update your wmux session to use the Windows key path.';
+
   const targetKind = getTargetKind(target);
   const isBlocksCapable = targetKind === 'local' || targetKind === 'wsl' || targetKind === 'ssh';
   const isWsl = targetKind === 'wsl';
@@ -1571,7 +1585,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
         const errStr = String(err ?? '');
         blocksBtn.title = `Setup failed: ${err}`;
         if (sshErrorIsKeyPermission(errStr)) {
-          showError('SSH key permissions error — ssh.exe cannot use this key.\n\nFix: copy the key to your Windows .ssh folder.\nIn your WSL terminal:\n  cp ~/.ssh/your-key.pem /mnt/c/Users/$USER/.ssh/\nThen in PowerShell:\n  icacls "$env:USERPROFILE\\.ssh\\your-key.pem" /inheritance:r /grant:r "${env:USERNAME}:R"');
+          showError(SSH_KEY_PERMISSION_HELP);
         } else if (errStr) {
           showError(`Shell integration install failed: ${errStr}`);
         }
@@ -1621,13 +1635,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
           const errStr = String(err ?? '');
           if (sshErrorIsKeyPermission(errStr)) {
             mcpBtn.title = 'SSH key permissions error (click for details)';
-            showToast(
-              'SSH key permissions error: your private key file is not accessible by ssh.exe.\n\n' +
-              'Fix: in your WSL terminal run:\n  cp ~/.ssh/your-key.pem /mnt/c/Users/$USER/.ssh/\n\n' +
-              'Then in PowerShell:\n  icacls "$env:USERPROFILE\\.ssh\\your-key.pem" /inheritance:r /grant:r "${env:USERNAME}:R"\n\n' +
-              'Then update your wmux session to use the Windows key path.',
-              'error'
-            );
+            showError(SSH_KEY_PERMISSION_HELP);
           } else {
             mcpBtn.title = 'SSH connection failed — could not check MCP tunnel (click for details)';
           }

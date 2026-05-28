@@ -441,6 +441,12 @@ fn run_remote_ssh_script(
     };
     cmd.arg("sh").arg("-lc").arg(script);
 
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+
     let output = cmd.output().map_err(|e| e.to_string())?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -961,6 +967,11 @@ pub async fn list_sessions(manager: State<'_, SessionManager>) -> Result<Vec<Str
     Ok(manager.list().await)
 }
 
+#[tauri::command]
+pub fn get_http_port() -> u16 {
+    crate::http_server::actual_port()
+}
+
 /// Return all installed WSL distros. Returns an empty list if WSL is not
 /// installed or the `wsl.exe` binary cannot be found.
 #[tauri::command]
@@ -1454,7 +1465,7 @@ pub async fn save_artifact_preview(app: AppHandle, html: String) -> Result<Strin
     // load it without hitting cross-origin file:// restrictions.
     Ok(format!(
         "http://localhost:{}/artifact/{}",
-        crate::http_server::PORT,
+        crate::http_server::actual_port(),
         file_name
     ))
 }
@@ -3436,6 +3447,65 @@ print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get
         .output()
         .map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
+}
+
+// ── SSH tunnel health check ────────────────────────────────────────────────
+
+/// Check whether the wmux API reverse tunnel is reachable from the remote machine.
+/// Returns true if `curl localhost:{tunnel_port}/info` succeeds from the remote side.
+/// A false result typically means the SSH server has AllowTcpForwarding disabled.
+#[tauri::command]
+pub async fn check_ssh_api_tunnel(
+    pane_id: String,
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<bool, String> {
+    let tunnel_port = crate::session_manager::pane_id_to_tunnel_port(&pane_id);
+    // Retry twice with 1 s sleep between attempts. Require an actual HTTP
+    // response (not just TCP connectivity) — a stale reverse-tunnel socket
+    // accepts TCP connections but never forwards bytes, so /dev/tcp alone
+    // produces a false positive.
+    let check_cmd = format!(
+        "for _i in 1 2; do \
+           if command -v curl >/dev/null 2>&1 && curl -sf --max-time 3 http://localhost:{p}/info >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
+           if command -v wget >/dev/null 2>&1 && wget -qO- --timeout=3 http://localhost:{p}/info >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
+           sleep 1; \
+         done; echo __fail__",
+        p = tunnel_port
+    );
+    let result = tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &check_cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(result.contains("__ok__"))
+}
+
+/// Silently reconfigure the wmux MCP server entry on the remote machine so it
+/// points at the current session's tunnel port.  Idempotent: removes any
+/// existing "wmux" entry first so a stale port never blocks a new session.
+#[tauri::command]
+pub async fn configure_ssh_mcp(
+    pane_id: String,
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<(), String> {
+    let tunnel_port = crate::session_manager::pane_id_to_tunnel_port(&pane_id);
+    let cmd = format!(
+        "command -v claude >/dev/null 2>&1 && \
+         claude mcp remove wmux 2>/dev/null | true && \
+         claude mcp add --transport http wmux http://localhost:{tunnel_port}/mcp 2>/dev/null | true"
+    );
+    tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(())
 }
 
 // ── SSH hook installation (Claude Code + Codex) ────────────────────────────

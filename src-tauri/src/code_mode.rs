@@ -204,6 +204,7 @@ fn tool_native(
     let result = handle.block_on(crate::http_server::dispatch_tool(
         tool_name,
         &tool_args_json,
+        &format!("http://localhost:{}", crate::http_server::actual_port()),
         manager,
         app,
         bridge,

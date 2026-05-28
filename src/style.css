@@ -910,6 +910,8 @@ html, body, #app {
 .pane-tb-blocks.is-installed:hover { opacity: 1; }
 .pane-tb-mcp { font-size: 10px; letter-spacing: 0.02em; color: #c678dd; }
 .pane-tb-mcp:hover { color: #e0aaff; }
+.pane-tb-mcp.tunnel-down { color: #e06c75; }
+.pane-tb-mcp.tunnel-down:hover { color: #ff8a8a; }
 .pane-tb-agent { font-size: 10px; letter-spacing: 0.02em; color: #94a3b8; }
 .pane-tb-agent:hover { color: #e2e8f0; }
 

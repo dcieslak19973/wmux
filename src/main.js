@@ -68,6 +68,11 @@ import '@xterm/xterm/css/xterm.css';
 
 marked.setOptions({ gfm: true, breaks: true });
 
+// Actual port the wmux HTTP server bound to (may differ from 7766 if that port
+// was stuck from a previous run). Resolved once at startup via get_http_port.
+let httpPort = 7766;
+invoke('get_http_port').then(p => { httpPort = p; });
+
 const tabs = new Map();
 const panes = new Map();
 
@@ -1486,6 +1491,23 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   leafEl.addEventListener('mousedown', () => activatePane(sessionId));
 
   // Pane action toolbar (shown on hover)
+  const sshErrorIsKeyPermission = (msg) =>
+    /bad permissions|UNPROTECTED PRIVATE KEY|Load key|Permission denied.*publickey/i.test(msg);
+
+  const SSH_KEY_PERMISSION_HELP =
+    'SSH key permissions error — ssh.exe cannot use a key stored in the WSL filesystem.\n\n' +
+    'In PowerShell, run:\n\n' +
+    '  New-Item -ItemType Directory -Force "$env:USERPROFILE\\.ssh" | Out-Null\n' +
+    '  $content = (wsl -- cat "~/.ssh/your-key.pem") -join "`n"\n' +
+    '  [System.IO.File]::WriteAllText("$env:USERPROFILE\\.ssh\\your-key.pem", $content + "`n")\n' +
+    '  icacls "$env:USERPROFILE\\.ssh\\your-key.pem" /inheritance:r /grant:r "${env:USERNAME}:R"\n\n' +
+    'If access to .ssh is denied by your VDI, use Documents instead:\n\n' +
+    '  New-Item -ItemType Directory -Force "$env:USERPROFILE\\Documents\\ssh-keys" | Out-Null\n' +
+    '  $content = (wsl -- cat "~/.ssh/your-key.pem") -join "`n"\n' +
+    '  [System.IO.File]::WriteAllText("$env:USERPROFILE\\Documents\\ssh-keys\\your-key.pem", $content + "`n")\n' +
+    '  icacls "$env:USERPROFILE\\Documents\\ssh-keys\\your-key.pem" /inheritance:r /grant:r "${env:USERNAME}:R"\n\n' +
+    'Then update your wmux session to use the Windows key path.';
+
   const targetKind = getTargetKind(target);
   const isBlocksCapable = targetKind === 'local' || targetKind === 'wsl' || targetKind === 'ssh';
   const isWsl = targetKind === 'wsl';
@@ -1565,25 +1587,82 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
         blocksBtn.classList.add('is-installed');
         blocksBtn.title = 'Shell integration installed (click to reinstall)';
       } catch (err) {
+        const errStr = String(err ?? '');
         blocksBtn.title = `Setup failed: ${err}`;
+        if (sshErrorIsKeyPermission(errStr)) {
+          showError(SSH_KEY_PERMISSION_HELP);
+        } else if (errStr) {
+          showError(`Shell integration install failed: ${errStr}`);
+        }
       }
       blocksBtn.disabled = false;
     });
 
     const mcpBtn = toolbarEl.querySelector('[data-action="mcp"]');
-    // Local panes use PowerShell where $env:WMUX_API_BASE syntax differs — hardcode the port.
+    // Local panes use PowerShell where $env:WMUX_API_BASE syntax differs — use the runtime port.
     // WSL and SSH panes use bash, so $WMUX_API_BASE expands to the right IP/port automatically.
-    const mcpUrl = isWsl || isSsh ? '$WMUX_API_BASE/mcp' : 'http://localhost:7766/mcp';
-    const mcpCmd = `claude mcp add --transport http wmux ${mcpUrl}`;
+    const mcpUrl = isWsl || isSsh ? '$WMUX_API_BASE/mcp' : `http://localhost:${httpPort}/mcp`;
+    const mcpCmd = `claude mcp remove wmux | true && claude mcp add --transport http wmux ${mcpUrl}`;
     mcpBtn.title = `Paste: ${mcpCmd}`;
     mcpBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      // If the tunnel check failed due to an SSH connection error (key issues
+      // etc.) block the click — the command won't reach the remote anyway.
+      if (mcpBtn.dataset.tunnelError === 'ssh') {
+        showError(
+          'If AllowTcpForwarding is the issue, ask your admin to enable it,\n' +
+          'or add to your ~/.ssh/config:\n' +
+          `  Host your-server\n    RemoteForward <port> localhost:${httpPort}\n\n` +
+          '(The port wmux assigns is derived from your pane ID — check $WMUX_API_PORT in the session.)'
+        );
+        return;
+      }
+      // Tunnel check failed (likely stale port or timing) — paste the
+      // reconfigure command anyway. It's idempotent: remove+add fixes a stale
+      // port, and if the tunnel truly isn't up the command will just fail
+      // visibly in the terminal.
       invoke('write_to_session', { id: sessionId, data: mcpCmd }).catch(() => {});
     });
 
+    // For SSH panes, asynchronously check whether the reverse tunnel is reachable
+    // from the remote. If not, mark the MCP button so the click shows an actionable error.
     const hooksBtn = toolbarEl.querySelector('[data-action="hooks"]');
     const sshArgs = isSsh ? { host: target.host, user: target.user ?? null, port: target.port ?? null, identityFile: target.identity_file ?? null } : null;
     const hookArgs = isWsl ? { distro: target.distro ?? null } : isSsh ? sshArgs : {};
+
+    if (isSsh) {
+      // Auto-configure the wmux MCP entry on the remote after the tunnel is up.
+      // Runs silently via a background SSH connection — no terminal output.
+      setTimeout(() => {
+        invoke('configure_ssh_mcp', { paneId: sessionId, ...sshArgs }).catch(() => {});
+      }, 6000);
+
+      // Check tunnel twice: first at 6 s (tunnel usually negotiates by then),
+      // then retry at 14 s if the first attempt fails (handles slow connections).
+      const runTunnelCheck = (onFail) =>
+        invoke('check_ssh_api_tunnel', { paneId: sessionId, ...sshArgs })
+          .then((ok) => { if (!ok) onFail(null); })
+          .catch((err) => onFail(err));
+
+      setTimeout(() => runTunnelCheck((err) => {
+        // First check failed — retry once more after another 8 s.
+        setTimeout(() => runTunnelCheck((err2) => {
+          mcpBtn.classList.add('tunnel-down');
+          const errStr = String(err2 ?? err ?? '');
+          if (sshErrorIsKeyPermission(errStr)) {
+            // Key permission error — block click and show key help.
+            mcpBtn.dataset.tunnelError = 'ssh';
+            mcpBtn.title = 'SSH key permissions error (click for details)';
+            showError(SSH_KEY_PERMISSION_HELP);
+          } else {
+            // Tunnel unverified (stale port, slow negotiation, or check SSH
+            // connection failed). Click still pastes the reconfigure command —
+            // it's idempotent and self-heals a stale port.
+            mcpBtn.title = 'MCP port may be stale — click to reconfigure';
+          }
+        }), 8000);
+      }), 6000);
+    }
 
     const HOOK_AGENTS = [
       {
@@ -3636,12 +3715,8 @@ void listen('agent-hook-event', (event) => {
         else if (Array.isArray(content)) text = content[0]?.text ?? content[0]?.output ?? null;
         else if (content == null) text = null;
       }
-      const parsed = JSON.parse(text ?? '{}');
-      const preview_url = parsed.preview_url;
-      if (preview_url) {
-        const tabId = panes.get(pane_id)?.tabId ?? activeTabId;
-        openBrowserSplitForTab(tabId, preview_url).catch(() => {});
-      }
+      // Workbook auto-open is handled by the Rust dispatch (open-browser control
+      // request) so it works regardless of hook installation on the remote.
     } catch (_) { /* malformed response — ignore */ }
   }
 });

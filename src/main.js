@@ -1626,7 +1626,9 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     const hookArgs = isWsl ? { distro: target.distro ?? null } : isSsh ? sshArgs : {};
 
     if (isSsh) {
-      invoke('check_ssh_api_tunnel', { paneId: sessionId, ...sshArgs })
+      // Delay so the original session's reverse tunnel port-forward has time to
+      // negotiate before the check SSH connection probes it.
+      setTimeout(() => invoke('check_ssh_api_tunnel', { paneId: sessionId, ...sshArgs })
         .then((ok) => {
           if (!ok) {
             mcpBtn.dataset.tunnelDown = 'true';
@@ -1644,7 +1646,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
           } else {
             mcpBtn.title = 'SSH connection failed — could not check MCP tunnel (click for details)';
           }
-        });
+        }), 4000);
     }
 
     const HOOK_AGENTS = [

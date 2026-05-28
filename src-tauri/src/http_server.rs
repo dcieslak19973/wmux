@@ -109,25 +109,67 @@ const INFO_JSON: &str = r#"{
   "usage_example": "curl \"$WMUX_API_BASE/blocks?session_id=$WMUX_PANE_ID&limit=5\""
 }"#;
 
-pub const PORT: u16 = 7766;
+const PREFERRED_PORT: u16 = 7766;
 
-pub fn start(manager: SessionManager, app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(serve(manager, app));
+static ACTUAL_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+/// Returns the port the HTTP server is actually listening on.
+/// Falls back to PREFERRED_PORT before the server has started.
+pub fn actual_port() -> u16 {
+    *ACTUAL_PORT.get().unwrap_or(&PREFERRED_PORT)
 }
 
-async fn serve(manager: SessionManager, app: tauri::AppHandle) {
-    // Bind on all interfaces so WSL2 can reach the server via the Windows host IP.
-    // WSL2's localhost-forwarding proxy is unreliable for 127.0.0.1 binds;
-    // 0.0.0.0 lets WSL2 connect through the virtual Ethernet adapter instead.
-    // Windows Firewall blocks inbound traffic from outside the machine by default.
-    let listener = match TcpListener::bind(("0.0.0.0", PORT)).await {
+/// Bind the HTTP server socket synchronously so `actual_port()` is valid
+/// before any pane (SSH tunnel, WSL, local) reads it.
+pub fn start(manager: SessionManager, app: tauri::AppHandle) {
+    // Use std::net to bind synchronously — this call returns before any pane
+    // is created, so actual_port() always returns the real port.
+    let std_listener = std::net::TcpListener::bind(("0.0.0.0", PREFERRED_PORT))
+        .or_else(|e| {
+            log::warn!("wmux HTTP server: port {PREFERRED_PORT} unavailable ({e}), using OS-assigned port");
+            std::net::TcpListener::bind(("0.0.0.0", 0))
+        })
+        .expect("wmux HTTP server: failed to bind on any port");
+
+    // Mark the socket non-inheritable so child processes (SSH, ConPTY) cannot
+    // keep it alive after wmux exits, which would leave port 7766 stuck.
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Foundation::{HANDLE, HANDLE_FLAGS};
+        unsafe {
+            let _ = windows::Win32::Foundation::SetHandleInformation(
+                HANDLE(std_listener.as_raw_socket() as *mut core::ffi::c_void),
+                1u32,            // dwMask = HANDLE_FLAG_INHERIT
+                HANDLE_FLAGS(0), // dwFlags = clear inherit bit
+            );
+        }
+    }
+
+    let port = std_listener
+        .local_addr()
+        .map(|a| a.port())
+        .unwrap_or(PREFERRED_PORT);
+    ACTUAL_PORT.set(port).ok();
+    log::info!("wmux HTTP server listening on 0.0.0.0:{port}");
+    tauri::async_runtime::spawn(serve(std_listener, manager, app));
+}
+
+async fn serve(
+    std_listener: std::net::TcpListener,
+    manager: SessionManager,
+    app: tauri::AppHandle,
+) {
+    std_listener
+        .set_nonblocking(true)
+        .expect("wmux HTTP server: set_nonblocking failed");
+    let listener = match TcpListener::from_std(std_listener) {
         Ok(l) => l,
         Err(e) => {
-            log::error!("wmux HTTP server failed to bind on 0.0.0.0:{PORT}: {e}");
+            log::error!("wmux HTTP server: failed to convert listener: {e}");
             return;
         }
     };
-    log::info!("wmux HTTP server listening on 0.0.0.0:{PORT}");
 
     loop {
         match listener.accept().await {
@@ -144,8 +186,13 @@ async fn serve(manager: SessionManager, app: tauri::AppHandle) {
 async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app: tauri::AppHandle) {
     // 64 KB — plenty for any MCP JSON-RPC payload.
     let mut buf = vec![0u8; 65536];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) if n > 0 => n,
+    let n = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        stream.read(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok(n)) if n > 0 => n,
         _ => return,
     };
 
@@ -304,7 +351,16 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app:
             // If \r\n\r\n was absent (truncated request), body_start clamps to n → empty body.
             let body_start = (header_end + 4).min(n);
             let body = String::from_utf8_lossy(&req_bytes[body_start..n]);
-            let (status, resp_body) = handle_mcp(&body, &manager, &app).await;
+            // Use the Host header so workbook preview URLs are reachable from
+            // wherever the request came from (local port or SSH tunnel port).
+            let host = headers
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("host:"))
+                .and_then(|l| l.split_once(':').map(|x| x.1))
+                .map(|h| h.trim())
+                .unwrap_or("localhost");
+            let api_base = format!("http://{host}");
+            let (status, resp_body) = handle_mcp(&body, &api_base, &manager, &app).await;
             if status == 204 {
                 write_response_no_body(&mut stream, 204).await;
             } else {
@@ -430,7 +486,7 @@ fn agent_hook_state_from_event(data: &serde_json::Value) -> AgentHookState {
 // MCP JSON-RPC 2.0 handler
 // ---------------------------------------------------------------------------
 
-async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle) -> (u16, String) {
+async fn handle_mcp(body: &str, api_base: &str, manager: &SessionManager, app: &tauri::AppHandle) -> (u16, String) {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => {
@@ -497,7 +553,7 @@ async fn handle_mcp(body: &str, manager: &SessionManager, app: &tauri::AppHandle
             let tool_name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
             let bridge = app.state::<FrontendControlBridge>();
-            match dispatch_tool(tool_name, &args, manager, app, &bridge).await {
+            match dispatch_tool(tool_name, &args, api_base, manager, app, &bridge).await {
                 Ok(text) => serde_json::json!({
                     "content": [{"type": "text", "text": text}]
                 }),
@@ -1096,6 +1152,7 @@ fn all_mcp_tools() -> Vec<serde_json::Value> {
 pub async fn dispatch_tool(
     name: &str,
     args: &serde_json::Value,
+    api_base: &str,
     manager: &SessionManager,
     app: &tauri::AppHandle,
     bridge: &FrontendControlBridge,
@@ -1439,7 +1496,7 @@ pub async fn dispatch_tool(
             let saved = store.upsert(workbook)?;
             serde_json::to_string_pretty(&serde_json::json!({
                 "workbook": saved,
-                "preview_url": WorkbookStore::preview_url(&saved.id)
+                "preview_url": WorkbookStore::preview_url(api_base, &saved.id)
             }))
             .map_err(|e| e.to_string())
         }
@@ -1450,7 +1507,7 @@ pub async fn dispatch_tool(
             let saved = store.upsert(workbook)?;
             serde_json::to_string_pretty(&serde_json::json!({
                 "workbook": saved,
-                "preview_url": WorkbookStore::preview_url(&saved.id)
+                "preview_url": WorkbookStore::preview_url(api_base, &saved.id)
             }))
             .map_err(|e| e.to_string())
         }
@@ -1477,7 +1534,7 @@ pub async fn dispatch_tool(
             };
             serde_json::to_string_pretty(&serde_json::json!({
                 "workbook": workbook,
-                "preview_url": WorkbookStore::preview_url(&workbook.id)
+                "preview_url": WorkbookStore::preview_url(api_base, &workbook.id)
             }))
             .map_err(|e| e.to_string())
         }
@@ -1491,7 +1548,7 @@ pub async fn dispatch_tool(
             let saved = store.add_chart(workbook_id, chart)?;
             serde_json::to_string_pretty(&serde_json::json!({
                 "workbook": saved,
-                "preview_url": WorkbookStore::preview_url(&saved.id)
+                "preview_url": WorkbookStore::preview_url(api_base, &saved.id)
             }))
             .map_err(|e| e.to_string())
         }
@@ -1505,7 +1562,7 @@ pub async fn dispatch_tool(
             let saved = store.update_chart(workbook_id, chart)?;
             serde_json::to_string_pretty(&serde_json::json!({
                 "workbook": saved,
-                "preview_url": WorkbookStore::preview_url(&saved.id)
+                "preview_url": WorkbookStore::preview_url(api_base, &saved.id)
             }))
             .map_err(|e| e.to_string())
         }
@@ -1520,7 +1577,7 @@ pub async fn dispatch_tool(
             let saved = store.remove_chart(workbook_id, chart_id)?;
             serde_json::to_string_pretty(&serde_json::json!({
                 "workbook": saved,
-                "preview_url": WorkbookStore::preview_url(&saved.id)
+                "preview_url": WorkbookStore::preview_url(api_base, &saved.id)
             }))
             .map_err(|e| e.to_string())
         }
@@ -1538,7 +1595,7 @@ pub async fn dispatch_tool(
             let saved = store.reorder_charts(workbook_id, &chart_ids)?;
             serde_json::to_string_pretty(&serde_json::json!({
                 "workbook": saved,
-                "preview_url": WorkbookStore::preview_url(&saved.id)
+                "preview_url": WorkbookStore::preview_url(api_base, &saved.id)
             }))
             .map_err(|e| e.to_string())
         }

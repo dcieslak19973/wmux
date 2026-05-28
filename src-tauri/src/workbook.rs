@@ -407,8 +407,8 @@ impl WorkbookStore {
         self.upsert(spec)
     }
 
-    pub fn preview_url(workbook_id: &str) -> String {
-      format!("http://localhost:{}{}?id={}", crate::http_server::PORT, WORKBOOK_ROUTE, workbook_id)
+    pub fn preview_url(api_base: &str, workbook_id: &str) -> String {
+        format!("{}{WORKBOOK_ROUTE}?id={workbook_id}", api_base.trim_end_matches('/'))
     }
 
     fn read_spec(path: &Path) -> Result<WorkbookSpec, String> {

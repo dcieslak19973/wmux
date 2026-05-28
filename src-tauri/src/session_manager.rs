@@ -329,7 +329,7 @@ pub(crate) fn build_ssh_cmdline(
     // binary, not a shell builtin, so this works the same regardless of
     // what shell SSH initially spawned to run our command.
     let effective_remote_cmd: Option<String> = if let Some(e) = extras {
-        cmd.push_str(&format!(" -R {}:127.0.0.1:{}", e.tunnel_port, crate::http_server::PORT));
+        cmd.push_str(&format!(" -R {}:127.0.0.1:{}", e.tunnel_port, crate::http_server::actual_port()));
         let env_prefix = format!(
             "WMUX=1 WMUX_PANE_ID={} WMUX_API_PORT={} WMUX_API_BASE=http://localhost:{}",
             e.pane_id, e.tunnel_port, e.tunnel_port
@@ -643,9 +643,9 @@ impl SessionManager {
             format!("http://localhost:{}", e.tunnel_port)
         } else if matches!(target, ShellTarget::Wsl { .. }) {
             let host_ip = wsl_windows_host_ip().unwrap_or_else(|| "localhost".to_string());
-            format!("http://{}:{}", host_ip, crate::http_server::PORT)
+            format!("http://{}:{}", host_ip, crate::http_server::actual_port())
         } else {
-            format!("http://localhost:{}", crate::http_server::PORT)
+            format!("http://localhost:{}", crate::http_server::actual_port())
         };
 
         let mut env_overrides = vec![

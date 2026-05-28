@@ -68,6 +68,11 @@ import '@xterm/xterm/css/xterm.css';
 
 marked.setOptions({ gfm: true, breaks: true });
 
+// Actual port the wmux HTTP server bound to (may differ from 7766 if that port
+// was stuck from a previous run). Resolved once at startup via get_http_port.
+let httpPort = 7766;
+invoke('get_http_port').then(p => { httpPort = p; });
+
 const tabs = new Map();
 const panes = new Map();
 
@@ -1594,28 +1599,28 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     });
 
     const mcpBtn = toolbarEl.querySelector('[data-action="mcp"]');
-    // Local panes use PowerShell where $env:WMUX_API_BASE syntax differs — hardcode the port.
+    // Local panes use PowerShell where $env:WMUX_API_BASE syntax differs — use the runtime port.
     // WSL and SSH panes use bash, so $WMUX_API_BASE expands to the right IP/port automatically.
-    const mcpUrl = isWsl || isSsh ? '$WMUX_API_BASE/mcp' : 'http://localhost:7766/mcp';
-    const mcpCmd = `claude mcp add --transport http wmux ${mcpUrl}`;
+    const mcpUrl = isWsl || isSsh ? '$WMUX_API_BASE/mcp' : `http://localhost:${httpPort}/mcp`;
+    const mcpCmd = `claude mcp remove wmux | true && claude mcp add --transport http wmux ${mcpUrl}`;
     mcpBtn.title = `Paste: ${mcpCmd}`;
     mcpBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (mcpBtn.dataset.tunnelDown === 'true') {
+      // If the tunnel check failed due to an SSH connection error (key issues
+      // etc.) block the click — the command won't reach the remote anyway.
+      if (mcpBtn.dataset.tunnelError === 'ssh') {
         showError(
-          'The wmux API tunnel could not be verified on the remote machine.\n\n' +
-          'Possible causes:\n' +
-          '• curl and wget are not installed — the check needs one to probe localhost\n' +
-          '• The tunnel is still connecting — try again in a few seconds\n' +
-          '• AllowTcpForwarding is disabled on the SSH server\n' +
-          '• A port conflict on the remote machine\n\n' +
           'If AllowTcpForwarding is the issue, ask your admin to enable it,\n' +
           'or add to your ~/.ssh/config:\n' +
-          '  Host your-server\n    RemoteForward <port> localhost:7766\n\n' +
+          `  Host your-server\n    RemoteForward <port> localhost:${httpPort}\n\n` +
           '(The port wmux assigns is derived from your pane ID — check $WMUX_API_PORT in the session.)'
         );
         return;
       }
+      // Tunnel check failed (likely stale port or timing) — paste the
+      // reconfigure command anyway. It's idempotent: remove+add fixes a stale
+      // port, and if the tunnel truly isn't up the command will just fail
+      // visibly in the terminal.
       invoke('write_to_session', { id: sessionId, data: mcpCmd }).catch(() => {});
     });
 
@@ -1626,27 +1631,31 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     const hookArgs = isWsl ? { distro: target.distro ?? null } : isSsh ? sshArgs : {};
 
     if (isSsh) {
-      // Delay so the original session's reverse tunnel port-forward has time to
-      // negotiate before the check SSH connection probes it.
-      setTimeout(() => invoke('check_ssh_api_tunnel', { paneId: sessionId, ...sshArgs })
-        .then((ok) => {
-          if (!ok) {
-            mcpBtn.dataset.tunnelDown = 'true';
-            mcpBtn.classList.add('tunnel-down');
-            mcpBtn.title = 'MCP tunnel check failed — click for possible causes';
-          }
-        })
-        .catch((err) => {
-          mcpBtn.dataset.tunnelDown = 'true';
+      // Check tunnel twice: first at 6 s (tunnel usually negotiates by then),
+      // then retry at 14 s if the first attempt fails (handles slow connections).
+      const runTunnelCheck = (onFail) =>
+        invoke('check_ssh_api_tunnel', { paneId: sessionId, ...sshArgs })
+          .then((ok) => { if (!ok) onFail(null); })
+          .catch((err) => onFail(err));
+
+      setTimeout(() => runTunnelCheck((err) => {
+        // First check failed — retry once more after another 8 s.
+        setTimeout(() => runTunnelCheck((err2) => {
           mcpBtn.classList.add('tunnel-down');
-          const errStr = String(err ?? '');
+          const errStr = String(err2 ?? err ?? '');
           if (sshErrorIsKeyPermission(errStr)) {
+            // Key permission error — block click and show key help.
+            mcpBtn.dataset.tunnelError = 'ssh';
             mcpBtn.title = 'SSH key permissions error (click for details)';
             showError(SSH_KEY_PERMISSION_HELP);
           } else {
-            mcpBtn.title = 'SSH connection failed — could not check MCP tunnel (click for details)';
+            // Tunnel unverified (stale port, slow negotiation, or check SSH
+            // connection failed). Click still pastes the reconfigure command —
+            // it's idempotent and self-heals a stale port.
+            mcpBtn.title = 'MCP port may be stale — click to reconfigure';
           }
-        }), 4000);
+        }), 8000);
+      }), 6000);
     }
 
     const HOOK_AGENTS = [

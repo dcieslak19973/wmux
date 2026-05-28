@@ -58,6 +58,7 @@ pub fn run() {
             commands::close_session,
             commands::write_to_session,
             commands::list_sessions,
+            commands::get_http_port,
             commands::resize_session,
             commands::open_url,
             commands::open_external_url,

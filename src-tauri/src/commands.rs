@@ -967,6 +967,11 @@ pub async fn list_sessions(manager: State<'_, SessionManager>) -> Result<Vec<Str
     Ok(manager.list().await)
 }
 
+#[tauri::command]
+pub fn get_http_port() -> u16 {
+    crate::http_server::actual_port()
+}
+
 /// Return all installed WSL distros. Returns an empty list if WSL is not
 /// installed or the `wsl.exe` binary cannot be found.
 #[tauri::command]
@@ -1460,7 +1465,7 @@ pub async fn save_artifact_preview(app: AppHandle, html: String) -> Result<Strin
     // load it without hitting cross-origin file:// restrictions.
     Ok(format!(
         "http://localhost:{}/artifact/{}",
-        crate::http_server::PORT,
+        crate::http_server::actual_port(),
         file_name
     ))
 }
@@ -3458,13 +3463,14 @@ pub async fn check_ssh_api_tunnel(
     identity_file: Option<String>,
 ) -> Result<bool, String> {
     let tunnel_port = crate::session_manager::pane_id_to_tunnel_port(&pane_id);
-    // Retry twice with 1 s sleep; fall back from curl → wget → /dev/tcp so the
-    // check works on minimal AMIs (Amazon Linux 2, Alpine) that lack curl.
+    // Retry twice with 1 s sleep between attempts. Require an actual HTTP
+    // response (not just TCP connectivity) — a stale reverse-tunnel socket
+    // accepts TCP connections but never forwards bytes, so /dev/tcp alone
+    // produces a false positive.
     let check_cmd = format!(
         "for _i in 1 2; do \
-           if command -v curl >/dev/null 2>&1 && curl -sf --max-time 2 http://localhost:{p}/info >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
-           if command -v wget >/dev/null 2>&1 && wget -qO- --timeout=2 http://localhost:{p}/info >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
-           if bash -c 'exec 3<>/dev/tcp/localhost/{p}' 2>/dev/null; then echo __ok__; exit 0; fi; \
+           if command -v curl >/dev/null 2>&1 && curl -sf --max-time 3 http://localhost:{p}/info >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
+           if command -v wget >/dev/null 2>&1 && wget -qO- --timeout=3 http://localhost:{p}/info >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
            sleep 1; \
          done; echo __fail__",
         p = tunnel_port

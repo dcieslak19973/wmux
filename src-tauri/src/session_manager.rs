@@ -362,8 +362,19 @@ pub(crate) fn build_ssh_cmdline(
 
 pub(crate) fn ssh_identity_path(id: &str) -> String {
     if id.starts_with('/') || id.starts_with('~') {
+        // WSL Linux paths: read through WSL and cache in Windows .ssh so that
+        // ssh.exe can verify permissions. Direct access via \\wsl.localhost\...
+        // UNC paths is blocked by WSL2's virtual filesystem and ssh.exe rejects
+        // those files with "UNPROTECTED PRIVATE KEY FILE" even when chmod 600.
+        #[cfg(windows)]
+        if let Some(cached) = copy_wsl_key_to_windows(id) {
+            return cached;
+        }
+
+        // Fallback: convert to UNC path (may trigger ssh.exe permission warning)
         std::process::Command::new("wsl.exe")
             .args(["wslpath", "-w", id])
+            .creation_flags_silent()
             .output()
             .ok()
             .and_then(|o| {
@@ -377,6 +388,73 @@ pub(crate) fn ssh_identity_path(id: &str) -> String {
     } else {
         id.to_string()
     }
+}
+
+/// Read a WSL key file via `wsl -- cat` (bypasses Windows filesystem ACL
+/// restrictions on the WSL2 virtual disk) and cache it in
+/// `%USERPROFILE%\.ssh\wmux-keys\` with strict NTFS permissions so that
+/// `ssh.exe` accepts it without the "UNPROTECTED PRIVATE KEY FILE" warning.
+#[cfg(windows)]
+fn copy_wsl_key_to_windows(linux_path: &str) -> Option<String> {
+    let output = std::process::Command::new("wsl.exe")
+        .args(["--", "cat", linux_path])
+        .creation_flags_silent()
+        .output()
+        .ok()?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+
+    let userprofile = std::env::var("USERPROFILE").ok()?;
+    let key_dir = std::path::PathBuf::from(&userprofile)
+        .join(".ssh")
+        .join("wmux-keys");
+    std::fs::create_dir_all(&key_dir).ok()?;
+
+    // Stable filename derived from the Linux path so the same source always
+    // maps to the same cached file.
+    let hash = linux_path
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    let dest = key_dir.join(format!("{hash:016x}.pem"));
+
+    std::fs::write(&dest, &output.stdout).ok()?;
+
+    // Remove inherited ACEs; grant only the current user read access so
+    // ssh.exe accepts the file without a permissions warning.
+    if let (Some(dest_str), Ok(username)) =
+        (dest.to_str(), std::env::var("USERNAME"))
+    {
+        let _ = std::process::Command::new("icacls.exe")
+            .args([dest_str, "/inheritance:r", "/grant:r", &format!("{username}:R")])
+            .creation_flags_silent()
+            .output();
+    }
+
+    Some(dest.to_string_lossy().into_owned())
+}
+
+/// Extension trait shim so we can call `.creation_flags_silent()` on
+/// `Command` without scattering cfg(windows) blocks everywhere.
+#[cfg(windows)]
+trait CommandSilent {
+    fn creation_flags_silent(&mut self) -> &mut Self;
+}
+#[cfg(windows)]
+impl CommandSilent for std::process::Command {
+    fn creation_flags_silent(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt as _;
+        self.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+    }
+}
+#[cfg(not(windows))]
+trait CommandSilent {
+    fn creation_flags_silent(&mut self) -> &mut Self;
+}
+#[cfg(not(windows))]
+impl CommandSilent for std::process::Command {
+    fn creation_flags_silent(&mut self) -> &mut Self { self }
 }
 
 pub(crate) fn quote_remote_shell_arg(value: &str) -> String {

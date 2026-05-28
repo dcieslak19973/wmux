@@ -3444,6 +3444,32 @@ print('yes' if any('agent-event?pane_id=' in hk.get('command','') for v in s.get
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
 }
 
+// ── SSH tunnel health check ────────────────────────────────────────────────
+
+/// Check whether the wmux API reverse tunnel is reachable from the remote machine.
+/// Returns true if `curl localhost:{tunnel_port}/info` succeeds from the remote side.
+/// A false result typically means the SSH server has AllowTcpForwarding disabled.
+#[tauri::command]
+pub async fn check_ssh_api_tunnel(
+    pane_id: String,
+    host: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+) -> Result<bool, String> {
+    let tunnel_port = crate::session_manager::pane_id_to_tunnel_port(&pane_id);
+    let check_cmd = format!(
+        "curl -sf --max-time 3 http://localhost:{}/info 2>/dev/null && echo __ok__ || echo __fail__",
+        tunnel_port
+    );
+    let result = tokio::task::spawn_blocking(move || {
+        run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &check_cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(result.contains("__ok__"))
+}
+
 // ── SSH hook installation (Claude Code + Codex) ────────────────────────────
 
 #[tauri::command]

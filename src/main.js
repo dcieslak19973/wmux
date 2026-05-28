@@ -1578,12 +1578,38 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     mcpBtn.title = `Paste: ${mcpCmd}`;
     mcpBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (mcpBtn.dataset.tunnelDown === 'true') {
+        showError(
+          'The wmux API tunnel is not reachable from the remote machine.\n\n' +
+          'Your SSH server likely has AllowTcpForwarding disabled.\n\n' +
+          'Ask your admin to enable it, or add to your ~/.ssh/config:\n' +
+          '  Host your-server\n    RemoteForward <port> localhost:7766\n\n' +
+          '(The port wmux assigns is derived from your pane ID — check $WMUX_API_PORT in the session.)'
+        );
+        return;
+      }
       invoke('write_to_session', { id: sessionId, data: mcpCmd }).catch(() => {});
     });
 
+    // For SSH panes, asynchronously check whether the reverse tunnel is reachable
+    // from the remote. If not, mark the MCP button so the click shows an actionable error.
     const hooksBtn = toolbarEl.querySelector('[data-action="hooks"]');
     const sshArgs = isSsh ? { host: target.host, user: target.user ?? null, port: target.port ?? null, identityFile: target.identity_file ?? null } : null;
     const hookArgs = isWsl ? { distro: target.distro ?? null } : isSsh ? sshArgs : {};
+
+    if (isSsh) {
+      invoke('check_ssh_api_tunnel', { paneId: sessionId, ...sshArgs })
+        .then((ok) => {
+          if (!ok) {
+            mcpBtn.dataset.tunnelDown = 'true';
+            mcpBtn.classList.add('tunnel-down');
+            mcpBtn.title = 'MCP tunnel unavailable — SSH server may have AllowTcpForwarding disabled (click for details)';
+          }
+        })
+        .catch(() => {
+          // check failed (e.g. SSH unreachable) — don't block UI, leave button in default state
+        });
+    }
 
     const HOOK_AGENTS = [
       {

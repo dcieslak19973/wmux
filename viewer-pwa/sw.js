@@ -2,7 +2,7 @@
 // Live output is always over the WebSocket; we never cache /ws/ or /s/<code>
 // because those have per-session state.
 
-const CACHE = 'wmux-viewer-v1';
+const CACHE = 'wmux-viewer-v9';
 const SHELL = [
   './',
   './viewer.mjs',
@@ -10,16 +10,23 @@ const SHELL = [
   './xterm.js',
   './xterm.css',
   './addon-fit.js',
+  './addon-canvas.js',
   './manifest.webmanifest',
 ];
 
 self.addEventListener('install', (event) => {
+  // Take over as soon as the new shell is cached, rather than waiting for
+  // every open tab to close — otherwise a viewer.mjs change won't reach an
+  // already-installed client until they fully quit the browser.
+  self.skipWaiting();
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL).catch(() => {})));
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
 });
 

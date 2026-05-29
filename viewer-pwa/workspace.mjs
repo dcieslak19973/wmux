@@ -127,6 +127,12 @@ function subscribeToLayoutUpdates() {
 // ── Card-grid fallback (previous behaviour) ─────────────────────────────
 
 function renderCards(manifest) {
+  // Coming from split mode → close those sessions and forget the layout
+  // signature so a later split layout rebuilds cleanly.
+  disposeAllLeafSessions();
+  splitSidesByPath.clear();
+  lastLayoutSig = null;
+  rootEl.classList.remove('workspace-split-mode');
   rootEl.innerHTML = '';
   if (!manifest.panes.length) {
     const empty = document.createElement('div');
@@ -167,13 +173,45 @@ function disposeAllLeafSessions() {
   activeLeafSessions.clear();
 }
 
-function renderSplitLayout(manifest) {
-  // First, tear down anything from a prior render so its WS connections
-  // close and the host's presence counter drops back.
-  disposeAllLeafSessions();
-  rootEl.classList.add('workspace-split-mode');
-  rootEl.innerHTML = '';
+// Structural signature of the last-rendered layout, and a map from each
+// split's tree-path to its two side wrappers. Together these let a layout
+// broadcast that only moved split ratios update the flex weights in place
+// instead of rebuilding the whole grid (which flashes and resets scrollback).
+let lastLayoutSig = null;
+const splitSidesByPath = new Map();
 
+// Identity of a layout's *shape* — tab list and split tree — deliberately
+// excluding split ratios and the active tab, so neither a host divider drag
+// nor a host tab switch forces a teardown.
+function nodeSig(node) {
+  if (!node) return 0;
+  switch (node.kind) {
+    case 'split': return ['s', node.dir, nodeSig(node.a), nodeSig(node.b)];
+    case 'leaf': return ['l', node.code];
+    case 'screenshot': return ['shot', node.label ?? '', (node.data || '').length];
+    case 'placeholder': return ['p', node.label ?? ''];
+    default: return ['?', node.kind ?? ''];
+  }
+}
+function layoutSignature(wsLayout) {
+  return JSON.stringify((wsLayout.tabs || []).map((t) => [t.id, t.title, nodeSig(t.layout)]));
+}
+
+function applyLayoutRatios(wsLayout) {
+  for (const tab of wsLayout.tabs || []) applyNodeRatios(tab.layout, tab.id);
+}
+function applyNodeRatios(node, path) {
+  if (!node || node.kind !== 'split') return;
+  const sides = splitSidesByPath.get(path);
+  if (sides) {
+    sides.aWrap.style.flex = `${Math.max(0.05, node.ratio)} 1 0`;
+    sides.bWrap.style.flex = `${Math.max(0.05, 1 - node.ratio)} 1 0`;
+  }
+  applyNodeRatios(node.a, `${path}.a`);
+  applyNodeRatios(node.b, `${path}.b`);
+}
+
+function renderSplitLayout(manifest) {
   const paneInfo = new Map();
   for (const pane of manifest.panes) {
     paneInfo.set(pane.code, pane);
@@ -184,6 +222,27 @@ function renderSplitLayout(manifest) {
   const wsLayout = (manifest.layout && manifest.layout.kind === 'workspace')
     ? manifest.layout
     : { kind: 'workspace', tabs: [{ id: '__legacy', title: 'Workspace', layout: manifest.layout }], active_tab_id: '__legacy' };
+
+  // Fast path: same shape as what's on screen → only ratios moved. Update
+  // the flex weights in place and refit; don't tear down live xterms/WS.
+  const sig = layoutSignature(wsLayout);
+  if (sig === lastLayoutSig
+      && rootEl.classList.contains('workspace-split-mode')
+      && activeLeafSessions.size) {
+    applyLayoutRatios(wsLayout);
+    const active = rootEl.querySelector('.workspace-tab-panel.is-active');
+    if (active) requestAnimationFrame(() => fitAllInTree(active));
+    return;
+  }
+
+  // Topology changed (split / close / new tab) — full rebuild. Tear down
+  // prior sessions so their WS connections close and the host's presence
+  // counter drops back.
+  disposeAllLeafSessions();
+  splitSidesByPath.clear();
+  lastLayoutSig = sig;
+  rootEl.classList.add('workspace-split-mode');
+  rootEl.innerHTML = '';
 
   if (!wsLayout.tabs?.length) {
     const empty = document.createElement('div');
@@ -221,7 +280,7 @@ function renderSplitLayout(manifest) {
     const tabPanel = document.createElement('div');
     tabPanel.className = 'workspace-tab-panel' + (tab.id === activeId ? ' is-active' : '');
     tabPanel.dataset.tabId = tab.id;
-    const treeRoot = renderNode(tab.layout, paneInfo);
+    const treeRoot = renderNode(tab.layout, paneInfo, tab.id);
     treeRoot.classList.add('workspace-split-root');
     tabPanel.appendChild(treeRoot);
     body.appendChild(tabPanel);
@@ -244,13 +303,16 @@ function renderSplitLayout(manifest) {
     const active = body.querySelector('.workspace-tab-panel.is-active');
     if (active) fitAllInTree(active);
   });
-  window.addEventListener('resize', () => {
-    const active = body.querySelector('.workspace-tab-panel.is-active');
-    if (active) fitAllInTree(active);
-  });
 }
 
-function renderNode(node, paneInfo) {
+// One module-level resize listener (rather than one per render, which would
+// stack up and fire stale closures after every layout rebuild).
+window.addEventListener('resize', () => {
+  const active = rootEl.querySelector('.workspace-tab-panel.is-active');
+  if (active) fitAllInTree(active);
+});
+
+function renderNode(node, paneInfo, path) {
   if (!node) {
     const placeholder = document.createElement('div');
     placeholder.className = 'workspace-empty';
@@ -261,7 +323,7 @@ function renderNode(node, paneInfo) {
     return renderLeaf(node.code, paneInfo.get(node.code));
   }
   if (node.kind === 'split') {
-    return renderSplit(node, paneInfo);
+    return renderSplit(node, paneInfo, path);
   }
   if (node.kind === 'placeholder') {
     const el = document.createElement('div');
@@ -289,14 +351,14 @@ function renderNode(node, paneInfo) {
   return errEl;
 }
 
-function renderSplit(node, paneInfo) {
+function renderSplit(node, paneInfo, path) {
   const splitEl = document.createElement('div');
   splitEl.className = `workspace-split workspace-split-${node.dir}`;
 
   const aWrap = document.createElement('div');
   aWrap.className = 'workspace-split-side';
   aWrap.style.flex = `${Math.max(0.05, node.ratio)} 1 0`;
-  aWrap.appendChild(renderNode(node.a, paneInfo));
+  aWrap.appendChild(renderNode(node.a, paneInfo, `${path}.a`));
   splitEl.appendChild(aWrap);
 
   const divider = document.createElement('div');
@@ -306,8 +368,12 @@ function renderSplit(node, paneInfo) {
   const bWrap = document.createElement('div');
   bWrap.className = 'workspace-split-side';
   bWrap.style.flex = `${Math.max(0.05, 1 - node.ratio)} 1 0`;
-  bWrap.appendChild(renderNode(node.b, paneInfo));
+  bWrap.appendChild(renderNode(node.b, paneInfo, `${path}.b`));
   splitEl.appendChild(bWrap);
+
+  // Remember this split's sides so an in-place ratio update (host divider
+  // drag) can adjust the flex without a full rebuild.
+  splitSidesByPath.set(path, { aWrap, bWrap });
 
   wireDividerDrag(splitEl, divider, aWrap, bWrap, node.dir);
   return splitEl;
@@ -390,6 +456,19 @@ const isCoarsePointer = window.matchMedia?.('(pointer: coarse)').matches;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
 const PARTICIPANT_ID = `wsviewer-${Math.random().toString(36).slice(2, 8)}`;
 
+// Use the 2D-canvas renderer to kill the DOM renderer's glyph artifacts and
+// repaint flicker, without the WebGL renderer's silent-blank failure mode in
+// embedded webviews (context created, nothing painted, no exception). Canvas
+// has no GPU-context dependency. If even canvas init fails we fall back to
+// xterm's default DOM renderer.
+function attachRenderer(term) {
+  try {
+    term.loadAddon(new window.CanvasAddon.CanvasAddon());
+  } catch {
+    // Leave the default DOM renderer in place.
+  }
+}
+
 function startPaneSession({ paneCode, paneSecret, container, setStatus, onFitNeeded }) {
   const term = new window.Terminal({
     fontSize: isCoarsePointer ? 14 : 12,
@@ -404,7 +483,24 @@ function startPaneSession({ paneCode, paneSecret, container, setStatus, onFitNee
   const fitAddon = new window.FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
-  const refit = () => { try { fitAddon.fit(); } catch {} };
+  attachRenderer(term);
+  // Coalesce fit bursts (divider drag, window resize, tab switch) into one
+  // fit per animation frame so the terminal doesn't reflow-thrash. Once the
+  // host announces this pane's grid size we mirror it and letterbox, so fit()
+  // must stop (re-fitting would re-introduce uncleared cells on host redraws).
+  let hostSized = false;
+  let refitScheduled = false;
+  const refit = () => {
+    if (hostSized || refitScheduled) return;
+    refitScheduled = true;
+    requestAnimationFrame(() => {
+      refitScheduled = false;
+      // A Resize frame may have arrived while queued — don't fit() over the
+      // host-driven size (that's the slipping-out-of-letterbox symptom).
+      if (hostSized) return;
+      try { fitAddon.fit(); } catch {}
+    });
+  };
   refit();
   onFitNeeded?.(refit);
 
@@ -470,13 +566,19 @@ function startPaneSession({ paneCode, paneSecret, container, setStatus, onFitNee
         }
         return;
       }
+      if (msg.kind === 'resize') {
+        const cols = msg.cols | 0;
+        const rows = msg.rows | 0;
+        if (cols > 0 && rows > 0) {
+          hostSized = true;
+          try { term.resize(cols, rows); } catch {}
+        }
+        return;
+      }
       if (msg.kind === 'output_chunk') {
         if (!helloDone) return;
         const bytes = Array.isArray(msg.bytes) ? msg.bytes : [];
         term.write(new Uint8Array(bytes));
-      }
-      if (msg.kind === 'agent_event') {
-        appendWorkspaceAgentEvent(paneCode, msg.payload);
       }
     });
 
@@ -513,73 +615,4 @@ function startPaneSession({ paneCode, paneSecret, container, setStatus, onFitNee
     activeLeafSessions.delete(dispose);
   };
   activeLeafSessions.add(dispose);
-}
-
-// ── Workspace timeline ─────────────────────────────────────────────────
-
-const TIMELINE_MAX_ENTRIES = 200;
-const TIMELINE_PREF = 'wmux.workspace.showTimeline';
-const timelineListEl = document.getElementById('agent-timeline-list');
-const timelineToggleEl = document.getElementById('timeline-toggle');
-
-function fmtTime(ms) {
-  if (typeof ms !== 'number') return '';
-  const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-}
-
-function shortPaneLabel(paneCode) {
-  // The manifest fetch happens once per render; just show the first 4
-  // chars of the pane code as a stable identifier.
-  return String(paneCode).slice(0, 4);
-}
-
-function appendWorkspaceAgentEvent(paneCode, payload) {
-  if (!timelineListEl || !payload || typeof payload !== 'object') return;
-  const row = document.createElement('div');
-  row.className = `agent-timeline-row agent-timeline-${payload.kind || 'unknown'}`;
-  const time = fmtTime(payload.ts);
-  let body = '';
-  if (payload.kind === 'block_start') body = '▶ command started';
-  else if (payload.kind === 'block_command') body = `▶ ${escHtml(payload.command ?? '').slice(0, 240)}`;
-  else if (payload.kind === 'block_end') {
-    const code = payload.exit_code;
-    body = (code == null || code === 0) ? '✓ exit 0' : `✗ exit ${code}`;
-  } else if (payload.kind === 'agent_hook') {
-    const tool = payload.tool ? ` · ${escHtml(payload.tool)}` : '';
-    const msg = payload.message ? ` — ${escHtml(payload.message).slice(0, 200)}` : '';
-    body = `${escHtml(payload.hook_event ?? 'hook')}${tool}${msg}`;
-  } else {
-    body = escHtml(JSON.stringify(payload)).slice(0, 240);
-  }
-  row.innerHTML = `
-    <span class="agent-timeline-time">${escHtml(time)}</span>
-    <span class="agent-timeline-pane mono">${escHtml(shortPaneLabel(paneCode))}</span>
-    <span class="agent-timeline-body">${body}</span>
-  `;
-  timelineListEl.appendChild(row);
-  while (timelineListEl.childElementCount > TIMELINE_MAX_ENTRIES) {
-    timelineListEl.firstElementChild?.remove();
-  }
-  const nearBottom = timelineListEl.scrollHeight - timelineListEl.scrollTop - timelineListEl.clientHeight < 40;
-  if (nearBottom) timelineListEl.scrollTop = timelineListEl.scrollHeight;
-}
-
-function loadTimelinePref() {
-  try { return localStorage.getItem(TIMELINE_PREF) !== '0'; } catch { return true; }
-}
-function saveTimelinePref(visible) {
-  try { localStorage.setItem(TIMELINE_PREF, visible ? '1' : '0'); } catch {}
-}
-function applyTimelineVisibility(visible) {
-  document.body.classList.toggle('timeline-hidden', !visible);
-}
-if (timelineToggleEl) {
-  let visible = loadTimelinePref();
-  applyTimelineVisibility(visible);
-  timelineToggleEl.addEventListener('click', () => {
-    visible = !visible;
-    saveTimelinePref(visible);
-    applyTimelineVisibility(visible);
-  });
 }

@@ -59,6 +59,16 @@ pub enum SessionMessage {
     Capabilities {
         permission: SharePermission,
     },
+    /// Host → viewer: the host pane's terminal grid size. Sent before the
+    /// snapshot when a viewer connects, and again whenever the host pane
+    /// resizes. The viewer sizes its terminal to match exactly and
+    /// letterboxes any leftover space — otherwise a host-side clear or
+    /// redraw (which only spans the host's rows/cols) leaves stale rows at
+    /// the bottom and stale columns on the right of a larger viewer grid.
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     /// Raw terminal output from host → viewers.
     OutputChunk {
         bytes: Vec<u8>,
@@ -135,6 +145,21 @@ mod tests {
         assert!(json.contains("\"from\":\"alice\""));
         let back: SessionMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, SessionMessage::InputChunk { .. }));
+    }
+
+    #[test]
+    fn resize_round_trips() {
+        let msg = SessionMessage::Resize { cols: 120, rows: 40 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"resize\""));
+        let back: SessionMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionMessage::Resize { cols, rows } => {
+                assert_eq!(cols, 120);
+                assert_eq!(rows, 40);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

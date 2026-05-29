@@ -147,6 +147,14 @@ pub struct ShareSession {
     pub agent_event_tx: broadcast::Sender<serde_json::Value>,
     pub presence: Arc<AtomicUsize>,
     pub snapshot: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Host pane's terminal grid size (cols, rows), if known. Sent to each
+    /// viewer as a `Resize` frame before the snapshot so the viewer mirrors
+    /// the host grid exactly instead of `fit()`ing to its own (often larger)
+    /// viewport, which would leave uncleared rows/cols on a host redraw.
+    pub size: Arc<Mutex<Option<(u16, u16)>>>,
+    /// Live host-resize notifications. The viewer pump forwards these as
+    /// `Resize` frames so an already-connected viewer tracks host resizes.
+    pub size_tx: broadcast::Sender<(u16, u16)>,
     /// Rolling ring of recent PTY bytes. Replayed to any connecting (or
     /// reconnecting) viewer so a dropped WebSocket reopens to the current
     /// screen rather than the screen at share-creation time. std::sync
@@ -358,6 +366,7 @@ impl ShareSessionStore {
         let secret_hash = sha256(secret.as_bytes());
         let (output_tx, _rx) = broadcast::channel(OUTPUT_BROADCAST_CAPACITY);
         let (agent_event_tx, _aerx) = broadcast::channel(AGENT_EVENT_BROADCAST_CAPACITY);
+        let (size_tx, _srx) = broadcast::channel(16);
         let session = ShareSession {
             code: code.clone(),
             target_pane_id,
@@ -369,6 +378,8 @@ impl ShareSessionStore {
             agent_event_tx,
             presence: Arc::new(AtomicUsize::new(0)),
             snapshot: Arc::new(Mutex::new(None)),
+            size: Arc::new(Mutex::new(None)),
+            size_tx,
             replay_buffer: Arc::new(std::sync::Mutex::new(ReplayBuffer::default())),
             mutual_confirm,
             seen_fingerprints: Arc::new(Mutex::new(HashSet::new())),
@@ -531,6 +542,23 @@ impl ShareSessionStore {
         }
     }
 
+    /// Record + broadcast a new grid size for every share targeting `pane_id`.
+    /// Called when the host resizes a pane's pseudoconsole, so connected
+    /// viewers re-mirror the new dimensions. No-op when no share targets the
+    /// pane.
+    pub async fn set_size_for_pane(&self, pane_id: &str, cols: u16, rows: u16) {
+        let inner = self.inner.read().await;
+        for session in inner.sessions.values() {
+            if session.target_pane_id == pane_id {
+                {
+                    let mut size = session.size.lock().await;
+                    *size = Some((cols, rows));
+                }
+                let _ = session.size_tx.send((cols, rows));
+            }
+        }
+    }
+
     pub async fn list(&self) -> Vec<ShareInfo> {
         let inner = self.inner.read().await;
         inner.sessions.values().map(ShareInfo::from_session).collect()
@@ -540,6 +568,19 @@ impl ShareSessionStore {
         let Some(session) = self.get(code).await else { return false };
         let mut snap = session.snapshot.lock().await;
         *snap = Some(bytes);
+        true
+    }
+
+    /// Record the host pane's grid size and notify any connected viewers.
+    /// Called at share creation (initial size) and on every host resize.
+    pub async fn set_size(&self, code: &SessionCode, cols: u16, rows: u16) -> bool {
+        let Some(session) = self.get(code).await else { return false };
+        {
+            let mut size = session.size.lock().await;
+            *size = Some((cols, rows));
+        }
+        // Best-effort: send errors just mean no viewers are attached yet.
+        let _ = session.size_tx.send((cols, rows));
         true
     }
 
@@ -815,6 +856,21 @@ async fn handle_socket(
         return;
     }
 
+    // Announce the host grid size before any output so the viewer sizes its
+    // terminal to match before painting the snapshot. Without this the
+    // snapshot lands in a mis-sized grid and later host redraws leave stale
+    // cells at the right/bottom.
+    if let Some((cols, rows)) = *session.size.lock().await {
+        let frame = SessionMessage::Resize { cols, rows };
+        if socket
+            .send(Message::Text(serde_json::to_string(&frame).unwrap()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+
     // Send the cached snapshot, if any, as the first OutputChunk so the
     // viewer renders the current buffer rather than waiting for new bytes.
     if let Some(bytes) = session.snapshot.lock().await.clone() {
@@ -858,11 +914,21 @@ async fn handle_socket(
 
     let mut output_rx = session.output_tx.subscribe();
     let mut agent_rx = session.agent_event_tx.subscribe();
+    let mut size_rx = session.size_tx.subscribe();
     loop {
         tokio::select! {
             chunk = output_rx.recv() => {
                 let Ok(bytes) = chunk else { break };
                 let frame = SessionMessage::OutputChunk { bytes };
+                let text = serde_json::to_string(&frame).unwrap();
+                if socket.send(Message::Text(text)).await.is_err() {
+                    break;
+                }
+            }
+            size = size_rx.recv() => {
+                // Lagged or live host resize — forward the latest grid size.
+                let Ok((cols, rows)) = size else { continue };
+                let frame = SessionMessage::Resize { cols, rows };
                 let text = serde_json::to_string(&frame).unwrap();
                 if socket.send(Message::Text(text)).await.is_err() {
                     break;
@@ -939,6 +1005,7 @@ const VIEWER_CSS: &str = include_str!("../../viewer-pwa/viewer.css");
 const VIEWER_XTERM_CSS: &str = include_str!("../../viewer-pwa/vendor/xterm.css");
 const VIEWER_XTERM_JS: &str = include_str!("../../viewer-pwa/vendor/xterm.js");
 const VIEWER_ADDON_FIT_JS: &str = include_str!("../../viewer-pwa/vendor/addon-fit.js");
+const VIEWER_ADDON_CANVAS_JS: &str = include_str!("../../viewer-pwa/vendor/addon-canvas.js");
 const WORKSPACE_INDEX: &str = include_str!("../../viewer-pwa/workspace.html");
 const WORKSPACE_MJS: &str = include_str!("../../viewer-pwa/workspace.mjs");
 
@@ -960,6 +1027,7 @@ async fn viewer_asset(Path((_code, name)): Path<(String, String)>) -> Response {
         "xterm.css" => (VIEWER_XTERM_CSS.as_bytes(), "text/css; charset=utf-8"),
         "xterm.js" => (VIEWER_XTERM_JS.as_bytes(), "text/javascript; charset=utf-8"),
         "addon-fit.js" => (VIEWER_ADDON_FIT_JS.as_bytes(), "text/javascript; charset=utf-8"),
+        "addon-canvas.js" => (VIEWER_ADDON_CANVAS_JS.as_bytes(), "text/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
     static_response(body, ctype)
@@ -1007,6 +1075,7 @@ async fn workspace_asset(Path((_code, name)): Path<(String, String)>) -> Respons
         "xterm.css" => (VIEWER_XTERM_CSS.as_bytes(), "text/css; charset=utf-8"),
         "xterm.js" => (VIEWER_XTERM_JS.as_bytes(), "text/javascript; charset=utf-8"),
         "addon-fit.js" => (VIEWER_ADDON_FIT_JS.as_bytes(), "text/javascript; charset=utf-8"),
+        "addon-canvas.js" => (VIEWER_ADDON_CANVAS_JS.as_bytes(), "text/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
     static_response(body, ctype)

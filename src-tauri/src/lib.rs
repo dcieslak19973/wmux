@@ -143,6 +143,7 @@ pub fn run() {
             commands::list_active_shares,
             commands::list_active_workspace_shares,
             commands::provide_share_snapshot,
+            commands::provide_share_size,
             commands::list_audit_entries,
             commands::get_collab_server_port,
             commands::list_local_addresses,

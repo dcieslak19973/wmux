@@ -138,6 +138,19 @@ export function createCollabRuntime({
     }
   }
 
+  // Tell the backend the host pane's grid size so the first viewer mirrors it
+  // exactly (and letterboxes the rest) instead of fit()ing to its own
+  // viewport — which would leave uncleared cells on a host redraw. Uses the
+  // dimensions last sent to the ConPTY (the size the output stream is
+  // formatted for). Live resizes after this are pushed by resize_session.
+  function provideSize(code, paneId) {
+    const pane = panes.get(paneId);
+    const cols = pane?.lastSentCols;
+    const rows = pane?.lastSentRows;
+    if (!code || !cols || !rows) return;
+    invoke('provide_share_size', { code, cols, rows }).catch(() => {});
+  }
+
   // ── Share dialog ────────────────────────────────────────────────────────
 
   // Returns [{ kind, host, url }] grouped by reach: 'tailnet-dns' (preferred
@@ -403,7 +416,7 @@ export function createCollabRuntime({
     for (const sid of newPaneIds) {
       try {
         const pane = panes.get(sid);
-        const owningTab = orderedTabs.find((t) => (t.paneIds || []).includes(sid));
+        const owningTab = orderedTabs.find((t) => t.paneIds?.has?.(sid));
         const tabTitle = owningTab?.title || 'Tab';
         const detail = pane?.cwd || pane?.title || '';
         const label = detail ? `${tabTitle} · ${detail}` : tabTitle;
@@ -420,6 +433,7 @@ export function createCollabRuntime({
         if (snap) {
           invoke('provide_share_snapshot', { code: res.code, snapshot: snap }).catch(() => {});
         }
+        provideSize(res.code, sid);
       } catch (err) {
         console.warn('[collab] mint pane share for split failed:', err);
       }
@@ -564,7 +578,10 @@ export function createCollabRuntime({
         if (snap && codesByOrder[i]) {
           invoke('provide_share_snapshot', { code: codesByOrder[i], snapshot: snap }).catch(() => {});
         }
-        if (codesByOrder[i]) paneIdToCode.set(paneSpecs[i].pane_id, codesByOrder[i]);
+        if (codesByOrder[i]) {
+          provideSize(codesByOrder[i], paneSpecs[i].pane_id);
+          paneIdToCode.set(paneSpecs[i].pane_id, codesByOrder[i]);
+        }
       }
 
       // Remember this active workspace share so onLayoutChanged can
@@ -710,6 +727,7 @@ export function createCollabRuntime({
       if (snap) {
         invoke('provide_share_snapshot', { code: mint.code, snapshot: snap }).catch(() => {});
       }
+      provideSize(mint.code, paneId);
 
       await refresh();
       showShareDialog(paneId, mint);

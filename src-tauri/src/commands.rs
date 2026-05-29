@@ -953,12 +953,17 @@ pub async fn write_to_session(
 #[tauri::command]
 pub async fn resize_session(
     manager: State<'_, SessionManager>,
+    collab: State<'_, ShareSessionStore>,
     id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
     let session = manager.get(&id).await.ok_or("session not found")?;
-    session.resize(cols, rows).map_err(|e| e.to_string())
+    session.resize(cols, rows).map_err(|e| e.to_string())?;
+    // Mirror the new grid size to any viewers sharing this pane so a host
+    // resize doesn't leave them on a stale (now-misaligned) terminal size.
+    collab.inner().set_size_for_pane(&id, cols, rows).await;
+    Ok(())
 }
 
 /// List active session IDs.
@@ -3981,6 +3986,19 @@ pub async fn provide_share_snapshot(
     store: State<'_, ShareSessionStore>,
 ) -> Result<bool, String> {
     Ok(store.inner().set_snapshot(&SessionCode(code), snapshot).await)
+}
+
+/// Record the initial host grid size for a freshly-minted share, so the
+/// first viewer to connect sizes its terminal to match before the snapshot
+/// is painted. Live resizes thereafter flow through `resize_session`.
+#[tauri::command]
+pub async fn provide_share_size(
+    code: String,
+    cols: u16,
+    rows: u16,
+    store: State<'_, ShareSessionStore>,
+) -> Result<bool, String> {
+    Ok(store.inner().set_size(&SessionCode(code), cols, rows).await)
 }
 
 #[tauri::command]

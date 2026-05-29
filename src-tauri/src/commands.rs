@@ -3488,6 +3488,110 @@ pub async fn check_ssh_api_tunnel(
     Ok(result.contains("__ok__"))
 }
 
+/// Check whether the wmux HTTP API is reachable from inside a WSL distro.
+/// Returns true if `curl http://<gateway>:<port>/info` succeeds from WSL.
+/// A false result almost always means Windows Firewall is dropping inbound
+/// connections to *this* wmux binary: firewall rules are scoped per-exe path,
+/// so a build launched from a new location gets a fresh (often Block) rule and
+/// the agent can't reach the API on any port. The UI surfaces this on the MCP
+/// button instead of letting the agent fail opaquely.
+#[tauri::command]
+pub async fn check_wsl_api_reachable(distro: Option<String>) -> Result<bool, String> {
+    let host_ip = crate::session_manager::wsl_windows_host_ip()
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = crate::http_server::actual_port();
+    let url = format!("http://{host_ip}:{port}/info");
+    let check_cmd = format!(
+        "for _i in 1 2; do \
+           if command -v curl >/dev/null 2>&1 && curl -sf --max-time 3 {url} >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
+           if command -v wget >/dev/null 2>&1 && wget -qO- --timeout=3 {url} >/dev/null 2>&1; then echo __ok__; exit 0; fi; \
+           sleep 1; \
+         done; echo __fail__"
+    );
+    let output = tokio::task::spawn_blocking(move || {
+        let mut c = Command::new("wsl.exe");
+        if let Some(d) = &distro {
+            c.args(["--distribution", d.as_str()]);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        c.args(["--", "bash", "-lc", &check_cmd])
+            .output()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(String::from_utf8_lossy(&output.stdout).contains("__ok__"))
+}
+
+/// Absolute path to the running wmux executable. The UI uses this to build a
+/// precise Windows Firewall "allow" command when WSL can't reach the API —
+/// firewall rules key on the exact exe path, so the path must be exact.
+#[tauri::command]
+pub fn get_exe_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Create (or repair) a Windows Firewall inbound Allow rule for the running
+/// wmux executable so agents in WSL / remote panes can reach the HTTP API.
+/// Removes any stale Block rule for the same exe first, then adds an Allow
+/// rule unless one already exists. Triggers a UAC elevation prompt (the work
+/// runs in an elevated child PowerShell). Returns an error if the user
+/// declines elevation or the rule change fails.
+#[tauri::command]
+pub async fn allow_wmux_firewall() -> Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .into_owned();
+    // Single-quote escaping for embedding the path in a PowerShell string.
+    let exe_escaped = exe.replace('\'', "''");
+    let inner = format!(
+        "$exe = '{exe_escaped}'; \
+         $rules = Get-NetFirewallApplicationFilter | Where-Object {{ $_.Program -eq $exe }} | ForEach-Object {{ $_ | Get-NetFirewallRule }}; \
+         $rules | Where-Object {{ $_.Action -eq 'Block' }} | Remove-NetFirewallRule -ErrorAction SilentlyContinue; \
+         if (-not ($rules | Where-Object {{ $_.Action -eq 'Allow' -and $_.Direction -eq 'Inbound' }})) {{ New-NetFirewallRule -DisplayName 'wmux' -Direction Inbound -Action Allow -Program $exe -Profile Any | Out-Null }}"
+    );
+    // Stage the script in a temp .ps1 so the elevated launch doesn't have to
+    // fight nested-quote escaping through Start-Process -ArgumentList.
+    let mut ps1 = std::env::temp_dir();
+    ps1.push(format!("wmux-fw-{}.ps1", std::process::id()));
+    std::fs::write(&ps1, &inner).map_err(|e| e.to_string())?;
+    let ps1_path = ps1.to_string_lossy().replace('\'', "''");
+    let outer = format!(
+        "Start-Process -FilePath powershell -Verb RunAs -WindowStyle Hidden \
+         -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{ps1_path}') -Wait"
+    );
+    let result = tokio::task::spawn_blocking(move || {
+        let mut c = Command::new("powershell.exe");
+        c.args(["-NoProfile", "-Command", &outer]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — only the UAC dialog shows
+        }
+        c.output().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&ps1);
+    let output = result?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Firewall update was cancelled or failed (UAC declined?).".to_string()
+        } else {
+            stderr
+        });
+    }
+    Ok(())
+}
+
 /// Silently reconfigure the wmux MCP server entry on the remote machine so it
 /// points at the current session's tunnel port.  Idempotent: removes any
 /// existing "wmux" entry first so a stale port never blocks a new session.
@@ -3507,6 +3611,46 @@ pub async fn configure_ssh_mcp(
     );
     tokio::task::spawn_blocking(move || {
         run_remote_ssh_script(&host, user.as_deref(), port, identity_file.as_deref(), &cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(())
+}
+
+/// Silently reconfigure the wmux MCP server entry inside a WSL distro so it
+/// points at the current session's HTTP port and the live WSL2 gateway IP.
+/// Idempotent: removes any existing "wmux" entry first so a stale port/IP
+/// never blocks a new session. This is the WSL counterpart to
+/// `configure_ssh_mcp` — both the dynamic HTTP port and the NAT-assigned
+/// gateway IP can change between runs, so the entry is recomputed every time
+/// rather than baked in once by the manual MCP button.
+#[tauri::command]
+pub async fn configure_wsl_mcp(distro: Option<String>) -> Result<(), String> {
+    let host_ip = crate::session_manager::wsl_windows_host_ip()
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = crate::http_server::actual_port();
+    let url = format!("http://{host_ip}:{port}/mcp");
+    // Run via a login shell so `claude` is on PATH (matches `run_remote_ssh_script`,
+    // which uses `sh -lc`). The `| true` after each step keeps the whole chain
+    // non-fatal: a missing `claude` binary or absent prior entry must not error.
+    let cmd = format!(
+        "command -v claude >/dev/null 2>&1 && \
+         claude mcp remove wmux 2>/dev/null | true && \
+         claude mcp add --transport http wmux {url} 2>/dev/null | true"
+    );
+    tokio::task::spawn_blocking(move || {
+        let mut c = Command::new("wsl.exe");
+        if let Some(d) = &distro {
+            c.args(["--distribution", d.as_str()]);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — silent background reconfigure
+        }
+        c.args(["--", "bash", "-lc", &cmd])
+            .output()
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())??;

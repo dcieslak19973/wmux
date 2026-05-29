@@ -1508,6 +1508,24 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     '  icacls "$env:USERPROFILE\\Documents\\ssh-keys\\your-key.pem" /inheritance:r /grant:r "${env:USERNAME}:R"\n\n' +
     'Then update your wmux session to use the Windows key path.';
 
+  // Built per-call because it embeds the exact running-exe path — Windows
+  // Firewall rules key on the precise program path, and each wmux build
+  // location is a distinct firewall identity (so a new build can start blocked
+  // even though an older one was allowed).
+  const buildWslFirewallHelp = (exePath) =>
+    'The agent inside WSL can’t reach wmux’s API.\n\n' +
+    'This is almost always Windows Firewall. Firewall rules are scoped to the exact\n' +
+    'executable path, so a wmux build launched from a new location is treated as a\n' +
+    'brand-new app — and Windows may block its inbound connections by default, which\n' +
+    'stops WSL from reaching the API on any port.\n\n' +
+    'Allow this build once. In an Administrator PowerShell, run:\n\n' +
+    `  $exe = '${exePath}'\n` +
+    '  Get-NetFirewallApplicationFilter | Where-Object { $_.Program -eq $exe } |\n' +
+    '    ForEach-Object { $_ | Get-NetFirewallRule } |\n' +
+    '    Where-Object { $_.Action -eq \'Block\' } | Remove-NetFirewallRule\n' +
+    '  New-NetFirewallRule -DisplayName \'wmux\' -Direction Inbound -Action Allow -Program $exe -Profile Any\n\n' +
+    'Then click the MCP button again (or restart the WSL pane).';
+
   const targetKind = getTargetKind(target);
   const isBlocksCapable = targetKind === 'local' || targetKind === 'wsl' || targetKind === 'ssh';
   const isWsl = targetKind === 'wsl';
@@ -1606,6 +1624,33 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     mcpBtn.title = `Paste: ${mcpCmd}`;
     mcpBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      // WSL reachability check failed — the agent can't reach wmux's API from
+      // WSL at all (almost always Windows Firewall blocking this build's exe).
+      // Pasting the mcp command would just write a config that can't connect,
+      // so show the firewall fix instead.
+      if (mcpBtn.dataset.tunnelError === 'wsl') {
+        // One-click fix: create the firewall Allow rule (triggers a UAC
+        // prompt), then re-probe. If WSL can now reach the API, clear the
+        // warning and (re)configure the MCP entry. If the user declines UAC or
+        // it's still unreachable, fall back to the copy-paste manual command.
+        const showManualHelp = () =>
+          invoke('get_exe_path')
+            .then((exe) => showError(buildWslFirewallHelp(exe || '<path-to-wmux.exe>')))
+            .catch(() => showError(buildWslFirewallHelp('<path-to-wmux.exe>')));
+        mcpBtn.disabled = true;
+        invoke('allow_wmux_firewall')
+          .then(() => invoke('check_wsl_api_reachable', { distro: target.distro ?? null }))
+          .then((ok) => {
+            if (!ok) { showManualHelp(); return; }
+            mcpBtn.classList.remove('tunnel-down');
+            delete mcpBtn.dataset.tunnelError;
+            mcpBtn.title = `Paste: ${mcpCmd}`;
+            invoke('configure_wsl_mcp', { distro: target.distro ?? null }).catch(() => {});
+          })
+          .catch(showManualHelp)
+          .finally(() => { mcpBtn.disabled = false; });
+        return;
+      }
       // If the tunnel check failed due to an SSH connection error (key issues
       // etc.) block the click — the command won't reach the remote anyway.
       if (mcpBtn.dataset.tunnelError === 'ssh') {
@@ -1662,6 +1707,33 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
           }
         }), 8000);
       }), 6000);
+    }
+
+    if (isWsl) {
+      // Auto-configure the wmux MCP entry inside WSL so the agent always points
+      // at the current dynamic HTTP port + live WSL2 gateway IP. Runs silently
+      // via a background wsl.exe call — no terminal output. Self-heals a stale
+      // entry left by a previous session on a different port/IP (the WSL
+      // counterpart to the SSH configure_ssh_mcp call above). No tunnel to wait
+      // on, so it fires immediately.
+      invoke('configure_wsl_mcp', { distro: target.distro ?? null }).catch(() => {});
+
+      // Verify the agent inside WSL can actually reach wmux's HTTP API. The
+      // usual failure is Windows Firewall dropping inbound to *this* wmux build
+      // (rules are per-exe path, so a build from a new location often starts
+      // Blocked). Surface it on the MCP button so the user gets an actionable
+      // fix instead of an opaque "can't connect" inside the agent. Small delay
+      // so the server/env are settled before probing.
+      setTimeout(() => {
+        invoke('check_wsl_api_reachable', { distro: target.distro ?? null })
+          .then((ok) => {
+            if (ok) return;
+            mcpBtn.classList.add('tunnel-down');
+            mcpBtn.dataset.tunnelError = 'wsl';
+            mcpBtn.title = 'Agent can’t reach wmux from WSL (likely Windows Firewall) — click for the fix';
+          })
+          .catch(() => {});
+      }, 3000);
     }
 
     const HOOK_AGENTS = [

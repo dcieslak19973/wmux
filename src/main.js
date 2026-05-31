@@ -2057,10 +2057,27 @@ function showWorktreeMenu(sessionId, x, y) {
 async function promptAndCreateWorktree(sessionId) {
   const pane = panes.get(sessionId);
   if (!pane) return;
-  const repoRoot = pane.gitContext?.repo_root;
+  let repoRoot = pane.gitContext?.repo_root;
   if (!repoRoot) {
-    showError('No git repository detected in this pane. Navigate to a repo directory first.');
-    return;
+    // Shell integration (⚡) emits OSC 7 which auto-detects the repo. Without
+    // it (e.g. plain PowerShell) we fall back to asking the user directly.
+    repoRoot = window.prompt(
+      'Repo root not auto-detected.\nInstall shell integration (⚡) for automatic detection, or enter the path manually:',
+      pane.cwd || '',
+    );
+    if (!repoRoot) return;
+    // Quick sanity-check: verify it's actually a git repo before proceeding.
+    try {
+      const ctx = await invoke('get_git_context', { cwd: repoRoot });
+      if (!ctx?.repo_root) {
+        showError(`No git repository found at: ${repoRoot}`);
+        return;
+      }
+      repoRoot = ctx.repo_root;
+    } catch {
+      showError(`Could not probe git context for: ${repoRoot}`);
+      return;
+    }
   }
   const suggested = `wt-${Date.now().toString(36)}`;
   const branch = window.prompt('New branch name for worktree:', suggested);

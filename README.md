@@ -230,12 +230,14 @@ wmux/
 
 ## Roadmap
 
-- [ ] GPU terminal renderer — replace xterm.js with a wgpu-backed renderer to close the perception gap vs Warp/cmux/Zed.
-- [ ] First-party git worktree management per pane — every other tool in the comparison set ships this; relying on Claude Code's `isolation:"worktree"` doesn't cover the cross-pane case.
-- [ ] Universal agent-lifecycle adapter — normalize lifecycle events from Codex / Gemini / OpenCode / Aider so the "live" badge isn't Claude-Code-only.
+See [`roadmap.md`](roadmap.md) for the prioritized gap list with competitive context. Top items:
+
+- [ ] **Process / agent persistence** — true detach/reattach so closing the window doesn't kill running jobs; agent-conversation resume for hooked harnesses.
+- [ ] **Frontend test coverage** — 0 frontend tests today; need regression coverage for session restore, collab reconnect, and agent-state transitions.
+- [ ] **Multi-harness lifecycle hooks** — Claude + Codex are hooked; Gemini / OpenCode / Aider / Amp still fall back to screen-scraping.
+- [x] ~~First-party git worktree isolation per pane~~ — shipped 2026-05-25.
+- [ ] GPU terminal renderer — replace xterm.js with a wgpu-backed renderer.
 - [ ] Widen `tmux.exe` compatibility for additional harness-driven edge cases.
-- [ ] Richer sidebar metadata — PR/review state, service status, port attribution.
-- [ ] Layout import / external workspace provisioning APIs.
 
 ## License
 

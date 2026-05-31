@@ -37,6 +37,7 @@ import { createPrReviewRuntime } from './pr_review_runtime.mjs';
 import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
 import { createCollabRuntime } from './collab_runtime.mjs';
 import { createActivityLogRuntime } from './activity_log_runtime.mjs';
+import { worktreeBranchLabel, inheritedCwdForSplit } from './worktree_state.mjs';
 import { createKeybindingsRuntime } from './keybindings_runtime.mjs';
 import { createCefEmbeddedSurface } from './cef_embedded.mjs';
 import { createPaneRegistry } from './pane_registry.mjs';
@@ -1239,6 +1240,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     if (pane) {
       pane.gitContext = metadata?.gitContext ?? null;
       renderPaneContextBadge(sessionId);
+      updateWorktreeButton(sessionId);
       pane.fbFlash?.();
     }
   });
@@ -2006,6 +2008,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       if (pane) {
         pane.gitContext = metadata?.gitContext ?? null;
         renderPaneContextBadge(sessionId);
+        updateWorktreeButton(sessionId);
       }
     }).catch(() => {});
   }
@@ -2088,12 +2091,14 @@ function updateWorktreeButton(sessionId) {
   if (!pane) return;
   const btn = pane.domEl?.closest('.pane-wrap')?.querySelector('[data-action="worktree"]');
   if (!btn) return;
-  if (pane.worktreePath) {
+  const branch = worktreeBranchLabel(pane.worktreePath, pane.gitContext);
+  if (branch) {
     btn.classList.add('is-active');
-    const branch = pane.gitContext?.branch ?? pane.worktreePath.split(/[\\/]/).pop() ?? '?';
-    btn.title = `Worktree active: ${branch} (click to manage)`;
+    btn.textContent = branch.length > 12 ? `…${branch.slice(-11)}` : branch;
+    btn.title = `Worktree: ${branch} (click to manage)`;
   } else {
     btn.classList.remove('is-active');
+    btn.textContent = 'WT';
     btn.title = 'Git worktree isolation (Ctrl+Shift+G)';
   }
 }
@@ -2172,7 +2177,11 @@ async function splitPane(paneId, dir, target = null) {
   sideBEl.style.display = 'flex';
   splitEl.appendChild(sideBEl);
 
-  const newSessionId = await createLeafPane(pane.tabId, target ?? getDefaultTarget(), sideBEl);
+  const worktreeCwd = inheritedCwdForSplit(pane);
+  const newSessionId = await createLeafPane(
+    pane.tabId, target ?? getDefaultTarget(), sideBEl,
+    worktreeCwd ? { cwd: worktreeCwd } : undefined,
+  );
   if (newSessionId) {
     activatePane(newSessionId);
   }
@@ -2276,6 +2285,7 @@ async function probeRemoteTmuxMetadata(tabId, sessionId, target) {
       });
       pane.gitContext = cwdMeta?.gitContext ?? gitContext;
       renderPaneContextBadge(sessionId);
+      updateWorktreeButton(sessionId);
     }
 
     if (!tab.userRenamed && metadata.window_name) {

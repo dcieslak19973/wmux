@@ -498,6 +498,8 @@ export function createUiPanelsRuntime({
         targetEl.title = tab.targetLabel ?? '';
       }
     }
+    const branchEl = tab.tabEl.querySelector('.tab-branch');
+    if (branchEl) branchEl.textContent = tab.gitBranch || '';
     const portsEl = tab.tabEl.querySelector('.tab-ports');
     if (portsEl) portsEl.textContent = getTabPortSummary(tab);
     const notifEl = tab.tabEl.querySelector('.tab-notif');

@@ -2053,12 +2053,11 @@ async function promptAndCreateWorktree(sessionId) {
   const pane = panes.get(sessionId);
   if (!pane) return;
   const kind = getTargetKind(pane.target);
-  if (kind !== 'local') {
-    const kindLabel = { wsl: 'WSL', ssh: 'SSH', remote_tmux: 'remote tmux' }[kind] ?? kind;
+  if (kind !== 'local' && kind !== 'wsl') {
+    const kindLabel = { ssh: 'SSH', remote_tmux: 'remote tmux' }[kind] ?? kind;
     showError(
-      `Git worktree isolation requires a local Windows pane.\n` +
-      `This pane is a ${kindLabel} pane — right-click the tab or check the default target in the ` +
-      `new-tab menu. For ${kindLabel} panes, run \`git worktree add\` manually inside the shell.`
+      `Git worktree isolation is not supported for ${kindLabel} panes.\n` +
+      `Run \`git worktree add\` manually inside the remote shell.`
     );
     return;
   }
@@ -2066,22 +2065,26 @@ async function promptAndCreateWorktree(sessionId) {
   if (!repoRoot) {
     // Shell integration (⚡) emits OSC 7 which auto-detects the repo. Without
     // it (e.g. plain PowerShell) we fall back to asking the user directly.
-    repoRoot = window.prompt(
-      'Repo root not auto-detected.\nInstall shell integration (⚡) for automatic detection, or enter the path manually:',
-      pane.cwd || '',
-    );
+    const hint = kind === 'wsl'
+      ? 'Enter the Linux path to the repo (e.g. /home/dan/project or /mnt/d/git/repo):'
+      : 'Repo root not auto-detected.\nInstall shell integration (⚡) for automatic detection, or enter the path manually:';
+    repoRoot = window.prompt(hint, pane.cwd || '');
     if (!repoRoot) return;
-    // Quick sanity-check: verify it's actually a git repo before proceeding.
-    try {
-      const ctx = await invoke('get_git_context', { cwd: repoRoot });
-      if (!ctx?.repo_root) {
-        showError(`No git repository found at: ${repoRoot}`);
+    // For local panes, validate via get_git_context (Windows git). For WSL
+    // panes on the Linux FS, Windows git can't probe Linux paths — let Rust
+    // validate when it runs git inside WSL.
+    if (kind === 'local') {
+      try {
+        const ctx = await invoke('get_git_context', { cwd: repoRoot });
+        if (!ctx?.repo_root) {
+          showError(`No git repository found at: ${repoRoot}`);
+          return;
+        }
+        repoRoot = ctx.repo_root;
+      } catch {
+        showError(`Could not probe git context for: ${repoRoot}`);
         return;
       }
-      repoRoot = ctx.repo_root;
-    } catch {
-      showError(`Could not probe git context for: ${repoRoot}`);
-      return;
     }
   }
   const suggested = `wt-${Date.now().toString(36)}`;

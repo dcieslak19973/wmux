@@ -150,6 +150,19 @@ pub enum RemoteTmuxSessionMode {
     AttachOrCreate,
 }
 
+/// Result of `pane_worktree_eligibility`.
+#[derive(Debug)]
+pub enum WorktreeEligibility {
+    /// Pane already has a managed worktree.
+    AlreadyHas,
+    /// Local Windows pane — ready for worktree creation.
+    Local,
+    /// WSL pane — ready for worktree creation via `wsl.exe`.
+    Wsl(Option<String>),
+    /// SSH or remote-tmux pane — not eligible.
+    NotEligible,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ShellTarget {
@@ -520,9 +533,20 @@ struct SessionEntry {
     output_buf: Arc<Mutex<Vec<u8>>>,
     /// OSC 133 block history for agent queries.
     block_store: Arc<Mutex<BlockStore>>,
-    /// Absolute path of the git worktree owned by this pane, if one was created
-    /// via `create_pane_worktree`. Cleaned up automatically on pane close.
-    worktree_path: Option<String>,
+    /// Git worktree owned by this pane, created via `create_pane_worktree`.
+    /// Cleaned up automatically on pane close.
+    worktree: Option<WorktreeInfo>,
+}
+
+/// Tracks a managed git worktree for a pane.
+#[derive(Debug, Clone)]
+pub struct WorktreeInfo {
+    /// Absolute path to the worktree directory.
+    /// Windows path for local panes; Linux path for WSL panes.
+    pub path: String,
+    /// WSL distro name when the worktree was created inside WSL.
+    /// `None` for local (Windows) worktrees.
+    pub wsl_distro: Option<String>,
 }
 
 impl Clone for SessionEntry {
@@ -533,7 +557,7 @@ impl Clone for SessionEntry {
             label: self.label.clone(),
             output_buf: self.output_buf.clone(),
             block_store: self.block_store.clone(),
-            worktree_path: self.worktree_path.clone(),
+            worktree: self.worktree.clone(),
         }
     }
 }
@@ -705,7 +729,7 @@ impl SessionManager {
 
         self.sessions.lock().await.insert(
             id.clone(),
-            SessionEntry { session: Arc::new(session), label: label.clone(), target, output_buf, block_store, worktree_path: None },
+            SessionEntry { session: Arc::new(session), label: label.clone(), target, output_buf, block_store, worktree: None },
         );
         Ok((id, label))
     }
@@ -777,8 +801,8 @@ impl SessionManager {
     pub async fn close(&self, id: &str) -> bool {
         let entry = self.sessions.lock().await.remove(id);
         if let Some(e) = entry {
-            if let Some(wt) = e.worktree_path {
-                cleanup_worktree(&wt);
+            if let Some(wt) = e.worktree {
+                cleanup_worktree(&wt.path, wt.wsl_distro.as_deref());
             }
             true
         } else {
@@ -786,31 +810,49 @@ impl SessionManager {
         }
     }
 
-    pub async fn set_worktree_path(&self, id: &str, path: String) -> bool {
+    pub async fn set_worktree(&self, id: &str, info: WorktreeInfo) -> bool {
         if let Some(entry) = self.sessions.lock().await.get_mut(id) {
-            entry.worktree_path = Some(path);
+            entry.worktree = Some(info);
             true
         } else {
             false
         }
     }
 
+    pub async fn take_worktree(&self, id: &str) -> Option<WorktreeInfo> {
+        self.sessions.lock().await.get_mut(id)?.worktree.take()
+    }
+
+    pub async fn get_worktree(&self, id: &str) -> Option<WorktreeInfo> {
+        self.sessions.lock().await.get(id)?.worktree.clone()
+    }
+
+    // Keep old path-only accessors as thin wrappers so callers that only need
+    // the path don't have to destructure WorktreeInfo.
+    pub async fn set_worktree_path(&self, id: &str, path: String) -> bool {
+        self.set_worktree(id, WorktreeInfo { path, wsl_distro: None }).await
+    }
+
     pub async fn take_worktree_path(&self, id: &str) -> Option<String> {
-        self.sessions.lock().await.get_mut(id)?.worktree_path.take()
+        self.take_worktree(id).await.map(|w| w.path)
     }
 
     pub async fn get_worktree_path(&self, id: &str) -> Option<String> {
-        self.sessions.lock().await.get(id)?.worktree_path.clone()
+        self.get_worktree(id).await.map(|w| w.path)
     }
 
-    /// Returns (is_local, has_existing_worktree). Used by create_pane_worktree
-    /// to gate on pane type without exposing SessionEntry fields.
-    pub async fn pane_worktree_eligibility(&self, id: &str) -> Option<(bool, bool)> {
+    /// Eligibility result for `create_pane_worktree`.
+    pub async fn pane_worktree_eligibility(&self, id: &str) -> Option<WorktreeEligibility> {
         let sessions = self.sessions.lock().await;
         let entry = sessions.get(id)?;
-        let is_local = matches!(entry.target, ShellTarget::Local);
-        let has_wt = entry.worktree_path.is_some();
-        Some((is_local, has_wt))
+        if entry.worktree.is_some() {
+            return Some(WorktreeEligibility::AlreadyHas);
+        }
+        Some(match &entry.target {
+            ShellTarget::Local => WorktreeEligibility::Local,
+            ShellTarget::Wsl { distro } => WorktreeEligibility::Wsl(distro.clone()),
+            _ => WorktreeEligibility::NotEligible,
+        })
     }
 
     pub async fn list(&self) -> Vec<String> {
@@ -829,7 +871,7 @@ impl SessionManager {
                 last_command: store.last_command().map(str::to_owned),
                 is_running: store.is_running(),
                 block_count: store.block_count(),
-                worktree_path: entry.worktree_path.clone(),
+                worktree_path: entry.worktree.as_ref().map(|w| w.path.clone()),
             });
         }
         result
@@ -1146,23 +1188,38 @@ fn decode_utf16le(raw: &[u8]) -> String {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Remove a git worktree at `path`. Runs `git worktree remove --force` then
-/// falls back to `fs::remove_dir_all`, followed by a best-effort `git worktree
-/// prune` to remove stale administrative data from the main repo's `.git`.
-pub(crate) fn cleanup_worktree(path: &str) {
+/// Remove a git worktree at `path`. For WSL worktrees pass the distro name.
+/// Runs `git worktree remove --force` (via WSL when distro is Some), falls
+/// back to fs removal for local worktrees, then prunes the main repo.
+pub(crate) fn cleanup_worktree(path: &str, wsl_distro: Option<&str>) {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt as _;
+
+    if let Some(distro) = wsl_distro {
+        // WSL worktree — all git ops run inside the distro.
+        let script =
+            "git -C \"$1\" rev-parse --git-common-dir 2>/dev/null; \
+             git worktree remove --force \"$1\" 2>/dev/null; \
+             git -C \"$(git -C \"$1\" rev-parse --git-common-dir 2>/dev/null || true)\" worktree prune 2>/dev/null; true";
+        let _ = std::process::Command::new("wsl.exe")
+            .args(["-d", distro, "--", "sh", "-c", script, "_", path])
+            .status();
+        return;
+    }
+
+    // Local (Windows) worktree.
+    #[cfg(windows)]
+    let no_window: u32 = 0x0800_0000;
 
     // Resolve the git repo this worktree belongs to so we can run `prune`.
     let repo_root: Option<String> = {
         let mut cmd = std::process::Command::new("git");
         cmd.arg("-C").arg(path).args(["rev-parse", "--git-common-dir"]);
         #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000);
+        cmd.creation_flags(no_window);
         cmd.output().ok().and_then(|o| {
             if o.status.success() {
                 let raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                // --git-common-dir returns a path relative to `path` or absolute.
                 let p = std::path::Path::new(&raw);
                 if p.is_absolute() {
                     p.parent().map(|x| x.to_string_lossy().into_owned())
@@ -1181,21 +1238,19 @@ pub(crate) fn cleanup_worktree(path: &str) {
         let mut cmd = std::process::Command::new("git");
         cmd.args(["worktree", "remove", "--force", path]);
         #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000);
+        cmd.creation_flags(no_window);
         if let Ok(status) = cmd.status() {
             removed_via_git = status.success();
         }
     }
-
     if !removed_via_git {
         let _ = std::fs::remove_dir_all(path);
     }
-
     if let Some(root) = repo_root {
         let mut cmd = std::process::Command::new("git");
         cmd.arg("-C").arg(&root).args(["worktree", "prune"]);
         #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000);
+        cmd.creation_flags(no_window);
         let _ = cmd.status();
     }
 }

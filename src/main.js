@@ -4127,7 +4127,7 @@ keybindingsRuntime.register({
   label: 'Git worktree: create or manage for active pane',
   defaultBindings: ['ctrl+shift+g'],
   shouldRun: () => !!activePaneId,
-  handler: () => {
+  handler: async () => {
     const pane = panes.get(activePaneId);
     if (!pane) return;
     const btn = pane.domEl?.closest('.pane-wrap')?.querySelector('[data-action="worktree"]');

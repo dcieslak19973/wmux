@@ -1202,7 +1202,7 @@ pub(crate) fn cleanup_worktree(path: &str, wsl_distro: Option<&str>) {
              git worktree remove --force \"$1\" 2>/dev/null; \
              git -C \"$(git -C \"$1\" rev-parse --git-common-dir 2>/dev/null || true)\" worktree prune 2>/dev/null; true";
         let _ = std::process::Command::new("wsl.exe")
-            .args(["-d", distro, "--", "sh", "-c", script, "_", path])
+            .args(["-d", distro, "--exec", "sh", "-c", script, "_", path])
             .status();
         return;
     }

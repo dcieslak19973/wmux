@@ -4433,6 +4433,11 @@ async fn create_pane_worktree_wsl(
     //   - stdout is the resolved worktree path (empty on failure)
     // branch_name and repo_root are passed as positional argv, not interpolated,
     // so they cannot inject shell commands even if they contain special characters.
+    //
+    // Use --exec (-e) rather than -- so wsl.exe directly invokes sh without
+    // routing through the default login shell first. The -- form joins args
+    // into a single string and re-parses through bash, which collapses the
+    // positional parameters and leaves $2 empty.
     let script = "\
         repo=\"$(wslpath \"$1\" 2>/dev/null || printf '%s' \"$1\")\"; \
         wt=\"$HOME/.wmux/worktrees/$(basename \"$repo\")/$2\"; \
@@ -4442,7 +4447,7 @@ async fn create_pane_worktree_wsl(
     if let Some(d) = distro {
         cmd.args(["-d", d]);
     }
-    cmd.args(["--", "sh", "-c", script, "_", repo_root, branch_name]);
+    cmd.args(["--exec", "sh", "-c", script, "_", repo_root, branch_name]);
 
     let out = cmd.output().map_err(|e| format!("wsl.exe invocation failed: {e}"))?;
     if !out.status.success() {
@@ -4486,7 +4491,7 @@ pub async fn remove_pane_worktree(
         let dirty_output = if let Some(ref distro) = wt.wsl_distro {
             // WSL worktree — run git inside WSL.
             let mut cmd = std::process::Command::new("wsl.exe");
-            cmd.args(["-d", distro, "--", "git", "-C", &wt.path,
+            cmd.args(["-d", distro, "--exec", "git", "-C", &wt.path,
                       "status", "--porcelain", "--untracked-files=all"]);
             match cmd.output() {
                 Ok(out) if out.status.success() =>

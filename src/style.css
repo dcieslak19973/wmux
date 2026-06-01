@@ -1293,6 +1293,14 @@ body.has-tabs #empty-state { display: none; }
   border-radius: 3px;
   padding: 0 4px;
 }
+.agent-item-branch--worktree {
+  color: #98c379;
+  background: rgba(152,195,121,0.12);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .agent-item-cwd {
   font-size: 10px;

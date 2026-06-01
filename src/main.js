@@ -164,6 +164,12 @@ const SETTINGS_DEFAULTS = {
   updateManifestUrl: DEFAULT_UPDATE_MANIFEST_URL,
   updatePubkey: DEFAULT_UPDATE_PUBKEY,
   autoCheckUpdates: true,
+  // Git divergence comparison base for the agent sidebar worktree view.
+  //   'upstream' — compare HEAD against the branch's tracking remote (@{u})
+  //   'main'     — compare HEAD against the local main/master branch
+  // 'upstream' shows whether you need to push/pull; 'main' shows how far
+  // parallel agent worktrees have drifted from each other.
+  divergenceBase: 'upstream',
 };
 
 const SAVED_SSH_TARGETS_KEY = 'wmux-saved-ssh-targets';
@@ -677,9 +683,12 @@ function listPaneSummaries(tabId = null) {
         paneDetail: paneLabel.secondary,
         cwd: pane.cwd ?? '',
         repoName: git?.repo_name ?? '',
-        worktreeName: git?.worktree_name ?? '',
+        worktreeName: git?.worktree_name ?? (pane.worktreePath
+          ? pane.worktreePath.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? ''
+          : ''),
         gitBranch: git?.branch ?? '',
-        isWorktree: !!git?.is_worktree,
+        isWorktree: !!git?.is_worktree || !!pane.worktreePath,
+        worktreePath: pane.worktreePath ?? null,
         targetLabel: defaultTargetLabel(pane.target),
         active: pane.sessionId === activePaneId,
       };

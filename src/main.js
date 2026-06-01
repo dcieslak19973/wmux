@@ -2052,6 +2052,16 @@ function showWorktreeMenu(sessionId, x, y) {
 async function promptAndCreateWorktree(sessionId) {
   const pane = panes.get(sessionId);
   if (!pane) return;
+  const kind = getTargetKind(pane.target);
+  if (kind !== 'local') {
+    const kindLabel = { wsl: 'WSL', ssh: 'SSH', remote_tmux: 'remote tmux' }[kind] ?? kind;
+    showError(
+      `Git worktree isolation requires a local Windows pane.\n` +
+      `This pane is a ${kindLabel} pane — right-click the tab or check the default target in the ` +
+      `new-tab menu. For ${kindLabel} panes, run \`git worktree add\` manually inside the shell.`
+    );
+    return;
+  }
   let repoRoot = pane.gitContext?.repo_root;
   if (!repoRoot) {
     // Shell integration (⚡) emits OSC 7 which auto-detects the repo. Without

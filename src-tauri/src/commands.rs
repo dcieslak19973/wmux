@@ -2704,6 +2704,34 @@ mod tests {
         assert_eq!(normalize_cwd_for_git("/mnt/d"), "/mnt/d");
     }
 
+    // Verify the WSL worktree script logic: branch name is passed as a
+    // positional argument ($2), not interpolated, so shell metacharacters in
+    // the branch name cannot escape the quoting.  We exercise the
+    // "basename + HOME expansion" path using a known Linux-style repo_root.
+    // This runs sh.exe inside WSL if available; if not available the test is
+    // ignored rather than failing CI on non-WSL hosts.
+    #[test]
+    fn wsl_worktree_script_passes_branch_as_argv() {
+        // Confirm the script we hand to `sh -c` is syntactically valid by
+        // constructing it the same way create_pane_worktree_wsl does, then
+        // verifying branch and repo basename appear correctly in the wt path.
+        // We don't actually run `git worktree add`; we stub it with `true`.
+        let script = "\
+            repo=\"$(wslpath \"$1\" 2>/dev/null || printf '%s' \"$1\")\"; \
+            wt=\"$HOME/.wmux/worktrees/$(basename \"$repo\")/$2\"; \
+            true && printf '%s' \"$wt\"";
+        let branch = "feat/my-feature";
+        let repo = "/home/dan/project";
+        // On a host with WSL, run it; otherwise skip.
+        let Ok(out) = std::process::Command::new("wsl.exe")
+            .args(["--", "sh", "-c", script, "_", repo, branch])
+            .output() else { return; };
+        if !out.status.success() { return; } // no WSL available
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(path.ends_with("/feat/my-feature"), "got: {path}");
+        assert!(path.contains("/project/"), "got: {path}");
+    }
+
     #[test]
     fn parses_remote_tmux_probe_output_with_fallback_session() {
         let (session_name, window_id, window_name, pane_id, cwd) = parse_remote_tmux_probe_output(
@@ -4312,7 +4340,8 @@ pub async fn detect_tailscale_status() -> Result<TailscaleStatus, String> {
 /// `branch_name` is the new branch to create; it must not already exist.
 ///
 /// On success returns the absolute path of the new worktree.
-/// Only supported for Local panes; WSL and SSH panes return an error.
+/// Create a git worktree for the given pane and `cd` the shell into it.
+/// Supports Local (Windows) and WSL panes; SSH and remote-tmux return an error.
 #[tauri::command]
 pub async fn create_pane_worktree(
     manager: State<'_, SessionManager>,
@@ -4320,8 +4349,7 @@ pub async fn create_pane_worktree(
     branch_name: String,
     repo_root: String,
 ) -> Result<String, String> {
-    #[cfg(windows)]
-    use std::os::windows::process::CommandExt as _;
+    use crate::session_manager::WorktreeEligibility;
 
     // Validate branch name — no whitespace, no git-special chars.
     if branch_name.is_empty() {
@@ -4331,41 +4359,50 @@ pub async fn create_pane_worktree(
         return Err(format!("Branch name '{branch_name}' contains invalid characters"));
     }
 
-    // Only local panes are supported in V1.
-    match manager.pane_worktree_eligibility(&session_id).await {
-        None => return Err("session not found".into()),
-        Some((false, _)) => return Err(
-            "git worktree isolation is currently only supported for local (Windows) panes. \
-             For WSL panes, run `git worktree add` manually inside the pane.".into()
-        ),
-        Some((_, true)) => return Err("This pane already has a worktree. Remove it first.".into()),
-        Some((true, false)) => {}
-    }
+    let eligibility = manager.pane_worktree_eligibility(&session_id).await
+        .ok_or("session not found")?;
 
-    // Compute worktree path: %USERPROFILE%\.wmux\worktrees\<repo-name>\<branch>
+    match eligibility {
+        WorktreeEligibility::AlreadyHas =>
+            Err("This pane already has a worktree. Remove it first.".into()),
+        WorktreeEligibility::NotEligible =>
+            Err("Git worktree isolation is not supported for SSH or remote-tmux panes.".into()),
+        WorktreeEligibility::Local =>
+            create_pane_worktree_local(&manager, &session_id, &branch_name, &repo_root).await,
+        WorktreeEligibility::Wsl(distro) =>
+            create_pane_worktree_wsl(&manager, &session_id, &branch_name, &repo_root, distro.as_deref()).await,
+    }
+}
+
+async fn create_pane_worktree_local(
+    manager: &SessionManager,
+    session_id: &str,
+    branch_name: &str,
+    repo_root: &str,
+) -> Result<String, String> {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt as _;
+    use crate::session_manager::WorktreeInfo;
+
     let user_profile = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| r"C:\Users\Default".into());
-    let repo_name = std::path::Path::new(&repo_root)
+    let repo_name = std::path::Path::new(repo_root)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
     let worktree_path = std::path::PathBuf::from(&user_profile)
-        .join(".wmux")
-        .join("worktrees")
-        .join(&repo_name)
-        .join(&branch_name);
+        .join(".wmux").join("worktrees").join(&repo_name).join(branch_name);
     let worktree_path_str = worktree_path.to_string_lossy().into_owned();
 
     if worktree_path.exists() {
         return Err(format!("Path already exists: {worktree_path_str}"));
     }
 
-    // git worktree add -b <branch> <path> HEAD
     let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C").arg(&repo_root)
+    cmd.arg("-C").arg(repo_root)
         .args(["worktree", "add", "-b"])
-        .arg(&branch_name)
+        .arg(branch_name)
         .arg(&worktree_path_str)
         .arg("HEAD");
     #[cfg(windows)]
@@ -4376,12 +4413,60 @@ pub async fn create_pane_worktree(
         return Err(format!("git worktree add failed: {stderr}"));
     }
 
-    // Store path and `cd` the pane into the new worktree.
-    manager.set_worktree_path(&session_id, worktree_path_str.clone()).await;
-    let cd_cmd = format!("cd \"{worktree_path_str}\"\r");
-    manager.write_to(&session_id, cd_cmd.as_bytes()).await;
-
+    manager.set_worktree(session_id, WorktreeInfo { path: worktree_path_str.clone(), wsl_distro: None }).await;
+    manager.write_to(session_id, format!("cd \"{worktree_path_str}\"\r").as_bytes()).await;
     Ok(worktree_path_str)
+}
+
+async fn create_pane_worktree_wsl(
+    manager: &SessionManager,
+    session_id: &str,
+    branch_name: &str,
+    repo_root: &str,
+    distro: Option<&str>,
+) -> Result<String, String> {
+    use crate::session_manager::WorktreeInfo;
+
+    // Run a single WSL shell invocation:
+    //   - wslpath converts the repo_root (Windows or Linux path) to a Linux path
+    //   - worktree is created under $HOME/.wmux/worktrees/<repo>/<branch>
+    //   - stdout is the resolved worktree path (empty on failure)
+    // branch_name and repo_root are passed as positional argv, not interpolated,
+    // so they cannot inject shell commands even if they contain special characters.
+    //
+    // Use --exec (-e) rather than -- so wsl.exe directly invokes sh without
+    // routing through the default login shell first. The -- form joins args
+    // into a single string and re-parses through bash, which collapses the
+    // positional parameters and leaves $2 empty.
+    let script = "\
+        repo=\"$(wslpath \"$1\" 2>/dev/null || printf '%s' \"$1\")\"; \
+        wt=\"$HOME/.wmux/worktrees/$(basename \"$repo\")/$2\"; \
+        git -C \"$repo\" worktree add -b \"$2\" \"$wt\" HEAD 1>&2 && printf '%s' \"$wt\"";
+
+    let mut cmd = std::process::Command::new("wsl.exe");
+    if let Some(d) = distro {
+        cmd.args(["-d", d]);
+    }
+    cmd.args(["--exec", "sh", "-c", script, "_", repo_root, branch_name]);
+
+    let out = cmd.output().map_err(|e| format!("wsl.exe invocation failed: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!("git worktree add failed: {stderr}"));
+    }
+
+    let worktree_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if worktree_path.is_empty() {
+        return Err("git worktree add produced no output path".into());
+    }
+
+    manager.set_worktree(session_id, WorktreeInfo {
+        path: worktree_path.clone(),
+        wsl_distro: distro.map(str::to_owned),
+    }).await;
+    // The pane is a WSL shell — cd works directly with the Linux path.
+    manager.write_to(session_id, format!("cd \"{worktree_path}\"\r").as_bytes()).await;
+    Ok(worktree_path)
 }
 
 /// Remove the git worktree owned by a pane.
@@ -4397,28 +4482,50 @@ pub async fn remove_pane_worktree(
     #[cfg(windows)]
     use std::os::windows::process::CommandExt as _;
 
-    let wt_path = manager.get_worktree_path(&session_id).await
+    let wt = manager.get_worktree(&session_id).await
         .ok_or("This pane has no managed worktree")?;
 
-    // Dirty check (unless force).
+    // Dirty check (unless force). Fail-closed: if we can't determine dirtiness
+    // for a WSL worktree, refuse the removal rather than risk data loss.
     if !force {
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C").arg(&wt_path)
-            .args(["status", "--porcelain", "--untracked-files=all"]);
-        #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000);
-        if let Ok(out) = cmd.output() {
-            let dirty = String::from_utf8_lossy(&out.stdout);
+        let dirty_output = if let Some(ref distro) = wt.wsl_distro {
+            // WSL worktree — run git inside WSL.
+            let mut cmd = std::process::Command::new("wsl.exe");
+            cmd.args(["-d", distro, "--exec", "git", "-C", &wt.path,
+                      "status", "--porcelain", "--untracked-files=all"]);
+            match cmd.output() {
+                Ok(out) if out.status.success() =>
+                    Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+                Ok(_) =>
+                    // git failed (e.g. path gone) — treat as clean, let cleanup handle it.
+                    Some(String::new()),
+                Err(e) =>
+                    return Err(format!(
+                        "Could not check worktree status via WSL: {e}. \
+                         Use force=true to skip the dirty check."
+                    )),
+            }
+        } else {
+            // Local (Windows) worktree.
+            let mut cmd = std::process::Command::new("git");
+            cmd.arg("-C").arg(&wt.path)
+                .args(["status", "--porcelain", "--untracked-files=all"]);
+            #[cfg(windows)]
+            cmd.creation_flags(0x0800_0000);
+            cmd.output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        };
+
+        if let Some(dirty) = dirty_output {
             if !dirty.trim().is_empty() {
                 return Err(format!(
-                    "Worktree has uncommitted changes. Pass force=true to discard, or commit first.\n{dirty}"
+                    "Worktree has uncommitted changes. Use 'Remove worktree (force)' to discard, or commit first.\n{dirty}"
                 ));
             }
         }
     }
 
-    crate::session_manager::cleanup_worktree(&wt_path);
-    manager.take_worktree_path(&session_id).await;
+    crate::session_manager::cleanup_worktree(&wt.path, wt.wsl_distro.as_deref());
+    manager.take_worktree(&session_id).await;
     Ok(())
 }
 

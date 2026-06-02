@@ -154,7 +154,9 @@ export function createAgentSidebarRuntime({
       ${lastCmd ? `<div class="agent-item-cmd">${escHtml(lastCmd)}</div>` : '<div class="agent-item-cmd agent-item-cmd-empty">no commands yet</div>'}
       <div class="agent-item-meta">
         <span class="agent-item-ws">${escHtml(summary.workspaceName)}</span>
-        ${summary.gitBranch ? `<span class="agent-item-branch">${escHtml(summary.gitBranch)}</span>` : ''}
+        ${summary.isWorktree
+          ? `<span class="agent-item-branch agent-item-branch--worktree" title="Git worktree: ${escHtml(summary.gitBranch || summary.worktreeName)}">⎇ ${escHtml(summary.gitBranch || summary.worktreeName || 'worktree')}</span>`
+          : summary.gitBranch ? `<span class="agent-item-branch">${escHtml(summary.gitBranch)}</span>` : ''}
         ${summary.cwd ? `<span class="agent-item-cwd">${escHtml(shortCwd(summary.cwd))}</span>` : ''}
       </div>
     `;

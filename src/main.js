@@ -164,6 +164,12 @@ const SETTINGS_DEFAULTS = {
   updateManifestUrl: DEFAULT_UPDATE_MANIFEST_URL,
   updatePubkey: DEFAULT_UPDATE_PUBKEY,
   autoCheckUpdates: true,
+  // Git divergence comparison base for the agent sidebar worktree view.
+  //   'upstream' — compare HEAD against the branch's tracking remote (@{u})
+  //   'main'     — compare HEAD against the local main/master branch
+  // 'upstream' shows whether you need to push/pull; 'main' shows how far
+  // parallel agent worktrees have drifted from each other.
+  divergenceBase: 'upstream',
 };
 
 const SAVED_SSH_TARGETS_KEY = 'wmux-saved-ssh-targets';
@@ -677,9 +683,12 @@ function listPaneSummaries(tabId = null) {
         paneDetail: paneLabel.secondary,
         cwd: pane.cwd ?? '',
         repoName: git?.repo_name ?? '',
-        worktreeName: git?.worktree_name ?? '',
+        worktreeName: git?.worktree_name ?? (pane.worktreePath
+          ? pane.worktreePath.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? ''
+          : ''),
         gitBranch: git?.branch ?? '',
-        isWorktree: !!git?.is_worktree,
+        isWorktree: !!git?.is_worktree || !!pane.worktreePath,
+        worktreePath: pane.worktreePath ?? null,
         targetLabel: defaultTargetLabel(pane.target),
         active: pane.sessionId === activePaneId,
       };
@@ -1560,10 +1569,10 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
       { label: 'Read-write (viewers can type)', danger: true, action: () => collabRuntime?.startShareForWorkspace('read_write') },
     ], r.left, r.bottom + 4);
   });
-  toolbarEl.querySelector('[data-action="worktree"]').addEventListener('click', (e) => {
+  toolbarEl.querySelector('[data-action="worktree"]').addEventListener('click', async (e) => {
     e.stopPropagation();
     const r = e.currentTarget.getBoundingClientRect();
-    showWorktreeMenu(sessionId, r.left, r.bottom + 4);
+    await showWorktreeMenu(sessionId, r.left, r.bottom + 4);
   });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   if (isBlocksCapable) {
@@ -2021,48 +2030,148 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
 
 // ── Git worktree per-pane ─────────────────────────────────────────────────────
 
-function showWorktreeMenu(sessionId, x, y) {
+async function showWorktreeMenu(sessionId, x, y) {
   const pane = panes.get(sessionId);
   if (!pane) return;
 
+  const items = [];
+
+  // ── Section 1: this pane's active wmux-managed worktree ──────────────────
   if (pane.worktreePath) {
-    const branch = pane.gitContext?.branch ?? pane.worktreePath.split(/[\\/]/).pop() ?? '?';
-    showContextMenu([
+    const branch = worktreeBranchLabel(pane.worktreePath, pane.gitContext) ?? pane.worktreePath.split(/[\\/]/).pop() ?? '?';
+    items.push(
       { type: 'label', text: `Worktree: ${branch}` },
       { label: 'Remove worktree', danger: true, action: () => removePaneWorktree(sessionId) },
       { label: 'Remove worktree (force)', danger: true, action: () => removePaneWorktree(sessionId, true) },
-    ], x, y);
-  } else {
-    showContextMenu([
-      { type: 'label', text: 'Git worktree isolation' },
-      { label: 'Create worktree...', action: () => promptAndCreateWorktree(sessionId) },
-    ], x, y);
+      { type: 'separator' },
+    );
   }
+
+  // ── Section 2: all worktrees from git ────────────────────────────────────
+  // list_git_worktrees runs Windows git; works for local panes and WSL repos
+  // on /mnt/ paths. Silently falls back to showing only the create action for
+  // WSL repos on the Linux FS (Windows git can't navigate /home/... paths).
+  const repoRoot = pane.gitContext?.repo_root || '';
+  if (repoRoot) {
+    let worktrees = [];
+    try { worktrees = await invoke('list_git_worktrees', { cwd: repoRoot }); }
+    catch { /* not a git repo, or path unresolvable — skip listing */ }
+
+    if (worktrees.length > 0) {
+      const repoName = repoRoot.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'repo';
+      items.push({ type: 'label', text: `Worktrees — ${repoName}` });
+
+      // Index all panes' wmux-managed worktree paths for cross-referencing.
+      const panesWithWt = new Map(); // normalised path → sessionId
+      for (const [sid, p] of panes) {
+        if (p.worktreePath) panesWithWt.set(normWtPath(p.worktreePath), sid);
+      }
+
+      const mainPath = normWtPath(worktrees[0]?.path ?? '');
+      const removable = []; // collect unmanaged worktrees for a remove section below
+
+      for (const wt of worktrees) {
+        if (wt.is_bare) continue;
+        const norm      = normWtPath(wt.path);
+        const isMain    = norm === mainPath;
+        const isThisWt  = pane.worktreePath && norm === normWtPath(pane.worktreePath);
+        const inOtherPane = !isThisWt && panesWithWt.has(norm);
+        const isManaged = isThisWt || inOtherPane;
+        const branchLabel = wt.branch ?? (wt.is_detached ? 'detached HEAD' : wt.path.split(/[\\/]/).pop());
+        const prefix = isMain ? '⌂' : '⎇';
+        const short   = shortWtPath(wt.path);
+
+        if (isMain) {
+          // Main worktree is informational — no navigation action needed.
+          items.push({ type: 'label', text: `${prefix} ${branchLabel}  ${short}` });
+        } else if (isThisWt) {
+          items.push({ label: `${prefix} ${branchLabel}  this pane`, disabled: true });
+        } else {
+          // Navigate to this worktree in the current pane.
+          const hint = inOtherPane ? '  (active in another pane)' : '';
+          items.push({
+            label: `${prefix} ${branchLabel}${hint}`,
+            action: () => invoke('write_to_session', { id: sessionId, data: `cd "${wt.path}"\r` }),
+          });
+          if (!isManaged) removable.push({ wt, branchLabel, prefix });
+        }
+      }
+
+      // Remove actions for worktrees not owned by any wmux pane — below the
+      // navigation items so the dangerous items are visually separated.
+      if (removable.length > 0) {
+        items.push({ type: 'separator' });
+        for (const { wt, branchLabel, prefix } of removable) {
+          items.push({
+            label: `Remove ${prefix} ${branchLabel}`,
+            danger: true,
+            // Send git worktree remove to the pane shell so the user sees any
+            // error output (dirty worktree, etc.) and can react.
+            action: () => invoke('write_to_session', {
+              id: sessionId,
+              data: `git worktree remove "${wt.path}"\r`,
+            }),
+          });
+        }
+      }
+
+      items.push({ type: 'separator' });
+    }
+  }
+
+  // ── Always: create ────────────────────────────────────────────────────────
+  items.push({ label: 'Create worktree...', action: () => promptAndCreateWorktree(sessionId) });
+  showContextMenu(items, x, y);
+}
+
+// Normalise a worktree path for equality comparison (case-insensitive, forward
+// slashes, no trailing slash). Handles Windows and Linux paths.
+function normWtPath(p) {
+  return String(p).toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+// Truncate a worktree path to the last two segments for display.
+function shortWtPath(p) {
+  const parts = String(p).replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : parts.join('/');
 }
 
 async function promptAndCreateWorktree(sessionId) {
   const pane = panes.get(sessionId);
   if (!pane) return;
+  const kind = getTargetKind(pane.target);
+  if (kind !== 'local' && kind !== 'wsl') {
+    const kindLabel = { ssh: 'SSH', remote_tmux: 'remote tmux' }[kind] ?? kind;
+    showError(
+      `Git worktree isolation is not supported for ${kindLabel} panes.\n` +
+      `Run \`git worktree add\` manually inside the remote shell.`
+    );
+    return;
+  }
   let repoRoot = pane.gitContext?.repo_root;
   if (!repoRoot) {
     // Shell integration (⚡) emits OSC 7 which auto-detects the repo. Without
     // it (e.g. plain PowerShell) we fall back to asking the user directly.
-    repoRoot = window.prompt(
-      'Repo root not auto-detected.\nInstall shell integration (⚡) for automatic detection, or enter the path manually:',
-      pane.cwd || '',
-    );
+    const hint = kind === 'wsl'
+      ? 'Enter the Linux path to the repo (e.g. /home/dan/project or /mnt/d/git/repo):'
+      : 'Repo root not auto-detected.\nInstall shell integration (⚡) for automatic detection, or enter the path manually:';
+    repoRoot = window.prompt(hint, pane.cwd || '');
     if (!repoRoot) return;
-    // Quick sanity-check: verify it's actually a git repo before proceeding.
-    try {
-      const ctx = await invoke('get_git_context', { cwd: repoRoot });
-      if (!ctx?.repo_root) {
-        showError(`No git repository found at: ${repoRoot}`);
+    // For local panes, validate via get_git_context (Windows git). For WSL
+    // panes on the Linux FS, Windows git can't probe Linux paths — let Rust
+    // validate when it runs git inside WSL.
+    if (kind === 'local') {
+      try {
+        const ctx = await invoke('get_git_context', { cwd: repoRoot });
+        if (!ctx?.repo_root) {
+          showError(`No git repository found at: ${repoRoot}`);
+          return;
+        }
+        repoRoot = ctx.repo_root;
+      } catch {
+        showError(`Could not probe git context for: ${repoRoot}`);
         return;
       }
-      repoRoot = ctx.repo_root;
-    } catch {
-      showError(`Could not probe git context for: ${repoRoot}`);
-      return;
     }
   }
   const suggested = `wt-${Date.now().toString(36)}`;
@@ -4018,12 +4127,12 @@ keybindingsRuntime.register({
   label: 'Git worktree: create or manage for active pane',
   defaultBindings: ['ctrl+shift+g'],
   shouldRun: () => !!activePaneId,
-  handler: () => {
+  handler: async () => {
     const pane = panes.get(activePaneId);
     if (!pane) return;
     const btn = pane.domEl?.closest('.pane-wrap')?.querySelector('[data-action="worktree"]');
     const r = btn?.getBoundingClientRect();
-    if (r) showWorktreeMenu(activePaneId, r.left, r.bottom + 4);
+    if (r) await showWorktreeMenu(activePaneId, r.left, r.bottom + 4);
     else promptAndCreateWorktree(activePaneId);
   },
 });

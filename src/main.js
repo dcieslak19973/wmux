@@ -1572,7 +1572,8 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   toolbarEl.querySelector('[data-action="worktree"]').addEventListener('click', async (e) => {
     e.stopPropagation();
     const r = e.currentTarget.getBoundingClientRect();
-    await showWorktreeMenu(sessionId, r.left, r.bottom + 4);
+    try { await showWorktreeMenu(sessionId, r.left, r.bottom + 4); }
+    catch (err) { showError(`Worktree menu error: ${err}`); }
   });
   toolbarEl.querySelector('[data-action="close"]').addEventListener('click',   (e) => { e.stopPropagation(); closePane(sessionId); });
   if (isBlocksCapable) {
@@ -4169,8 +4170,10 @@ keybindingsRuntime.register({
     if (!pane) return;
     const btn = pane.domEl?.closest('.pane-wrap')?.querySelector('[data-action="worktree"]');
     const r = btn?.getBoundingClientRect();
-    if (r) await showWorktreeMenu(activePaneId, r.left, r.bottom + 4);
-    else promptAndCreateWorktree(activePaneId);
+    try {
+      if (r) await showWorktreeMenu(activePaneId, r.left, r.bottom + 4);
+      else promptAndCreateWorktree(activePaneId);
+    } catch (err) { showError(`Worktree menu error: ${err}`); }
   },
 });
 

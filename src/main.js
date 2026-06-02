@@ -38,6 +38,7 @@ import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
 import { createCollabRuntime } from './collab_runtime.mjs';
 import { createActivityLogRuntime } from './activity_log_runtime.mjs';
 import { worktreeBranchLabel, inheritedCwdForSplit } from './worktree_state.mjs';
+import { normalizePaneInitialState, defaultPaneShellFlavor } from './pane_init.mjs';
 import { createKeybindingsRuntime } from './keybindings_runtime.mjs';
 import { createCefEmbeddedSurface } from './cef_embedded.mjs';
 import { createPaneRegistry } from './pane_registry.mjs';
@@ -928,23 +929,8 @@ async function openBrowserSplitForTab(tabId, url = '') {
 async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   const DEFAULT_COLS = 120;
   const DEFAULT_ROWS = 30;
-  const MAX_TRANSCRIPT_CHARS = 100_000;
-  const restoredCwd = sanitizeCwdForTarget(target, initialState?.cwd);
-  const restoredPreviousCwd = sanitizeCwdForTarget(target, initialState?.previousCwd);
-  const history = Array.isArray(initialState?.history)
-    ? initialState.history.map((entry) => normalizeHistoryEntry(entry)).filter(Boolean).slice(-500)
-    : [];
-  const screenSnapshot = typeof initialState?.screenSnapshot === 'string'
-    ? String(initialState.screenSnapshot)
-    : '';
-  let outputSnapshot = typeof initialState?.outputSnapshot === 'string'
-    ? normalizeTerminalTranscript(initialState.outputSnapshot)
-    : '';
-
-  const trimTranscript = (value) => value.length > MAX_TRANSCRIPT_CHARS
-    ? value.slice(value.length - MAX_TRANSCRIPT_CHARS)
-    : value;
-  outputSnapshot = trimTranscript(outputSnapshot);
+  const { restoredCwd, restoredPreviousCwd, history, screenSnapshot, outputSnapshot } =
+    normalizePaneInitialState(target, initialState);
 
   // Build the terminal DOM and measure actual dimensions BEFORE spawning the
   // session so ConPTY is created at the correct size from the start. This
@@ -1955,7 +1941,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     // the target-kind heuristic (wsl/ssh → bash, local → powershell);
     // detected at runtime for WSL/SSH via getent so fish users get
     // fish-shape commands. Values: 'bash' | 'fish' | 'powershell'.
-    shellFlavor: (getTargetKind(target) === 'wsl' || getTargetKind(target) === 'ssh') ? 'bash' : 'powershell',
+    shellFlavor: defaultPaneShellFlavor(target),
     tbFlash,
     fbFlash,
     lastSessionVaultEntryId: typeof initialState?.vaultEntryId === 'string' ? initialState.vaultEntryId : null,

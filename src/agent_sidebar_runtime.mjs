@@ -1,5 +1,9 @@
 import { makeDockable } from './panel_dock.mjs';
 
+import {
+  computeAgentState, hasLiveHookState as computeHasLiveHookState,
+} from './agent_state.mjs';
+
 export function createAgentSidebarRuntime({
   document,
   panes,
@@ -22,8 +26,8 @@ export function createAgentSidebarRuntime({
   // Authoritative hook state from Claude Code lifecycle hooks.
   const hookStates = new Map();       // paneId → { hook_event, tool, message, event_ms }
 
-  // Hook events older than this are considered stale; fall back to screen-scraping.
-  const HOOK_STALE_MS = 5 * 60 * 1000;
+  // HOOK_STALE_MS, BLOCKED_MIN_MS, BLOCKED_MAX_MS, looksLikeShellPrompt,
+  // computeAgentState, computeHasLiveHookState — imported from agent_state.mjs.
 
   // ── Git divergence cache ────────────────────────────────────────────────
   // Only populated for worktree panes. Refreshed every 30 s (fire-and-forget
@@ -80,8 +84,6 @@ export function createAgentSidebarRuntime({
 
   // ── Status helpers ──────────────────────────────────────────────────────
 
-  const BLOCKED_MIN_MS = 8_000;
-  const BLOCKED_MAX_MS = 30 * 60 * 1000;
   const NOTIFY_COOLDOWN_MS = 5 * 60 * 1000;
 
   // Track visible screen content changes (bottom 10 rows of the terminal buffer).
@@ -94,59 +96,12 @@ export function createAgentSidebarRuntime({
     }
   }
 
-  // Shell prompt suffixes — deliberately narrow: bash ($), zsh (%), root (#).
-  // Exclude ❯ and > because Claude Code's interactive menus also end lines with those.
-  const SHELL_PROMPT_RE = /[$%#]\s*$/;
-
-  function looksLikeShellPrompt(snapshot) {
-    if (!snapshot) return false;
-    const plain = snapshot.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
-    const lines = plain.split(/\r?\n/).filter((l) => l.trim());
-    const last = lines[lines.length - 1] ?? '';
-    return SHELL_PROMPT_RE.test(last);
-  }
-
   function agentState(pane) {
-    // Prefer authoritative hook state when it's fresh.
-    const hook = hookStates.get(pane.sessionId);
-    if (hook && Date.now() - hook.event_ms < HOOK_STALE_MS) {
-      switch (hook.hook_event) {
-        case 'PreToolUse':
-        case 'PostToolUse':
-        case 'UserPromptSubmit':
-          return 'working';
-        case 'Stop':
-          return 'completed';
-        case 'Notification':
-          // Keep showing previous state; notification is supplemental.
-          return prevStates.get(pane.sessionId) ?? 'working';
-      }
-    }
-
-    // Fall back to screen-scraping heuristics.
-
-    // OSC 133 panes: if last block finished, the agent process exited.
-    if (pane.blocks?.length > 0 && pane.blocks[pane.blocks.length - 1].ended_ms) return 'ready';
-
-    // Need at least a few screen changes before we can meaningfully detect state,
-    // to avoid false positives on panes that just opened.
-    const changes = pane._screenChangeCount ?? 0;
-    if (!pane._screenSnapshotTime || changes < 3) return 'idle';
-
-    const sinceLastChange = Date.now() - pane._screenSnapshotTime;
-    if (sinceLastChange < BLOCKED_MIN_MS) return 'working';
-
-    // Screen has been stable for 8 s+. Decide what that means:
-    // - Shell prompt visible → agent exited, pane is ready for a new task.
-    // - No shell prompt → some TUI (agent, vim, etc.) is waiting for input.
-    if (looksLikeShellPrompt(pane._screenSnapshot)) return 'ready';
-    if (sinceLastChange < BLOCKED_MAX_MS) return 'blocked';
-    return 'idle';
+    return computeAgentState(pane, hookStates.get(pane.sessionId), prevStates.get(pane.sessionId), Date.now());
   }
 
   function hasLiveHookState(pane) {
-    const hook = hookStates.get(pane.sessionId);
-    return !!(hook && Date.now() - hook.event_ms < HOOK_STALE_MS);
+    return computeHasLiveHookState(hookStates.get(pane.sessionId), Date.now());
   }
 
   function getLastCommand(pane) {

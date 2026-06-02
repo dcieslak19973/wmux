@@ -16,12 +16,12 @@ Priority key: **P0** = defends or extends the core; do next. **P1** = closes a v
 - **Risk.** Touches `session_manager.rs` / `conpty.rs` lifecycle — load-bearing, historically fragile (see project memory on `createLeafPane` init order). Spike behind a flag; do not regress the blank-terminal path.
 
 ### P0.2 — Frontend & lifecycle test coverage
-- **Gap.** ~~0 frontend tests~~ **22 tests now exist** (`npm test`, Node built-in runner, `test/*.test.mjs`). Baseline and pattern established 2026-05-31 via worktree-state extraction. Still uncovered: the load-bearing init paths, session-restore round-trip, collab reconnect, and agent-state transitions.
+- **Gap.** ~~0 frontend tests~~ **57 tests** as of 2026-06-01 (`npm test`, Node built-in runner, `test/*.test.mjs`). Still uncovered: session-restore round-trip, collab reconnect, agent-state transitions.
 - **Who's ahead.** Everyone with a user base finding edge cases for them; wmux has bus factor 1.
-- **What's covered.** `connection_targets`, `layout_state` (serialization, markdown path, pinned workspace restore), `terminal_restore` (transcript normalization, CWD inference, sanitization), `worktree_state` (branch label, split CWD inheritance — caught a Windows drive-letter edge case in the red-green cycle).
-- **Pattern.** Extract pure logic into a side-effect-free `.mjs` (no DOM, no Tauri imports) → test that module → wire it into `main.js`. Each new feature should add its module + test file together.
-- **Next targets.** `createLeafPane` init order (broke the blank-terminal bug twice — highest risk); session-restore serialization round-trip (`buildSerializedLayout` → `buildRestoredTerminalState`); collab reconnect/replay buffer; agent-state machine transitions (`AgentHookState` shape).
-- **Done when.** CI runs `npm test` on every PR and blocks on failure; the `createLeafPane` init order and session-restore round-trip have explicit regression tests.
+- **What's covered.** `connection_targets`, `layout_state` (serialization, markdown path, pinned workspace restore), `terminal_restore` (transcript normalization, CWD inference, sanitization), `worktree_state` (branch label, split CWD inheritance, branch name suggestions — 6 new tests), `pane_init` (createLeafPane normalization — 21 tests, caught numeric-history-coercion and WSL path-extraction behavior), `syntax` (parse-only ESM check on all frontend modules — caught `await`-in-non-async TDZ and async-handler bugs before they shipped).
+- **Pattern.** Extract pure logic into a side-effect-free `.mjs` → test it → wire into `main.js`. Add a syntax test for every new `.mjs` module. The async-handler pattern: always wrap `await showSomething()` in try/catch → `showError()` so exceptions surface rather than silently doing nothing.
+- **Next targets.** Session-restore serialization round-trip (`buildSerializedLayout` → `buildRestoredTerminalState`); collab reconnect/replay buffer; agent-state machine transitions (`AgentHookState` shape).
+- **Done when.** CI runs `npm test` on every PR and blocks on failure; session-restore round-trip has explicit regression tests.
 
 ---
 
@@ -34,12 +34,19 @@ Priority key: **P0** = defends or extends the core; do next. **P1** = closes a v
 - **Done when.** ≥4 harnesses drive the "live" badge from real events; a blocked-on-permission agent surfaces distinctly from idle.
 
 ### P1.2 — Worktree polish (cross-pane, not just on-demand)
-- **Gap.** Worktree isolation shipped (2026-05-25) but is per-pane/on-demand. Running two top-level agent panes against one repo still needs manual coordination, and there's no divergence visibility.
 - **Who's ahead.** Warp (worktree metadata on agent tabs), mux (git-divergence dashboard), Zed (per-thread worktree).
-- **Shipped 2026-05-31.** WT button shows active branch name (green, truncated); split inherits parent worktree CWD via `inheritedCwdForSplit`; `tab-branch` badge now populated.
-- **Known gap (Rust-side).** WT button requires shell integration when the pane has no git context — without OSC 7, wmux cannot read the ConPTY child process's current directory. Current workaround: fallback prompt. Proper fix: store `startup_cwd` in `SessionEntry` and/or read the child process CWD via `NtQueryInformationProcess`.
-- **Still to do.** Sidebar worktree indicator per pane; lightweight cross-workspace git-divergence view (mux's dashboard is the benchmark).
-- **Done when.** A pane visibly shows its worktree/branch in the sidebar; spawning a sibling pane offers same-worktree vs new-worktree; divergence across panes is glanceable; WT button works without shell integration.
+- **Shipped 2026-05-31.** WT button shows active branch name (green); split inherits parent worktree CWD; `tab-branch` badge populated.
+- **Shipped 2026-06-01 (PRs #75-#77).**
+  - WSL worktree creation via `wsl.exe --exec sh -c` single-invocation; `WorktreeInfo { path, wsl_distro }` struct keeps path + distro together; fail-closed dirty check for WSL removes.
+  - Sidebar ⎇ chip for worktree panes (green, branch name); appears before first OSC 7 via `pane.worktreePath` fallback.
+  - WT menu lists all repo worktrees (`list_git_worktrees`): navigate to any, remove unmanaged ones (compound `git worktree remove && cd <main>` so shell isn't left in deleted dir).
+  - Smart branch name suggestions: `main-wt`, `main-wt-2`, etc., skipping taken names (`suggestBranchNames`, 6 tests).
+  - Direct-create items in menu (no double-prompt for common case); "Other name…" escapes to prompt.
+  - cd-back on remove: `worktreePreCwd` stashed at create time, sent as `cd` on successful removal.
+  - Git divergence `↑N ↓M` chip in sidebar for worktree panes (amber); `get_git_divergence` Rust command, 30 s poll, `divergenceBase` setting (`'upstream'` | `'main'`).
+  - `suggestBranchNames` and `pane_init` normalization extracted as pure modules with tests (57 total); syntax ESM check catches TDZ and async-handler bugs.
+- **Remaining gap.** WT button auto-detect requires shell integration (OSC 7); without it, fallback prompt fires. Proper fix: read ConPTY child process CWD via `NtQueryInformationProcess` (Rust-side, non-trivial).
+- **Done when.** WT button works without shell integration.
 
 ### P1.3 — Reframe positioning: WSL + MCP server, not "Windows-first"
 - **Gap.** "Only Windows-first agent terminal" is no longer clean — mux shipped Windows-alpha and Windows Terminal is becoming a Warp rival. This is a messaging/README gap, cheap to fix.

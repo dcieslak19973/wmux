@@ -2120,19 +2120,17 @@ async function showWorktreeMenu(sessionId, x, y) {
       items.push({ type: 'separator' });
 
       // ── Create section: smart suggestions when repo context is available ──
-      const repoRoot = pane.gitContext?.repo_root;
-      if (repoRoot) {
-        const suggestions = suggestBranchNames(pane.gitContext, worktrees);
-        items.push({ type: 'label', text: 'Create worktree as:' });
-        for (const name of suggestions) {
-          items.push({
-            label: `⎇ ${name}`,
-            action: () => createWorktreeWithBranch(sessionId, name, repoRoot),
-          });
-        }
-        items.push({ label: 'Other name…', action: () => promptAndCreateWorktree(sessionId, worktrees) });
-        return showContextMenu(items, x, y);
+      // repoRoot is already bound in outer scope (guaranteed non-empty here).
+      const suggestions = suggestBranchNames(pane.gitContext, worktrees);
+      items.push({ type: 'label', text: 'Create worktree as:' });
+      for (const name of suggestions) {
+        items.push({
+          label: `⎇ ${name}`,
+          action: () => createWorktreeWithBranch(sessionId, name, repoRoot),
+        });
       }
+      items.push({ label: 'Other name…', action: () => promptAndCreateWorktree(sessionId, worktrees) });
+      return showContextMenu(items, x, y);
     }
   }
 

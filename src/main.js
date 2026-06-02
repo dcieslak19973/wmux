@@ -37,7 +37,7 @@ import { createPrReviewRuntime } from './pr_review_runtime.mjs';
 import { createAgentSidebarRuntime } from './agent_sidebar_runtime.mjs';
 import { createCollabRuntime } from './collab_runtime.mjs';
 import { createActivityLogRuntime } from './activity_log_runtime.mjs';
-import { worktreeBranchLabel, inheritedCwdForSplit } from './worktree_state.mjs';
+import { worktreeBranchLabel, inheritedCwdForSplit, suggestBranchNames } from './worktree_state.mjs';
 import { normalizePaneInitialState, defaultPaneShellFlavor } from './pane_init.mjs';
 import { createKeybindingsRuntime } from './keybindings_runtime.mjs';
 import { createCefEmbeddedSurface } from './cef_embedded.mjs';
@@ -1944,6 +1944,7 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     outputSnapshot,
     gitContext: null,
     worktreePath: null,
+    worktreePreCwd: null,   // CWD at the time a wmux worktree was created; cd target on remove
     labelOverride: initialState?.labelOverride ?? null,
     preferredAgent: null,
     // Quoting flavour for fix-agent / ask-agent commands. Defaults to
@@ -2097,29 +2098,44 @@ async function showWorktreeMenu(sessionId, x, y) {
         }
       }
 
-      // Remove actions for worktrees not owned by any wmux pane — below the
-      // navigation items so the dangerous items are visually separated.
+      // Remove actions for unmanaged worktrees — sent as shell commands so the
+      // user sees git's error output (dirty worktree, etc.). Compound with a
+      // cd back to the main worktree path so the shell isn't left in a deleted dir.
+      const mainWtPath = worktrees[0]?.path ?? '';
       if (removable.length > 0) {
         items.push({ type: 'separator' });
         for (const { wt, branchLabel, prefix } of removable) {
           items.push({
             label: `Remove ${prefix} ${branchLabel}`,
             danger: true,
-            // Send git worktree remove to the pane shell so the user sees any
-            // error output (dirty worktree, etc.) and can react.
             action: () => invoke('write_to_session', {
               id: sessionId,
-              data: `git worktree remove "${wt.path}"\r`,
+              data: `git worktree remove "${wt.path}" && cd "${mainWtPath}"\r`,
             }),
           });
         }
       }
 
       items.push({ type: 'separator' });
+
+      // ── Create section: smart suggestions when repo context is available ──
+      const repoRoot = pane.gitContext?.repo_root;
+      if (repoRoot) {
+        const suggestions = suggestBranchNames(pane.gitContext, worktrees);
+        items.push({ type: 'label', text: 'Create worktree as:' });
+        for (const name of suggestions) {
+          items.push({
+            label: `⎇ ${name}`,
+            action: () => createWorktreeWithBranch(sessionId, name, repoRoot),
+          });
+        }
+        items.push({ label: 'Other name…', action: () => promptAndCreateWorktree(sessionId, worktrees) });
+        return showContextMenu(items, x, y);
+      }
     }
   }
 
-  // ── Always: create ────────────────────────────────────────────────────────
+  // ── Fallback create (no git context or listing failed) ───────────────────
   items.push({ label: 'Create worktree...', action: () => promptAndCreateWorktree(sessionId) });
   showContextMenu(items, x, y);
 }
@@ -2136,7 +2152,7 @@ function shortWtPath(p) {
   return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : parts.join('/');
 }
 
-async function promptAndCreateWorktree(sessionId) {
+async function promptAndCreateWorktree(sessionId, existingWorktrees = []) {
   const pane = panes.get(sessionId);
   if (!pane) return;
   const kind = getTargetKind(pane.target);
@@ -2174,14 +2190,25 @@ async function promptAndCreateWorktree(sessionId) {
       }
     }
   }
-  const suggested = `wt-${Date.now().toString(36)}`;
-  const branch = window.prompt('New branch name for worktree:', suggested);
+  // Use a smart suggestion based on the current branch + what's already taken.
+  const [primary] = suggestBranchNames(pane.gitContext, existingWorktrees);
+  const branch = window.prompt('New branch name for worktree:', primary);
   if (!branch) return;
+  await createWorktreeWithBranch(sessionId, branch, repoRoot);
+}
+
+// Create a worktree with a known branch name — shared by the prompt flow and
+// the direct-create items in the WT menu so both paths go through the same logic.
+async function createWorktreeWithBranch(sessionId, branchName, repoRoot) {
+  const pane = panes.get(sessionId);
+  if (!pane) return;
+  pane.worktreePreCwd = pane.cwd || null;   // stash so we can cd back on remove
   try {
-    const wtPath = await invoke('create_pane_worktree', { sessionId, branchName: branch, repoRoot });
+    const wtPath = await invoke('create_pane_worktree', { sessionId, branchName, repoRoot });
     pane.worktreePath = wtPath;
     updateWorktreeButton(sessionId);
   } catch (err) {
+    pane.worktreePreCwd = null;
     showError(`Could not create worktree: ${err}`);
   }
 }
@@ -2191,7 +2218,12 @@ async function removePaneWorktree(sessionId, force = false) {
   if (!pane) return;
   try {
     await invoke('remove_pane_worktree', { sessionId, force });
+    // cd back to where the shell was before the worktree was created, or the
+    // repo root if we know it — avoids leaving the shell in a deleted directory.
+    const cdTo = pane.worktreePreCwd || pane.gitContext?.repo_root;
+    if (cdTo) await invoke('write_to_session', { id: sessionId, data: `cd "${cdTo}"\r` });
     pane.worktreePath = null;
+    pane.worktreePreCwd = null;
     updateWorktreeButton(sessionId);
   } catch (err) {
     showError(`Could not remove worktree: ${err}`);
@@ -3870,6 +3902,11 @@ agentSidebarRuntime = createAgentSidebarRuntime({
   escHtml,
   addNotification,
   clearPaneNotifications,
+  fetchDivergence: async (cwd, base) => {
+    try { return await invoke('get_git_divergence', { cwd, base }); }
+    catch { return null; }
+  },
+  getDivergenceBase: () => loadSettings().divergenceBase ?? 'upstream',
 });
 
 collabRuntime = createCollabRuntime({

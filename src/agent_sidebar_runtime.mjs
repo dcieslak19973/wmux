@@ -12,6 +12,8 @@ export function createAgentSidebarRuntime({
   escHtml,
   addNotification = () => {},
   clearPaneNotifications = () => {},
+  fetchDivergence = async () => null,
+  getDivergenceBase = () => 'upstream',
 }) {
   let sidebarEl = null;
   let _refreshing = false;
@@ -22,6 +24,36 @@ export function createAgentSidebarRuntime({
 
   // Hook events older than this are considered stale; fall back to screen-scraping.
   const HOOK_STALE_MS = 5 * 60 * 1000;
+
+  // ── Git divergence cache ────────────────────────────────────────────────
+  // Only populated for worktree panes. Refreshed every 30 s (fire-and-forget
+  // from the sidebar tick so it never blocks rendering).
+  const DIVERGENCE_TTL_MS = 30_000;
+  const divergenceCache = new Map(); // paneId → { ahead, behind, ts }
+  const divergenceFetching = new Set(); // paneIds currently in-flight
+
+  function maybeFetchDivergence(summary) {
+    if (!summary.isWorktree) return;
+    const cwd = summary.worktreePath || summary.cwd;
+    if (!cwd) return;
+    const cached = divergenceCache.get(summary.paneId);
+    if (cached && Date.now() - cached.ts < DIVERGENCE_TTL_MS) return;
+    if (divergenceFetching.has(summary.paneId)) return;
+    divergenceFetching.add(summary.paneId);
+    fetchDivergence(cwd, getDivergenceBase()).then((result) => {
+      if (result) divergenceCache.set(summary.paneId, { ahead: result.ahead, behind: result.behind, ts: Date.now() });
+      else divergenceCache.delete(summary.paneId);
+    }).catch(() => {}).finally(() => { divergenceFetching.delete(summary.paneId); });
+  }
+
+  function divergenceHtml(paneId) {
+    const d = divergenceCache.get(paneId);
+    if (!d || (d.ahead === 0 && d.behind === 0)) return '';
+    const parts = [];
+    if (d.ahead  > 0) parts.push(`↑${d.ahead}`);
+    if (d.behind > 0) parts.push(`↓${d.behind}`);
+    return `<span class="agent-item-divergence">${parts.join(' ')}</span>`;
+  }
 
   // ── Agent registry ──────────────────────────────────────────────────────
 
@@ -155,7 +187,7 @@ export function createAgentSidebarRuntime({
       <div class="agent-item-meta">
         <span class="agent-item-ws">${escHtml(summary.workspaceName)}</span>
         ${summary.isWorktree
-          ? `<span class="agent-item-branch agent-item-branch--worktree" title="Git worktree: ${escHtml(summary.gitBranch || summary.worktreeName)}">⎇ ${escHtml(summary.gitBranch || summary.worktreeName || 'worktree')}</span>`
+          ? `<span class="agent-item-branch agent-item-branch--worktree" title="Git worktree: ${escHtml(summary.gitBranch || summary.worktreeName)}">⎇ ${escHtml(summary.gitBranch || summary.worktreeName || 'worktree')}</span>${divergenceHtml(summary.paneId)}`
           : summary.gitBranch ? `<span class="agent-item-branch">${escHtml(summary.gitBranch)}</span>` : ''}
         ${summary.cwd ? `<span class="agent-item-cwd">${escHtml(shortCwd(summary.cwd))}</span>` : ''}
       </div>
@@ -194,6 +226,7 @@ export function createAgentSidebarRuntime({
       const pane = panes.get(summary.paneId);
       if (!pane) continue;
       tickScreenSnapshot(pane);
+      maybeFetchDivergence(summary);
 
       const state = agentState(pane);
       const prev = prevStates.get(summary.paneId);
@@ -288,6 +321,16 @@ export function createAgentSidebarRuntime({
         if (cmdEl && lastCmd) {
           cmdEl.textContent = lastCmd;
           cmdEl.classList.remove('agent-item-cmd-empty');
+        }
+        // Refresh divergence chip when cache updates.
+        if (summary.isWorktree) {
+          const divEl = el.querySelector('.agent-item-divergence');
+          const html = divergenceHtml(summary.paneId);
+          if (divEl) { divEl.outerHTML = html || ''; }
+          else if (html) {
+            const branchEl = el.querySelector('.agent-item-branch--worktree');
+            branchEl?.insertAdjacentHTML('afterend', html);
+          }
         }
         const agent = detectAgent(pane);
         const agentLabel = agent?.label ?? '';

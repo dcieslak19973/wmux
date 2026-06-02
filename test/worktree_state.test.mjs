@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { worktreeBranchLabel, inheritedCwdForSplit } from '../src/worktree_state.mjs';
+import { worktreeBranchLabel, inheritedCwdForSplit, suggestBranchNames } from '../src/worktree_state.mjs';
 
 // ── worktreeBranchLabel ───────────────────────────────────────────────────────
 
@@ -50,4 +50,40 @@ test('inheritedCwdForSplit returns null when the pane has no worktree', () => {
 test('inheritedCwdForSplit is safe on null/undefined pane', () => {
   assert.equal(inheritedCwdForSplit(null), null);
   assert.equal(inheritedCwdForSplit(undefined), null);
+});
+
+// ── suggestBranchNames ────────────────────────────────────────────────────────
+
+test('suggestBranchNames uses current branch as base', () => {
+  const [s] = suggestBranchNames({ branch: 'main' }, []);
+  assert.equal(s, 'main-wt');
+});
+
+test('suggestBranchNames avoids names already taken', () => {
+  const taken = [{ branch: 'main-wt' }];
+  const [s] = suggestBranchNames({ branch: 'main' }, taken);
+  assert.equal(s, 'main-wt-2');
+});
+
+test('suggestBranchNames returns two suggestions when possible', () => {
+  const suggestions = suggestBranchNames({ branch: 'main' }, []);
+  assert.equal(suggestions.length, 2);
+  assert.equal(suggestions[0], 'main-wt');
+  assert.equal(suggestions[1], 'main-wt-2');
+});
+
+test('suggestBranchNames skips taken names and fills suggestions', () => {
+  const taken = [{ branch: 'feat/foo-wt' }, { branch: 'feat/foo-wt-2' }];
+  const [s] = suggestBranchNames({ branch: 'feat/foo' }, taken);
+  assert.equal(s, 'feat/foo-wt-3');
+});
+
+test('suggestBranchNames falls back to timestamp slug without branch context', () => {
+  const [s] = suggestBranchNames(null, []);
+  assert.match(s, /^wt-[a-z0-9]+$/);
+});
+
+test('suggestBranchNames is safe with undefined/empty existingWorktrees', () => {
+  assert.doesNotThrow(() => suggestBranchNames({ branch: 'main' }, undefined));
+  assert.doesNotThrow(() => suggestBranchNames(null, []));
 });

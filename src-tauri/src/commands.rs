@@ -89,6 +89,16 @@ pub struct PrDiffSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct GitDivergenceResult {
+    /// Commits in HEAD not in the base ref (you are ahead).
+    pub ahead: u32,
+    /// Commits in the base ref not in HEAD (you are behind).
+    pub behind: u32,
+    /// The ref actually used for comparison (e.g. "@{upstream}" or "main").
+    pub base_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct GitWorktreeEntry {
     pub path: String,
     pub branch: Option<String>,
@@ -1750,6 +1760,57 @@ pub async fn list_git_worktrees(cwd: String) -> Result<Vec<GitWorktreeEntry>, St
     }
 
     Ok(entries)
+}
+
+/// Return the number of commits HEAD is ahead of and behind a base ref.
+///
+/// `base` is either `"upstream"` (compare against the branch's tracking remote
+/// via `@{upstream}`) or `"main"` (compare against the local `main`/`master`/`trunk`
+/// branch).  Returns `None` when the comparison is not possible (no upstream
+/// configured, ref does not exist, not a git repo, etc.).
+#[tauri::command]
+pub async fn get_git_divergence(cwd: String, base: String) -> Result<Option<GitDivergenceResult>, String> {
+    let cwd = normalize_cwd_for_git(&cwd);
+    if cwd.is_empty() { return Ok(None); }
+
+    let candidates: &[&str] = match base.as_str() {
+        "upstream" => &["@{upstream}", "@{u}"],
+        _          => &["main", "master", "trunk"],
+    };
+
+    for &ref_name in candidates {
+        if let Some((ahead, behind)) = git_divergence_counts(&cwd, ref_name) {
+            return Ok(Some(GitDivergenceResult {
+                ahead,
+                behind,
+                base_ref: ref_name.to_string(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Run `git rev-list --left-right --count HEAD...<ref>` and parse the output.
+/// Returns `None` on any error (unknown ref, no upstream, etc.).
+fn git_divergence_counts(cwd: &str, ref_name: &str) -> Option<(u32, u32)> {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt as _;
+
+    let sym = format!("HEAD...{ref_name}");
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(cwd)
+       .args(["rev-list", "--left-right", "--count", &sym]);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+
+    let out = cmd.output().ok()?;
+    if !out.status.success() { return None; }
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut parts = s.trim().splitn(2, '\t');
+    let ahead:  u32 = parts.next()?.trim().parse().ok()?;
+    let behind: u32 = parts.next()?.trim().parse().ok()?;
+    Some((ahead, behind))
 }
 
 /// One-shot ask against an agent CLI for the PR review panel.

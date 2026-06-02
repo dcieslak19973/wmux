@@ -1301,6 +1301,12 @@ body.has-tabs #empty-state { display: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.agent-item-divergence {
+  font-size: 10px;
+  color: #e5c07b;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 
 .agent-item-cwd {
   font-size: 10px;

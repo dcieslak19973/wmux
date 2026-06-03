@@ -1,6 +1,6 @@
 # wmux competitive landscape
 
-Maintainer-facing comparison of wmux against the closest tools in the agent-terminal and AI-coding-workspace category. Snapshot date: **2026-05-31**.
+Maintainer-facing comparison of wmux against the closest tools in the agent-terminal and AI-coding-workspace category. Snapshot date: **2026-06-02**.
 
 > **This category churns weekly.** The previous snapshot (2026-05-25) was stale within hours — wmux shipped first-party worktree isolation ~6 hours after that doc was written, and three competitors shipped category-relevant features in the same six days. Treat every row as perishable. Re-run the recheck in [`roadmap.md`](../roadmap.md) before relying on any claim here.
 >
@@ -26,7 +26,7 @@ The feature matrix below uses ✅/⚠️/❌ for *capability*, which says nothin
 
 | Tool | Version | Backing | Adoption | Cadence | Honest "proven?" read |
 |---|---|---|---|---|---|
-| **wmux** | 0.1.4 | **Solo maintainer** | — | very high (multiple commits/day) | Young. ~14k LOC Rust, 72 Rust tests, **0 frontend tests**. Several flagship features are days-old, single-commit. Bus factor = 1. |
+| **wmux** | 0.1.5 | **Solo maintainer** | — | very high (multiple commits/day) | Young. ~14k LOC Rust, 72 Rust tests, **82 frontend tests** (was 0). Several flagship features are days-old, single-commit. Bus factor = 1. |
 | **Warp** | weekly (v0.2026.05.27 stable) | VC + OpenAI sponsor, paid team | large commercial install base | weekly (Thu) + daily dev | Mature, funded, hardened. |
 | **cmux** | ~v0.64.10 | Manaflow (company) | ~18k GitHub stars | very high | Young product, large community fast finding edge cases. |
 | **Zed** | 1.0+ (stable) | Zed Industries (VC, ~50 devs) | large | weekly | Mature editor; agent/terminal-thread surface is newer. |
@@ -64,6 +64,16 @@ Legend: ✅ shipped first-party · ⚠️ partial / new / opinionated punt · �
 | Workbook / charts via MCP | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | PR review pane | ✅ multi-CLI inline Ask AI | ⚠️ via cloud agent | ⚠️ PR linkage in sidebar | ✅ in-editor diff | ❌ | ✅ integrated review | ✅ |
 | Cloud / login required for full feature set | ❌ local-first | ✅ (Agent Mode / Oz / Shared Sessions) | ❌ | optional | ❌ | optional | optional |
+
+## What changed 2026-05-31 → 2026-06-02
+
+**wmux:**
+
+- ✅ **82 frontend tests** — agent state machine (`agent_state.mjs`, 21 tests), session-restore round-trip (`buildTerminalPaneSnapshot → buildRestoredTerminalState`, 10 tests), `createLeafPane` init normalization (42 tests), syntax-check suite, worktree helpers (9 tests). Closes the "0 frontend tests" gap called out in the maturity table.
+- ✅ **Agent state machine extracted** — `computeAgentState` / `hasLiveHookState` / `looksLikeShellPrompt` live in a pure, DOM-free module (`agent_state.mjs`). The sidebar delegates via two 1-line wrappers; ~40 lines of duplicated logic removed.
+- `v0.1.5` tagged.
+
+**Competitors:** no significant category moves observed in this window.
 
 ## What changed 2026-05-25 → 2026-05-31
 
@@ -117,7 +127,7 @@ Zed's ACP (+ now Terminal Threads) puts agents next to file tree/git/diff. wmux'
 
 ### Maturity / bus factor
 
-Solo maintainer, v0.1.x, **0 frontend tests**, several flagship features days-old. Every "only we do X" advantage is one a funded incumbent could ship in a sprint if the market validates it. This is the real ceiling, and it isn't a feature gap — it's a depth-and-sustainability gap.
+Solo maintainer, v0.1.x, **82 frontend tests** (closed the 0-test gap — agent state machine, session-restore round-trip, init normalization, worktree helpers, syntax-check suite), several flagship features days-old. Every "only we do X" advantage is one a funded incumbent could ship in a sprint if the market validates it. This is the real ceiling, and it isn't a feature gap — it's a depth-and-sustainability gap.
 
 ## Tool-by-tool notes
 

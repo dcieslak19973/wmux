@@ -1,6 +1,6 @@
 # wmux roadmap — gaps to close
 
-Derived from [`docs/competitive-landscape.md`](docs/competitive-landscape.md) (snapshot **2026-05-31**). This file is the prioritized worklist: each entry is a gap the competitive analysis exposed, who is ahead on it, what "closed" means, and how to verify. The category churns weekly — re-run the [recheck](#weekly-landscape-recheck) before trusting priorities.
+Derived from [`docs/competitive-landscape.md`](docs/competitive-landscape.md) (snapshot **2026-06-02**). This file is the prioritized worklist: each entry is a gap the competitive analysis exposed, who is ahead on it, what "closed" means, and how to verify. The category churns weekly — re-run the [recheck](#weekly-landscape-recheck) before trusting priorities.
 
 Priority key: **P0** = defends or extends the core; do next. **P1** = closes a visible, exploited gap. **P2** = worth doing, not urgent. **P3** = watch / opportunistic.
 
@@ -16,12 +16,12 @@ Priority key: **P0** = defends or extends the core; do next. **P1** = closes a v
 - **Risk.** Touches `session_manager.rs` / `conpty.rs` lifecycle — load-bearing, historically fragile (see project memory on `createLeafPane` init order). Spike behind a flag; do not regress the blank-terminal path.
 
 ### P0.2 — Frontend & lifecycle test coverage
-- **Gap.** ~~0 frontend tests~~ **57 tests** as of 2026-06-01 (`npm test`, Node built-in runner, `test/*.test.mjs`). Still uncovered: session-restore round-trip, collab reconnect, agent-state transitions.
+- **Gap.** ~~0 frontend tests~~ **82 tests** as of 2026-06-02 (`npm test`, Node built-in runner, `test/*.test.mjs`). The three "next targets" from the prior entry are all closed.
 - **Who's ahead.** Everyone with a user base finding edge cases for them; wmux has bus factor 1.
-- **What's covered.** `connection_targets`, `layout_state` (serialization, markdown path, pinned workspace restore), `terminal_restore` (transcript normalization, CWD inference, sanitization), `worktree_state` (branch label, split CWD inheritance, branch name suggestions — 6 new tests), `pane_init` (createLeafPane normalization — 21 tests, caught numeric-history-coercion and WSL path-extraction behavior), `syntax` (parse-only ESM check on all frontend modules — caught `await`-in-non-async TDZ and async-handler bugs before they shipped).
+- **What's covered.** `connection_targets`, `layout_state` (serialization, markdown path, pinned workspace restore), `terminal_restore` (transcript normalization, CWD inference, sanitization), `worktree_state` (branch label, split CWD inheritance, branch name suggestions), `pane_init` (createLeafPane normalization — caught numeric-history-coercion and WSL path-extraction behavior), `syntax` (parse-only ESM check on all frontend modules — caught `await`-in-non-async TDZ and async-handler bugs before they shipped), **`agent_state`** (21 tests — all `computeAgentState` branches, stale-hook fallthrough, heuristic paths), **`layout_runtime`** (10 round-trip tests — `buildTerminalPaneSnapshot → buildRestoredTerminalState`, `vaultEntryId` rename, null defaults, full pass through `normalizePaneInitialState`).
 - **Pattern.** Extract pure logic into a side-effect-free `.mjs` → test it → wire into `main.js`. Add a syntax test for every new `.mjs` module. The async-handler pattern: always wrap `await showSomething()` in try/catch → `showError()` so exceptions surface rather than silently doing nothing.
-- **Next targets.** Session-restore serialization round-trip (`buildSerializedLayout` → `buildRestoredTerminalState`); collab reconnect/replay buffer; agent-state machine transitions (`AgentHookState` shape).
-- **Done when.** CI runs `npm test` on every PR and blocks on failure; session-restore round-trip has explicit regression tests.
+- **Next targets.** CI enforcement (block PRs on `npm test` failure); collab reconnect/replay buffer viewer-side coverage; sidebar unit tests (currently integration-only via syntax check).
+- **Done when.** CI runs `npm test` on every PR and blocks on failure.
 
 ---
 

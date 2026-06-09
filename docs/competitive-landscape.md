@@ -42,12 +42,12 @@ Legend: ✅ shipped first-party · ⚠️ partial / new / opinionated punt · �
 |---|---|---|---|---|---|---|---|
 | Windows GA / stable | ✅ | ✅ | ❌ | ✅ | ❌ | ⚠️ alpha (no WSL) | ✅ |
 | First-class WSL routing (per-distro shell flavor) | ✅ | ⚠️ | ❌ | ⚠️ | ⚠️ | ❌ explicitly unsupported | ❌ |
-| MCP **server** (callable by external agents) | ✅ HTTP `:7766/mcp` + named pipe | ❌ MCP **client** only | ❌ (community `cmux-mcp`) | ❌ | ❌ | ❌ | ❌ |
+| MCP **server** (callable by external agents) | ✅ HTTP `:7766/mcp` + named pipe | ❌ MCP **client** only (auto-detect via `.warp/.mcp.json`) | ❌ (community `cmux-mcp`) | ❌ | ❌ | ❌ | ❌ |
 | Code Mode (server-side JS sandbox over MCP tools) | ✅ `wmux_eval` default surface | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Programmatic external control of the app | ✅ MCP + named pipe + tmux shim | ⚠️ "control via CLI" on May–Jun roadmap | ⚠️ CLI + socket | ⚠️ via ACP | ✅ CLI + socket API | ⚠️ | ❌ |
 | tmux compatibility shim | ✅ `tmux.exe` | ❌ | ❌ | ❌ | native tmux | ❌ | ❌ |
 | Multi-agent in one window | ✅ sidebar + cross-workspace rollup | ✅ vertical agent tabs (branch/worktree/PR metadata) | ✅ vertical workspace tabs | ✅ Parallel Agents + Terminal Threads | ✅ ~14 agent integrations | ✅ + git-divergence dashboard | ✅ |
-| Agent-CLI lifecycle hooks (authoritative state) | ⚠️ **Claude + Codex** → "live" badge | ✅ for built-in agent surfaces | ✅ 14+ agents (incl. `PermissionRequest`) | ⚠️ via ACP agents | ✅ 14+ agents, socket-forwarded | partial | ❌ |
+| Agent-CLI lifecycle hooks (authoritative state) | ⚠️ **Claude + Codex** → "live" badge | ✅ for built-in agent surfaces | ✅ 14+ agents (incl. `PermissionRequest`) | ⚠️ via ACP agents | ✅ 14+ agents, socket-forwarded; permission prompts surfaced distinctly (v0.6.6) | partial | ❌ |
 | Screen-content state fallback for any TUI agent | ✅ shell-prompt + bottom-rows heuristic | ✅ (own surface) | ✅ | n/a | ✅ | ❌ | ❌ |
 | First-party git worktree isolation per pane | ✅ **on-demand, shipped 2026-05-25** (days-old) | ✅ auto-detect + per-worktree review/index | ⚠️ rough (sidebar/new-pane bugs, #156) | ✅ per-thread, detached HEAD | ✅ worktree CLI + socket API | ✅ core runtime mode + divergence dashboard | ✅ task isolation |
 | Process/agent persistence (survives host restart) | ⚠️ **layout + scrollback only — live process dies** | ✅ via Drive | ✅ scrollback + session resume | partial | ✅ **detach/reattach + agent-conversation resume** | ✅ | ❌ |
@@ -73,7 +73,14 @@ Legend: ✅ shipped first-party · ⚠️ partial / new / opinionated punt · �
 - ✅ **Agent state machine extracted** — `computeAgentState` / `hasLiveHookState` / `looksLikeShellPrompt` live in a pure, DOM-free module (`agent_state.mjs`). The sidebar delegates via two 1-line wrappers; ~40 lines of duplicated logic removed.
 - `v0.1.5` tagged.
 
-**Competitors:** no significant category moves observed in this window.
+**Competitors:**
+
+- **Zed** — Terminal Threads update (June 2): terminal agents (Claude Code, Amp, any CLI) now run as first-class sidebar threads alongside code threads, not just as separate pane views. Deepens Zed's "agents next to your file tree" story. Still **no tmux-style terminal layouts** (#16174).
+- **Warp** — MCP auto-detection via `.warp/.mcp.json` + cloud sync. Still MCP *client* only (no server), but removes the manual `claude mcp add` setup step.
+- **herdr** — v0.6.6: worktree CLI ops (`herdr worktree list/create/open/remove`), Claude Code permission-prompt handling (surfaces `PermissionRequest`-style events distinctly), OpenCode integration fix.
+- **mux** — v0.26.1: MCP server startup failure surfacing, minor cost-tracking fixes. Windows alpha unchanged — still Git Bash only, no WSL.
+- **Windows Terminal** — no material changes.
+- **cmux**, **t3code** — no material changes.
 
 ## What changed 2026-05-25 → 2026-05-31
 
@@ -132,16 +139,16 @@ Solo maintainer, v0.1.x, **82 frontend tests** (closed the 0-test gap — agent 
 ## Tool-by-tool notes
 
 ### Warp ([warpdotdev/warp](https://github.com/warpdotdev/warp))
-Open-source (AGPL core + MIT UI), all three platforms GA, **weekly** stable + daily dev. Agents 3.0 (full terminal use, plan, code review, integration). Universal Agent Support groups CLI agents (Claude Code, Codex, Gemini, OpenCode) into vertical tabs with git branch/worktree/PR metadata. Oz cloud orchestration (schedulable, event-triggered). May–Jun roadmap: best-of-k, subagents, conversation history, **CLI control of the client**. Still **MCP client only**. Where wmux beats Warp: MCP server, Code Mode, tmux shim, local-first share, in-pane browser, WSL depth. Where Warp beats wmux: renderer, polish, persistence, cadence, install base. Sources: [changelog](https://docs.warp.dev/changelog/2026/), [Agents 3.0](https://www.warp.dev/blog/agents-3-full-terminal-use-plan-code-review-integration), [Universal Agent Support](https://www.warp.dev/blog/universal-agent-support-level-up-coding-agent-warp), [roadmap #9233](https://github.com/warpdotdev/warp/issues/9233).
+Open-source (AGPL core + MIT UI), all three platforms GA, **weekly** stable + daily dev. Agents 3.0 (full terminal use, plan, code review, integration). Universal Agent Support groups CLI agents (Claude Code, Codex, Gemini, OpenCode) into vertical tabs with git branch/worktree/PR metadata. Oz cloud orchestration (schedulable, event-triggered). Added MCP auto-detection via `.warp/.mcp.json` + cloud sync — still MCP *client* only, but removes manual setup friction. May–Jun roadmap: best-of-k, subagents, conversation history, **CLI control of the client** (not yet shipped). Where wmux beats Warp: MCP server, Code Mode, tmux shim, local-first share, in-pane browser, WSL depth. Where Warp beats wmux: renderer, polish, persistence, cadence, install base. Sources: [changelog](https://docs.warp.dev/changelog/2026/), [Agents 3.0](https://www.warp.dev/blog/agents-3-full-terminal-use-plan-code-review-integration), [Universal Agent Support](https://www.warp.dev/blog/universal-agent-support-level-up-coding-agent-warp), [roadmap #9233](https://github.com/warpdotdev/warp/issues/9233).
 
 ### cmux ([manaflow-ai/cmux](https://github.com/manaflow-ai/cmux))
 macOS-only, GPL-3.0-or-later, libghostty, ~18k stars, very fast point releases (~v0.64.10). Vertical-tab workspaces with PR metadata, scriptable in-app browser, lifecycle hooks for 14+ agents (incl. `PermissionRequest`), Claude Code Teams. Worktree still NOT first-class (sidebar lacks a worktree indicator; new panes open in main dir; #156). No first-party MCP server. Not a wmux threat on platform (macOS-only) but the momentum benchmark. Source: [changelog](https://manaflow-ai-cmux.mintlify.app/resources/changelog).
 
 ### Zed ([zed-industries/zed](https://github.com/zed-industries/zed))
-Editor first; 1.0 (Apr 29). **Parallel Agents** (Apr 22) + **Terminal Threads (May 20)** make it a credible parallel-agent terminal host: claude/codex/amp/any terminal as managed sidebar threads, per-thread model/worktree. ACP open standard (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor). DeltaDB CRDT for human+agent code-state sync. Still **no tmux-style terminal layouts** (#16174). Sources: [Terminal Threads](https://zed.dev/blog/terminal-threads), [Parallel Agents](https://zed.dev/blog/parallel-agents).
+Editor first; 1.0 (Apr 29). **Parallel Agents** (Apr 22) + **Terminal Threads (May 20, expanded June 2)** make it a credible parallel-agent terminal host: claude/codex/amp/any terminal as managed sidebar threads alongside code threads, per-thread model/worktree. June 2 update deepened integration: terminal agents and code agents share the same panel, not just separate views. ACP open standard (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor). DeltaDB CRDT for human+agent code-state sync. Still **no tmux-style terminal layouts** (#16174). Where Zed is pulling ahead: agents-next-to-file-tree is a genuinely different UX from wmux's pane model; worth watching as the primary non-Windows threat. Sources: [Terminal Threads](https://zed.dev/blog/terminal-threads), [Parallel Agents](https://zed.dev/blog/parallel-agents).
 
 ### herdr ([ogulcancelik/herdr](https://github.com/ogulcancelik/herdr))
-Runs **inside** your existing terminal; single Rust binary. ~14 agent integrations forwarding semantic state over a socket. **New:** native **agent session restore** (`resume_agents_on_restore`) + searchable session navigator (prefix+g). True detach/reattach + agent-conversation resume — the persistence model wmux's restore only superficially resembles. POSIX-only. Source: [releases](https://github.com/ogulcancelik/herdr/releases).
+Runs **inside** your existing terminal; single Rust binary. ~14 agent integrations forwarding semantic state over a socket. Native **agent session restore** (`resume_agents_on_restore`) + searchable session navigator (prefix+g). True detach/reattach + agent-conversation resume. **v0.6.6 (May 31):** worktree CLI ops (`herdr worktree list/create/open/remove`), Claude Code permission-prompt handling (surfaces `PermissionRequest`-style events as a distinct state), OpenCode integration fix. POSIX-only. Source: [releases](https://github.com/ogulcancelik/herdr/releases).
 
 ### mux (coder) ([coder/mux](https://github.com/coder/mux))
 By Coder. **Now Windows-alpha** (Git Bash required, **no WSL**) in addition to macOS/Linux. Three runtime modes (local/worktree/ssh); central **git-divergence dashboard** across workspaces; Plan/Exec/Review tri-mode; multi-model (Sonnet-4/Grok/GPT-5/Opus-4/Ollama). Strongest disciplined parallel-agent workflow. Sources: [repo](https://github.com/coder/mux), [install](https://mux.coder.com/install).

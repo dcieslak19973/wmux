@@ -6,7 +6,9 @@
 /// This mirrors VS Code's "local port forwarding" / "OAuth redirect" detection
 /// but runs entirely locally — no SSH tunnel needed since wmux is native.
 /// Strip ANSI/VT escape sequences from a byte slice.
-/// Handles CSI (`ESC [`), OSC (`ESC ]`), and 2-char sequences.
+/// Handles CSI (`ESC [`), OSC (`ESC ]`), the ST-terminated string sequences
+/// DCS/SOS/PM/APC (`ESC P`/`X`/`^`/`_`, e.g. Sixel and kitty graphics
+/// payloads), and 2-char sequences.
 /// Made `pub` so other modules (e.g. session_manager) can use it for capture-pane.
 pub fn strip_ansi(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
@@ -34,6 +36,17 @@ pub fn strip_ansi(data: &[u8]) -> Vec<u8> {
                             i += 1;
                             break;
                         }
+                        if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'\\' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                b'P' | b'X' | b'^' | b'_' => {
+                    // String sequence: ESC <P|X|^|_> <data> ST (ESC \)
+                    i += 1;
+                    while i < data.len() {
                         if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'\\' {
                             i += 2;
                             break;
@@ -75,8 +88,17 @@ pub fn extract_notable_urls(data: &[u8]) -> Vec<(String, bool)> {
             while i < bytes.len()
                 && !matches!(
                     bytes[i],
-                    b' ' | b'\n' | b'\r' | b'\t' | b'"' | b'\'' | b'`'
-                        | b')' | b']' | b'>' | b',' | b';'
+                    b' ' | b'\n'
+                        | b'\r'
+                        | b'\t'
+                        | b'"'
+                        | b'\''
+                        | b'`'
+                        | b')'
+                        | b']'
+                        | b'>'
+                        | b','
+                        | b';'
                 )
             {
                 i += 1;
@@ -190,7 +212,18 @@ mod tests {
         let input = b"  Local:   http://127.0.0.1:5173/\n";
         let urls = extract_notable_urls(input);
         assert_eq!(urls.len(), 1);
-        assert!(!urls[0].1, "plain dev server should not be flagged as oauth");
+        assert!(
+            !urls[0].1,
+            "plain dev server should not be flagged as oauth"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_drops_graphics_string_sequences() {
+        // kitty graphics (APC) and Sixel (DCS) payloads must not leak into
+        // plain-text transcripts; OSC still accepts BEL, APC/DCS only ST.
+        let input = b"a\x1b_Ga=T,i=1;QU\x07JD\x1b\\b\x1bPq#0~~\x1b\\c\x1b]0;t\x07d";
+        assert_eq!(strip_ansi(input), b"abcd");
     }
 
     #[test]
@@ -198,6 +231,6 @@ mod tests {
         assert!(is_safe_to_open("http://localhost:3000/callback"));
         assert!(is_safe_to_open("https://127.0.0.1:8080/"));
         assert!(!is_safe_to_open("http://localhost/nope")); // no port
-        assert!(!is_safe_to_open("https://example.com"));   // external
+        assert!(!is_safe_to_open("https://example.com")); // external
     }
 }

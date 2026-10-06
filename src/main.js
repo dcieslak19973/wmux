@@ -17,6 +17,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ImageAddon } from '@xterm/addon-image';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { installKittyPlaceholders } from './kitty_graphics_runtime.mjs';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -63,6 +65,7 @@ import {
   normalizeHistoryEntry,
   normalizeTerminalTranscript,
   sanitizeCwdForTarget,
+  splitTrailingControlString,
   stripTerminalStartupResetSequences,
 } from './terminal_restore.mjs';
 import 'highlight.js/styles/github-dark.css';
@@ -938,8 +941,10 @@ async function openBrowserSplitForTab(tabId, url = '') {
 async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   const DEFAULT_COLS = 120;
   const DEFAULT_ROWS = 30;
-  const { restoredCwd, restoredPreviousCwd, history, screenSnapshot, outputSnapshot } =
-    normalizePaneInitialState(target, initialState);
+  const initial = normalizePaneInitialState(target, initialState);
+  const { restoredCwd, restoredPreviousCwd, history, screenSnapshot } = initial;
+  // Reassigned as output arrives (appendTranscriptChunk).
+  let { outputSnapshot } = initial;
 
   // Build the terminal DOM and measure actual dimensions BEFORE spawning the
   // session so ConPTY is created at the correct size from the start. This
@@ -961,6 +966,11 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
     minimumContrastRatio: 1,
     allowProposedApi: true,
     scrollback: _s.scrollback,
+    // Kitty keyboard protocol (opt-in per app via CSI > u) and pixel-size
+    // reports (CSI 14t / 16t): graphics apps such as terminal-browser probe
+    // these to size and drive kitty images.
+    vtExtensions: { kittyKeyboard: true },
+    windowOptions: { getWinSizePixels: true, getCellSizePixels: true, getWinSizeChars: true },
   });
 
   const fitAddon    = new FitAddon();
@@ -976,6 +986,14 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   const serializeAddon = new SerializeAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(imageAddon);
+  // After the image addon: virtual (U=1) kitty placements are handled here,
+  // everything else falls through to the addon.
+  installKittyPlaceholders(term);
+  // Unicode 11 widths: about half of kitty's placeholder row/column
+  // diacritics postdate xterm's default Unicode 6 tables, which would give
+  // them width 1 instead of combining them into the placeholder cell.
+  term.loadAddon(new Unicode11Addon());
+  term.unicode.activeVersion = '11';
   term.loadAddon(searchAddon);
   term.loadAddon(serializeAddon);
   term.loadAddon(new WebLinksAddon(async (_event, uri) => {
@@ -1138,9 +1156,12 @@ async function createLeafPane(tabId, target, mountEl, initialState = {}) {
   };
 
   const transcriptDecoder = new TextDecoder();
+  let transcriptPending = '';
   const appendTranscriptChunk = (chunk) => {
     if (!chunk) return;
-    outputSnapshot = trimTranscript(outputSnapshot + normalizeTerminalTranscript(chunk));
+    const [complete, pending] = splitTrailingControlString(transcriptPending + chunk);
+    transcriptPending = pending;
+    outputSnapshot = trimTranscript(outputSnapshot + normalizeTerminalTranscript(complete));
     const pane = panes.get(sessionId);
     if (pane) pane.outputSnapshot = outputSnapshot;
   };

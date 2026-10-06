@@ -3,29 +3,109 @@
 /// Uses the Windows Pseudoconsole API (ConPTY) introduced in Windows 10 1809.
 /// Each `ConPtySession` holds a pseudoconsole handle, the shell process, and
 /// two anonymous pipe pairs for I/O.
+///
+/// The pseudoconsole comes from the `conpty.dll` + `OpenConsole.exe` pair
+/// bundled next to `wmux.exe` (see `src-tauri/conpty/README.md`) when present,
+/// falling back to the inbox kernel32 implementation. The inbox ConPTY drops
+/// escape sequences it does not understand (kitty graphics APC, Sixel DCS),
+/// so image rendering in panes depends on the bundled build.
 use anyhow::{Context, Result};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::{broadcast, Mutex};
-use windows::Win32::
-{
+use windows::core::{s, HRESULT, HSTRING};
+use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
     Security::SECURITY_ATTRIBUTES,
     Storage::FileSystem::{ReadFile, WriteFile},
     System::{
-        Console::{
-            ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD,
-            HPCON,
-        },
+        Console::{ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON},
+        LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH},
         Pipes::CreatePipe,
         Threading::{
-            CreateProcessW, DeleteProcThreadAttributeList,
-            InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-            WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
-            PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-            STARTUPINFOEXW,
+            CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+            UpdateProcThreadAttribute, WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
+            PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
         },
     },
 };
+
+type CreateFn = unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT;
+type ResizeFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
+type CloseFn = unsafe extern "system" fn(HPCON);
+
+/// Pseudoconsole entry points: the bundled `conpty.dll`, or kernel32.
+enum ConptyApi {
+    Bundled {
+        create: CreateFn,
+        resize: ResizeFn,
+        close: CloseFn,
+    },
+    Inbox,
+}
+
+static CONPTY: LazyLock<ConptyApi> = LazyLock::new(|| {
+    ConptyApi::load_bundled().unwrap_or_else(|| {
+        log::warn!("bundled conpty.dll not found next to wmux.exe; using inbox ConPTY (no kitty/Sixel passthrough)");
+        ConptyApi::Inbox
+    })
+});
+
+impl ConptyApi {
+    fn load_bundled() -> Option<ConptyApi> {
+        let dll = std::env::current_exe().ok()?.parent()?.join("conpty.dll");
+        if !dll.is_file() {
+            return None;
+        }
+        unsafe {
+            // ALTERED_SEARCH_PATH: resolve the DLL's own dependencies from its directory.
+            let module = LoadLibraryExW(
+                &HSTRING::from(dll.as_os_str()),
+                None,
+                LOAD_WITH_ALTERED_SEARCH_PATH,
+            )
+            .map_err(|e| log::warn!("failed to load {}: {e}", dll.display()))
+            .ok()?;
+            let create = GetProcAddress(module, s!("ConptyCreatePseudoConsole"))?;
+            let resize = GetProcAddress(module, s!("ConptyResizePseudoConsole"))?;
+            let close = GetProcAddress(module, s!("ConptyClosePseudoConsole"))?;
+            log::info!("using bundled ConPTY from {}", dll.display());
+            Some(ConptyApi::Bundled {
+                create: std::mem::transmute::<unsafe extern "system" fn() -> isize, CreateFn>(
+                    create,
+                ),
+                resize: std::mem::transmute::<unsafe extern "system" fn() -> isize, ResizeFn>(
+                    resize,
+                ),
+                close: std::mem::transmute::<unsafe extern "system" fn() -> isize, CloseFn>(close),
+            })
+        }
+    }
+
+    unsafe fn create(&self, size: COORD, input: HANDLE, output: HANDLE) -> Result<HPCON> {
+        match self {
+            ConptyApi::Bundled { create, .. } => {
+                let mut hpc = HPCON::default();
+                create(size, input, output, 0, &mut hpc).ok()?;
+                Ok(hpc)
+            }
+            ConptyApi::Inbox => Ok(CreatePseudoConsole(size, input, output, 0)?),
+        }
+    }
+
+    unsafe fn resize(&self, hpc: HPCON, size: COORD) -> Result<()> {
+        match self {
+            ConptyApi::Bundled { resize, .. } => Ok(resize(hpc, size).ok()?),
+            ConptyApi::Inbox => Ok(ResizePseudoConsole(hpc, size)?),
+        }
+    }
+
+    unsafe fn close(&self, hpc: HPCON) {
+        match self {
+            ConptyApi::Bundled { close, .. } => close(hpc),
+            ConptyApi::Inbox => ClosePseudoConsole(hpc),
+        }
+    }
+}
 
 /// Safe wrapper around a raw Windows HANDLE that closes on drop.
 struct OwnedHandle(HANDLE);
@@ -33,7 +113,9 @@ struct OwnedHandle(HANDLE);
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         if !self.0.is_invalid() {
-            unsafe { let _ = CloseHandle(self.0); }
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
         }
     }
 }
@@ -85,8 +167,12 @@ impl ConPtySession {
             let (pipe_pty_out_read, pipe_pty_out_write) = create_pipe()?;
 
             // ── Create the Pseudoconsole ─────────────────────────────────────
-            let size = COORD { X: cols as i16, Y: rows as i16 };
-            let hpc = CreatePseudoConsole(size, pipe_pty_in_read.0, pipe_pty_out_write.0, 0)
+            let size = COORD {
+                X: cols as i16,
+                Y: rows as i16,
+            };
+            let hpc = CONPTY
+                .create(size, pipe_pty_in_read.0, pipe_pty_out_write.0)
                 .context("CreatePseudoConsole failed")?;
 
             // The ConPTY has taken ownership of the pipe ends passed to it;
@@ -97,12 +183,7 @@ impl ConPtySession {
             // ── Build STARTUPINFOEX with PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE ─
             let mut attr_list_size: usize = 0;
             // First call: query required size.
-            let _ = InitializeProcThreadAttributeList(
-                None,
-                1,
-                None,
-                &mut attr_list_size,
-            );
+            let _ = InitializeProcThreadAttributeList(None, 1, None, &mut attr_list_size);
 
             let mut attr_list_buf: Vec<u8> = vec![0u8; attr_list_size];
             let attr_list = windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST(
@@ -141,7 +222,9 @@ impl ConPtySession {
 
             use windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
             let creation_flags = EXTENDED_STARTUPINFO_PRESENT
-                | if lp_env.is_some() { CREATE_UNICODE_ENVIRONMENT } else {
+                | if lp_env.is_some() {
+                    CREATE_UNICODE_ENVIRONMENT
+                } else {
                     windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0)
                 };
 
@@ -149,7 +232,8 @@ impl ConPtySession {
             let mut cmdline_w: Vec<u16> =
                 cmdline.encode_utf16().chain(std::iter::once(0)).collect();
             let mut cwd_w = cwd.map(|value| {
-                value.encode_utf16()
+                value
+                    .encode_utf16()
                     .chain(std::iter::once(0))
                     .collect::<Vec<u16>>()
             });
@@ -180,7 +264,7 @@ impl ConPtySession {
             let tx_clone = output_tx.clone();
             // Transmit the raw handle value as isize to cross the thread
             // boundary; HANDLE is a newtype over *mut c_void which isn't Send.
-            let raw_handle = pipe_pty_out_read.0.0 as isize;
+            let raw_handle = pipe_pty_out_read.0 .0 as isize;
 
             // Spawn a blocking thread; ReadFile blocks until data is available.
             std::thread::spawn(move || {
@@ -228,25 +312,28 @@ impl ConPtySession {
 
     /// Resize the pseudoconsole viewport.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let size = COORD { X: cols as i16, Y: rows as i16 };
+        let size = COORD {
+            X: cols as i16,
+            Y: rows as i16,
+        };
         unsafe {
-            ResizePseudoConsole(self.hpc, size).context("ResizePseudoConsole failed")?;
+            CONPTY
+                .resize(self.hpc, size)
+                .context("ResizePseudoConsole failed")?;
         }
         Ok(())
     }
 
     /// Check whether the child process has exited.
     pub fn is_alive(&self) -> bool {
-        unsafe {
-            WaitForSingleObject(self.proc_info.hProcess, 0).0 != 0
-        }
+        unsafe { WaitForSingleObject(self.proc_info.hProcess, 0).0 != 0 }
     }
 }
 
 impl Drop for ConPtySession {
     fn drop(&mut self) {
         unsafe {
-            ClosePseudoConsole(self.hpc);
+            CONPTY.close(self.hpc);
             let _ = CloseHandle(self.proc_info.hProcess);
             let _ = CloseHandle(self.proc_info.hThread);
         }

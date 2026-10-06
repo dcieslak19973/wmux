@@ -31,6 +31,10 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": "msi",
+    "resources": {
+      "conpty/conpty.dll": "conpty.dll",
+      "conpty/OpenConsole.exe": "OpenConsole.exe"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

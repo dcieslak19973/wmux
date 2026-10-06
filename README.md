@@ -71,6 +71,7 @@ After installing:
 - **Multi-shell** — bash, zsh, fish, PowerShell. Per-pane shell-flavor detection so agent quoting (e.g. fix-agent commands) uses the right escape rules per shell.
 - **Workspaces** — named, pinned, reorderable; per-workspace active tab restore.
 - **Notifications** — OSC 9 / 99 / 777 captured into a per-tab notification ring with badge counts.
+- **Inline images** — Sixel, iTerm2 inline images (OSC 1337), and the kitty graphics protocol, including Unicode-placeholder (virtual) placements used by Claude Code UI plugins such as [terminal-browser](https://github.com/zenbu-labs/terminal-browser). Works through SSH panes; terminal replies (kitty `a=q`, `CSI 14t`/`16t` in device pixels, kitty keyboard) are answered.
 - **Session restore** — full layout graph + per-pane state across launches, with debounced save on change and visibility/close fallback.
 - **Updater** — in-app auto-check + manual `Check now` against GitHub Releases.
 
@@ -219,7 +220,8 @@ wmux/
 
 ## Architecture notes
 
-- **ConPTY session lifecycle**: `create_session` → spawn shell via `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` → background thread reads output pipe → broadcast via `tokio::broadcast` → Tauri emits `terminal-output-{id}` to WebView.
+- **ConPTY session lifecycle**: `create_session` → spawn shell via `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` → background thread reads output pipe → broadcast via `tokio::broadcast` → Tauri emits `terminal-output-{id}` to WebView. The pseudoconsole comes from the `conpty.dll` + `OpenConsole.exe` pair bundled beside `wmux.exe` (see [`src-tauri/conpty/README.md`](src-tauri/conpty/README.md)); the inbox Windows ConPTY drops kitty graphics and Sixel sequences.
+- **Inline images**: `@xterm/addon-image` renders Sixel, OSC 1337, and direct kitty placements; `src/kitty_graphics_runtime.mjs` takes over kitty virtual (`U=1`) placements and frame edits, painting images over U+10EEEE placeholder cells on an overlay canvas.
 - **Workspace model**: Frontend keeps workspace/tab/pane/browser/markdown state in memory; serialized to JSON with debounced save-on-change + visibility/close fallback for restore.
 - **Remote tmux**: One wmux tab = one remote tmux session. SSH form has optional tmux fields; reconnects to that session on restore. Use tmux itself for remote terminal splits inside that session.
 - **Notifications**: OSC 9/99/777 parsed into per-tab notifications, unread counts, sidebar ring state.

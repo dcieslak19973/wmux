@@ -1177,10 +1177,12 @@ fn decode_utf16le(raw: &[u8]) -> String {
         raw
     };
 
-    // Collect u16 code units (little-endian pairs).
+    // Collect u16 code units (little-endian pairs); a trailing odd byte is dropped.
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
         .collect();
 
     String::from_utf16_lossy(&units)

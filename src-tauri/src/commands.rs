@@ -1944,7 +1944,7 @@ fn now_unix_millis() -> u64 {
 /// Open a new independent wmux application window.
 #[tauri::command]
 pub async fn create_app_window(app: AppHandle) -> Result<(), String> {
-    let label = format!("wmux-{}", &uuid_short());
+    let label = format!("wmux-{}", uuid_short());
     let mut builder = tauri::WebviewWindowBuilder::new(
         &app,
         &label,

@@ -74,6 +74,7 @@ After installing:
 - **Inline images** — Sixel, iTerm2 inline images (OSC 1337), and the kitty graphics protocol, including Unicode-placeholder (virtual) placements used by Claude Code UI plugins such as [terminal-browser](https://github.com/zenbu-labs/terminal-browser). Works through SSH panes; terminal replies (kitty `a=q`, `CSI 14t`/`16t` in device pixels, kitty keyboard) are answered.
 - **Session restore** — full layout graph + per-pane state across launches, with debounced save on change and visibility/close fallback.
 - **Updater** — in-app auto-check + manual `Check now` against GitHub Releases.
+- **Version at a glance** — the running version and build commit (e.g. `wmux 0.1.5 · 47301ed4c`) show in the title bar, under the sidebar footer, in Settings → Updates, and in `GET /info` (`version`, `commit`).
 
 ## Default keybindings
 

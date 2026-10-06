@@ -961,8 +961,8 @@ export function createUiPanelsRuntime({
     };
 
     getAppVersion()
-      .then((version) => {
-        currentVersionEl.textContent = version;
+      .then(({ version, commit }) => {
+        currentVersionEl.textContent = `${version} (${commit})`;
       })
       .catch(() => {
         currentVersionEl.textContent = 'Unavailable';

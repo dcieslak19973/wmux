@@ -2563,9 +2563,21 @@ pub async fn close_browser_window(app: AppHandle, label: String) -> Result<(), S
     Ok(())
 }
 
+/// Short git commit the binary was built from (see build.rs).
+pub const GIT_COMMIT: &str = env!("WMUX_GIT_COMMIT");
+
+#[derive(Serialize)]
+pub struct AppVersion {
+    version: String,
+    commit: &'static str,
+}
+
 #[tauri::command]
-pub async fn get_app_version(app: AppHandle) -> Result<String, String> {
-    Ok(app.package_info().version.to_string())
+pub async fn get_app_version(app: AppHandle) -> Result<AppVersion, String> {
+    Ok(AppVersion {
+        version: app.package_info().version.to_string(),
+        commit: GIT_COMMIT,
+    })
 }
 
 #[tauri::command]

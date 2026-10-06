@@ -4660,6 +4660,16 @@ document.getElementById('btn-activity-log')?.addEventListener('click', () => act
 document.getElementById('btn-session-vault')?.addEventListener('click', () => { void toggleSessionVaultPanel(); });
 document.getElementById('btn-settings')?.addEventListener('click', showSettingsPanel);
 
+// Running version + build commit, so it's obvious which build is open.
+invoke('get_app_version')
+  .then(({ version, commit }) => {
+    const el = document.getElementById('app-version');
+    if (!el) return;
+    el.textContent = `wmux ${version} · ${commit}`;
+    el.title = `wmux ${version}, built from commit ${commit}`;
+  })
+  .catch((err) => console.warn('[wmux] get_app_version failed:', err));
+
 const wsNameEl = document.getElementById('ws-name-label');
 if (wsNameEl) wsNameEl.addEventListener('dblclick', startWorkspaceRename);
 document.getElementById('workspace-bar')?.addEventListener('contextmenu', (event) => {

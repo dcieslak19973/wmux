@@ -157,7 +157,10 @@ pub fn run() {
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
-            window.set_title("wmux").unwrap();
+            let version = app.package_info().version.to_string();
+            window
+                .set_title(&format!("wmux {version} ({})", commands::GIT_COMMIT))
+                .unwrap();
             if let Some(icon) = app.handle().default_window_icon().cloned() {
                 let _ = window.set_icon(icon);
             }

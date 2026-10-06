@@ -6,11 +6,26 @@ import {
   inferRecentCwdsFromTerminalTranscript,
   normalizeTerminalTranscript,
   sanitizeCwdForTarget,
+  splitTrailingControlString,
   stripTerminalStartupResetSequences,
 } from '../src/terminal_restore.mjs';
 
 test('normalizeTerminalTranscript applies backspaces for restored plain text', () => {
   assert.equal(normalizeTerminalTranscript('o\bls\n'), 'ls\n');
+});
+
+test('normalizeTerminalTranscript drops kitty graphics and Sixel payloads', () => {
+  assert.equal(normalizeTerminalTranscript('a\x1b_Ga=T,i=1;QUJD\x1b\\b\x1bPq#0~~\x1b\\c\n'), 'abc\n');
+});
+
+test('splitTrailingControlString holds back a graphics payload split across chunks', () => {
+  const [complete, pending] = splitTrailingControlString('text\x1b_Ga=T,i=1,m=1;QUJD');
+  assert.equal(complete, 'text');
+  // Joined with the next chunk the whole sequence is stripped, not its base64 tail.
+  assert.equal(normalizeTerminalTranscript(pending + 'RUZH\x1b\\after\n'), 'after\n');
+  // Terminated sequences (ST or BEL for OSC) are complete.
+  assert.deepEqual(splitTrailingControlString('a\x1b]0;title\x07b'), ['a\x1b]0;title\x07b', '']);
+  assert.deepEqual(splitTrailingControlString('a\x1b_Gi=1;OK\x1b\\'), ['a\x1b_Gi=1;OK\x1b\\', '']);
 });
 
 test('inferCwdFromTerminalTranscript prefers the latest valid WSL prompt', () => {

@@ -3,9 +3,24 @@ import { getTargetKind } from './connection_targets.mjs';
 export function stripTerminalControlSequences(value) {
   return String(value ?? '')
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    // DCS / SOS / PM / APC (Sixel, kitty graphics): ST-terminated payloads.
+    .replace(/\x1b[PX^_][\s\S]*?\x1b\\/g, '')
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\x1b[@-_]/g, '')
     .replace(/\r/g, '');
+}
+
+/**
+ * Split off an OSC/DCS/SOS/PM/APC sequence left unterminated at the end of a
+ * PTY chunk so the caller can prepend it to the next chunk; otherwise its
+ * payload (e.g. base64 image data) would leak into the transcript.
+ * Returns `[complete, pending]`.
+ */
+export function splitTrailingControlString(value) {
+  const text = String(value ?? '');
+  // An introducer with no ST (or BEL) after it: the sequence continues in the next chunk.
+  const start = text.search(/\x1b[\]PX^_](?:(?!\x1b\\|\x07)[\s\S])*$/);
+  return start === -1 ? [text, ''] : [text.slice(0, start), text.slice(start)];
 }
 
 export function normalizeTerminalTranscript(value) {

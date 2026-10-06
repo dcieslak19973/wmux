@@ -73,6 +73,7 @@ After installing:
 - **Notifications** — OSC 9 / 99 / 777 captured into a per-tab notification ring with badge counts.
 - **Session restore** — full layout graph + per-pane state across launches, with debounced save on change and visibility/close fallback.
 - **Updater** — in-app auto-check + manual `Check now` against GitHub Releases.
+- **Version at a glance** — the running version and build commit (e.g. `wmux 0.1.5 · 47301ed4c`) show in the title bar, under the sidebar footer, in Settings → Updates, and in `GET /info` (`version`, `commit`).
 
 ## Default keybindings
 

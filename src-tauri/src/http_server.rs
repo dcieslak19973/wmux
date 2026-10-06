@@ -217,7 +217,11 @@ async fn handle(mut stream: tokio::net::TcpStream, manager: SessionManager, app:
 
     match (method, path) {
         ("GET", "/" | "/info") => {
-            write_response(&mut stream, 200, INFO_JSON).await;
+            let mut info: serde_json::Value =
+                serde_json::from_str(INFO_JSON).expect("INFO_JSON is valid JSON");
+            info["version"] = env!("CARGO_PKG_VERSION").into();
+            info["commit"] = crate::commands::GIT_COMMIT.into();
+            write_response(&mut stream, 200, &info.to_string()).await;
         }
         ("GET", "/blocks") => {
             let params = parse_query(query);

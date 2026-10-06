@@ -135,6 +135,10 @@ jobs:
           New-Item -ItemType Directory -Force (Split-Path $zipPath) | Out-Null
 
           Copy-Item "target/release/wmux.exe" "$portableDir/wmux.exe" -Force
+          # Bundled ConPTY pair (see src-tauri/conpty/README.md); without it
+          # wmux falls back to the inbox ConPTY, which drops kitty/Sixel.
+          Copy-Item "src-tauri/conpty/conpty.dll" "$portableDir/conpty.dll" -Force
+          Copy-Item "src-tauri/conpty/OpenConsole.exe" "$portableDir/OpenConsole.exe" -Force
           Copy-Item "README.md" "$portableDir/README.md" -Force
           if (Test-Path "LICENSE") {
             Copy-Item "LICENSE" "$portableDir/LICENSE" -Force
